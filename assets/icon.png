@@ -1,0 +1,42 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <!-- Fondo circular oscuro con gradiente sutil -->
+  <defs>
+    <radialGradient id="bg" cx="50%" cy="40%" r="65%">
+      <stop offset="0%" stop-color="#1B2027"/>
+      <stop offset="100%" stop-color="#0F1419"/>
+    </radialGradient>
+    <linearGradient id="ringGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#FFB347"/>
+      <stop offset="50%" stop-color="#EF9F27"/>
+      <stop offset="100%" stop-color="#C97F0E"/>
+    </linearGradient>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur in="SourceAlpha" stdDeviation="8"/>
+      <feOffset dx="0" dy="4" result="offsetblur"/>
+      <feComponentTransfer>
+        <feFuncA type="linear" slope="0.3"/>
+      </feComponentTransfer>
+      <feMerge>
+        <feMergeNode/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+  </defs>
+
+  <!-- Anillo naranja exterior -->
+  <circle cx="512" cy="512" r="480" fill="url(#ringGrad)"/>
+
+  <!-- Centro oscuro -->
+  <circle cx="512" cy="512" r="420" fill="url(#bg)"/>
+
+  <!-- Letras "yj" -->
+  <g filter="url(#shadow)" font-family="Georgia, 'Times New Roman', serif" font-weight="600">
+    <!-- y en azul -->
+    <text x="380" y="650" font-size="440" fill="#2563B5" text-anchor="middle">y</text>
+    <!-- j en naranja -->
+    <text x="640" y="650" font-size="440" fill="#EF9F27" text-anchor="middle">j</text>
+  </g>
+
+  <!-- Highlight superior sutil para dar profundidad -->
+  <ellipse cx="512" cy="200" rx="280" ry="80" fill="white" opacity="0.04"/>
+</svg>
