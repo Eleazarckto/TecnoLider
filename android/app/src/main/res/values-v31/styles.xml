@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- ═════════════════════════════════════════════════════════════
+         Android 12+ Splash Screen API
+         ═════════════════════════════════════════════════════════════
+         A partir de Android 12 (SDK 31), el sistema usa un splash
+         screen nativo basado en el icono de la app sobre un color
+         de fondo. NO se puede personalizar libremente como antes —
+         solo se controlan estos atributos:
+
+         · windowSplashScreenBackground         → color del fondo
+         · windowSplashScreenAnimatedIcon       → icono (logo)
+         · windowSplashScreenIconBackgroundColor→ fondo del icono
+         · postSplashScreenTheme                → tema después del splash
+         ═════════════════════════════════════════════════════════════ -->
+    <style name="LaunchTheme" parent="@android:style/Theme.DeviceDefault.DayNight">
+        <item name="android:windowSplashScreenBackground">@color/tecnolider_blue</item>
+        <item name="android:windowSplashScreenAnimatedIcon">@mipmap/ic_launcher</item>
+        <item name="android:windowSplashScreenIconBackgroundColor">@color/tecnolider_blue</item>
+        <item name="android:windowSplashScreenBrandingImage">@drawable/launch_background</item>
+        <item name="android:windowSplashScreenAnimationDuration">300</item>
+        <item name="android:postSplashScreenTheme">@style/NormalTheme</item>
+    </style>
+
+    <style name="NormalTheme" parent="@android:style/Theme.DeviceDefault.DayNight">
+        <item name="android:windowBackground">?android:colorBackground</item>
+    </style>
+</resources>

@@ -1,0 +1,24 @@
+# ════════════════════════════════════════════════════════════════════
+# key.properties — credenciales de firma de release
+# ════════════════════════════════════════════════════════════════════
+# COPIA este archivo a `key.properties` (mismo directorio) y rellena
+# con tus valores reales. NUNCA COMMITEAR el archivo real ni el .jks.
+# ════════════════════════════════════════════════════════════════════
+#
+# Generar el keystore (una sola vez en tu vida — guárdalo como oro):
+#
+#   keytool -genkey -v -keystore tecno_lider_keystore.jks \
+#           -keyalg RSA -keysize 2048 -validity 10000 \
+#           -alias tecnolider
+#
+# Luego coloca el .jks en android/app/ (o donde apunte storeFile).
+#
+# IMPORTANTE: si pierdes el keystore, NO podrás publicar updates
+# a Google Play. Hay que crear una app nueva. Hazle backup en
+# múltiples lugares (USB, cloud cifrado, password manager).
+# ════════════════════════════════════════════════════════════════════
+
+storePassword=CAMBIAR_ESTA_CLAVE
+keyPassword=CAMBIAR_ESTA_CLAVE
+keyAlias=tecnolider
+storeFile=tecno_lider_keystore.jks

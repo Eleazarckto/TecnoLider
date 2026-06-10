@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    ═════════════════════════════════════════════════════════════════
+    launch_background.xml — Splash screen drawable (Android < 12)
+    ═════════════════════════════════════════════════════════════════
+    Layout: fondo sólido azul royal Tecno Líder + logo centrado.
+    Para Android 12+ esto se usa solo como "branding image" (debajo
+    del icono) — ver values-v31/styles.xml.
+    ═════════════════════════════════════════════════════════════════
+-->
+<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- Fondo: azul royal del logo -->
+    <item android:drawable="@color/tecnolider_blue" />
+
+    <!-- Logo centrado -->
+    <!-- NOTA: el src apunta al logo. Si tras correr
+         `dart run flutter_launcher_icons` el logo termina en
+         @mipmap/ic_launcher_foreground úsalo en su lugar. -->
+    <item android:gravity="center">
+        <bitmap
+            android:gravity="center"
+            android:src="@mipmap/ic_launcher" />
+    </item>
+</layer-list>

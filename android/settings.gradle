@@ -1,0 +1,39 @@
+// ════════════════════════════════════════════════════════════════════
+//  settings.gradle — TECNO LÍDER (Android)
+// ════════════════════════════════════════════════════════════════════
+//  Resolución de plugins centralizada. Las versiones aquí se aplican
+//  a todos los módulos del proyecto.
+//
+//  Si alguna vez tienes que actualizar AGP o Kotlin, hazlo aquí
+//  (NO en el build.gradle del módulo) — Flutter espera este patrón
+//  desde Flutter 3.16+.
+// ════════════════════════════════════════════════════════════════════
+
+pluginManagement {
+    def flutterSdkPath = {
+        def properties = new Properties()
+        file("local.properties").withInputStream { properties.load(it) }
+        def flutterSdkPath = properties.getProperty("flutter.sdk")
+        assert flutterSdkPath != null, "flutter.sdk no está definido en local.properties"
+        return flutterSdkPath
+    }()
+
+    includeBuild("$flutterSdkPath/packages/flutter_tools/gradle")
+
+    repositories {
+        google()
+        mavenCentral()
+        gradlePluginPortal()
+    }
+}
+
+plugins {
+    id "dev.flutter.flutter-plugin-loader" version "1.0.0"
+    // AGP 8.1+ es el mínimo para targetSdk 34 estable.
+    // Kotlin 1.9.22 es compatible con AGP 8.1+ y funciona con todas
+    // las dependencias de la app (mailer, pdf, excel, BT, USB).
+    id "com.android.application" version "8.1.4" apply false
+    id "org.jetbrains.kotlin.android" version "1.9.22" apply false
+}
+
+include ":app"

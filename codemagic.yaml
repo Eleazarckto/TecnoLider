@@ -1,0 +1,353 @@
+# ════════════════════════════════════════════════════════════════════
+#  codemagic.yaml — Tecno Líder · Multi-plataforma
+# ════════════════════════════════════════════════════════════════════
+#
+#  Cuatro workflows:
+#
+#   1) ios-unsigned    → solo iOS (.ipa)         · disparo manual
+#   2) apple-all       → APK + IPA + DMG en Mac  · disparo manual
+#   3) windows-build   → solo Windows (.exe)     · disparo manual
+#   4) all-platforms   → workflow informativo (cómo lanzar todo)
+#
+#  CÓMO COMPILAR LOS 4 ARCHIVOS DE UNA VEZ:
+#    En el panel web de Codemagic → "Start new build"
+#    Selecciona AMBOS workflows: apple-all  y  windows-build
+#    Ambos arrancan EN PARALELO en máquinas distintas.
+#    En ~30 min recibes correo con los 4 archivos descargables.
+# ════════════════════════════════════════════════════════════════════
+
+workflows:
+
+  # ──────────────────────────────────────────────────────────
+  # WORKFLOW 1: SOLO iOS (el original que ya tenías funcionando)
+  # ──────────────────────────────────────────────────────────
+  ios-unsigned:
+    name: iOS IPA sin firmar - Tecno Líder
+    max_build_duration: 60
+    instance_type: mac_mini_m2
+    environment:
+      flutter: stable
+      xcode: latest
+      cocoapods: default
+
+    scripts:
+      - name: Diagnóstico del entorno
+        script: |
+          set +e
+          echo "═══════════ DIAGNÓSTICO ═══════════"
+          echo ""
+          echo "── ¿Dónde estoy? ──"
+          pwd
+          echo ""
+          echo "── ¿Qué hay en esta carpeta? ──"
+          ls -la
+          echo ""
+          echo "── ¿pubspec.yaml está aquí? ──"
+          if [ -f pubspec.yaml ]; then
+            echo ">>> SÍ: pubspec.yaml encontrado en la raíz"
+          else
+            echo ">>> NO: pubspec.yaml NO está aquí"
+            echo ">>> Buscándolo en subcarpetas..."
+            find . -maxdepth 2 -name pubspec.yaml -print
+          fi
+          echo ""
+          echo "── ¿Dónde está el binario de Flutter? ──"
+          which flutter
+          echo "FLUTTER_ROOT = $FLUTTER_ROOT"
+          echo ""
+          echo "── PATH ──"
+          echo "$PATH"
+          echo ""
+          echo "── Intentando flutter --version ──"
+          flutter --version
+          echo ""
+          echo "── Intentando flutter doctor ──"
+          flutter doctor -v
+          echo ""
+          echo "═══════════ FIN DIAGNÓSTICO ═══════════"
+          exit 0
+
+      - name: Preparar Flutter
+        script: |
+          export PATH="$HOME/programs/flutter/bin:$PATH"
+          flutter --version
+          flutter config --no-analytics
+
+      - name: Generar carpetas de plataforma iOS
+        script: |
+          export PATH="$HOME/programs/flutter/bin:$PATH"
+          flutter create . --platforms=ios --org com.tecnolider
+          ls -la ios/
+
+      - name: Desactivar Swift Package Manager
+        script: |
+          export PATH="$HOME/programs/flutter/bin:$PATH"
+          flutter config --no-enable-swift-package-manager
+          flutter config | grep -i swift || true
+
+      - name: Instalar dependencias de Flutter
+        script: |
+          export PATH="$HOME/programs/flutter/bin:$PATH"
+          flutter pub get
+
+      - name: Instalar CocoaPods
+        script: |
+          cd ios
+          pod install --repo-update
+          cd ..
+
+      - name: Compilar iOS sin firmar
+        script: |
+          export PATH="$HOME/programs/flutter/bin:$PATH"
+          flutter build ios --release --no-codesign
+
+      - name: Empaquetar como IPA
+        script: |
+          cd build/ios/iphoneos
+          mkdir -p Payload
+          cp -r Runner.app Payload/
+          zip -r tecno_lider_unsigned.ipa Payload
+          mv tecno_lider_unsigned.ipa $CM_BUILD_DIR/
+
+      - name: Mostrar tamaño del IPA generado
+        script: |
+          ls -lh $CM_BUILD_DIR/tecno_lider_unsigned.ipa
+
+    artifacts:
+      - $CM_BUILD_DIR/tecno_lider_unsigned.ipa
+
+    publishing:
+      email:
+        recipients:
+          - eleazarceccato@gmail.com
+        notify:
+          success: true
+          failure: true
+
+  # ──────────────────────────────────────────────────────────
+  # WORKFLOW 2: APPLE COMPLETO (APK + IPA + DMG en una sola Mac)
+  # ──────────────────────────────────────────────────────────
+  # Una Mac puede compilar Android (APK), iOS (IPA) y macOS (DMG).
+  # Es eficiente: una sola máquina, una sola corrida.
+  # ──────────────────────────────────────────────────────────
+  apple-all:
+    name: Apple completo - APK + IPA + DMG
+    max_build_duration: 90
+    instance_type: mac_mini_m2
+    environment:
+      flutter: stable
+      xcode: latest
+      cocoapods: default
+
+    scripts:
+      - name: Diagnóstico del entorno
+        script: |
+          set +e
+          echo "═══════════ DIAGNÓSTICO ═══════════"
+          pwd
+          ls -la
+          which flutter
+          flutter --version
+          echo "═══════════ FIN DIAGNÓSTICO ═══════════"
+          exit 0
+
+      - name: Preparar Flutter
+        script: |
+          export PATH="$HOME/programs/flutter/bin:$PATH"
+          flutter --version
+          flutter config --no-analytics
+
+      - name: Generar carpetas de plataforma (Android, iOS, macOS)
+        script: |
+          export PATH="$HOME/programs/flutter/bin:$PATH"
+          flutter create . --platforms=android,ios,macos --org com.tecnolider
+          ls -la
+
+      - name: Desactivar Swift Package Manager
+        script: |
+          export PATH="$HOME/programs/flutter/bin:$PATH"
+          flutter config --no-enable-swift-package-manager
+
+      - name: Instalar dependencias
+        script: |
+          export PATH="$HOME/programs/flutter/bin:$PATH"
+          flutter pub get
+
+      - name: Generar iconos
+        script: |
+          export PATH="$HOME/programs/flutter/bin:$PATH"
+          dart run flutter_launcher_icons || echo "Iconos: continuando"
+
+      - name: Generar splash
+        script: |
+          export PATH="$HOME/programs/flutter/bin:$PATH"
+          dart run flutter_native_splash:create || echo "Splash: continuando"
+
+      # ─── ANDROID ────────────────────────────────────────
+      - name: Compilar APK Android
+        script: |
+          export PATH="$HOME/programs/flutter/bin:$PATH"
+          flutter build apk --release --no-tree-shake-icons
+          cp build/app/outputs/flutter-apk/app-release.apk \
+             $CM_BUILD_DIR/tecno_lider.apk
+          ls -lh $CM_BUILD_DIR/tecno_lider.apk
+
+      # ─── iOS ────────────────────────────────────────────
+      - name: Instalar CocoaPods (iOS)
+        script: |
+          cd ios
+          pod install --repo-update
+          cd ..
+
+      - name: Compilar iOS sin firmar
+        script: |
+          export PATH="$HOME/programs/flutter/bin:$PATH"
+          flutter build ios --release --no-codesign --no-tree-shake-icons
+
+      - name: Empaquetar como IPA
+        script: |
+          cd build/ios/iphoneos
+          mkdir -p Payload
+          cp -r Runner.app Payload/
+          zip -r tecno_lider.ipa Payload
+          mv tecno_lider.ipa $CM_BUILD_DIR/
+          ls -lh $CM_BUILD_DIR/tecno_lider.ipa
+
+      # ─── macOS ──────────────────────────────────────────
+      - name: Compilar macOS
+        script: |
+          export PATH="$HOME/programs/flutter/bin:$PATH"
+          flutter build macos --release --no-tree-shake-icons
+
+      - name: Empaquetar DMG y ZIP de macOS
+        script: |
+          cd build/macos/Build/Products/Release
+          # ZIP del .app (más compatible que DMG)
+          zip -r tecno_lider-mac.zip tecno_lider.app
+          mv tecno_lider-mac.zip $CM_BUILD_DIR/
+          # DMG nativo de macOS
+          hdiutil create -volname "TecnoLider" \
+              -srcfolder tecno_lider.app \
+              -ov -format UDZO \
+              tecno_lider.dmg && \
+              mv tecno_lider.dmg $CM_BUILD_DIR/ || \
+              echo "DMG falló — el ZIP es el artifact principal"
+          ls -lh $CM_BUILD_DIR/
+
+    artifacts:
+      - $CM_BUILD_DIR/tecno_lider.apk
+      - $CM_BUILD_DIR/tecno_lider.ipa
+      - $CM_BUILD_DIR/tecno_lider.dmg
+      - $CM_BUILD_DIR/tecno_lider-mac.zip
+
+    publishing:
+      email:
+        recipients:
+          - eleazarceccato@gmail.com
+        notify:
+          success: true
+          failure: true
+
+  # ──────────────────────────────────────────────────────────
+  # WORKFLOW 3: WINDOWS (.exe en una máquina Windows)
+  # ──────────────────────────────────────────────────────────
+  # Windows SOLO se puede compilar en una máquina Windows; por eso
+  # este workflow es separado del de Apple. Pero corre en paralelo
+  # cuando lanzas ambos a la vez.
+  # ──────────────────────────────────────────────────────────
+  windows-build:
+    name: Windows EXE - Tecno Líder
+    max_build_duration: 60
+    instance_type: windows_x2
+    environment:
+      flutter: stable
+
+    scripts:
+      - name: Diagnóstico Windows
+        script: |
+          flutter --version
+          flutter doctor -v
+
+      - name: Habilitar Windows desktop
+        script: |
+          flutter config --enable-windows-desktop
+
+      - name: Generar carpeta windows
+        script: |
+          flutter create . --platforms=windows --org com.tecnolider
+
+      - name: Instalar dependencias
+        script: |
+          flutter pub get
+
+      - name: Generar iconos Windows (.ico)
+        script: |
+          dart run flutter_launcher_icons
+
+      - name: Compilar EXE
+        script: |
+          flutter build windows --release
+
+      - name: Empaquetar ZIP para distribuir al cliente
+        script: |
+          # La carpeta Release/ contiene exe + DLLs + data/ que son
+          # necesarios. La empaquetamos completa para distribución.
+          Compress-Archive -Path "build/windows/x64/runner/Release/*" `
+                          -DestinationPath "$env:CM_BUILD_DIR/TecnoLider-Windows.zip" `
+                          -Force
+          Copy-Item "build/windows/x64/runner/Release/tecno_lider.exe" `
+                    "$env:CM_BUILD_DIR/tecno_lider.exe"
+          Get-Item "$env:CM_BUILD_DIR/TecnoLider-Windows.zip" | Format-List
+
+    artifacts:
+      - $CM_BUILD_DIR/TecnoLider-Windows.zip
+      - $CM_BUILD_DIR/tecno_lider.exe
+
+    publishing:
+      email:
+        recipients:
+          - eleazarceccato@gmail.com
+        notify:
+          success: true
+          failure: true
+
+  # ──────────────────────────────────────────────────────────
+  # WORKFLOW 4: Recordatorio (no compila nada útil, solo info)
+  # ──────────────────────────────────────────────────────────
+  all-platforms:
+    name: "Instrucciones - compilar TODAS las plataformas"
+    instance_type: linux_x2
+    environment:
+      flutter: stable
+
+    scripts:
+      - name: Instrucciones
+        script: |
+          echo "═══════════════════════════════════════════════════════════"
+          echo "  CÓMO COMPILAR TODOS LOS INSTALADORES DE UNA VEZ"
+          echo "═══════════════════════════════════════════════════════════"
+          echo ""
+          echo "En el panel web de Codemagic:"
+          echo ""
+          echo "  1. Click en 'Start new build' (botón verde arriba)"
+          echo "  2. En el selector de workflows, marca AMBOS:"
+          echo "       [x] apple-all      (Mac M2: APK + IPA + DMG)"
+          echo "       [x] windows-build  (Windows: EXE)"
+          echo "       [ ] all-platforms  (no marcar, es solo info)"
+          echo "       [ ] ios-unsigned   (no marcar, ya está en apple-all)"
+          echo ""
+          echo "  3. Click 'Start new build'"
+          echo ""
+          echo "Resultado: ambos workflows arrancan EN PARALELO."
+          echo "  · apple-all     dura ~25 min en una Mac M2"
+          echo "  · windows-build dura ~15 min en una máquina Windows"
+          echo ""
+          echo "Al terminar, recibes correo con TODOS los archivos:"
+          echo "  · tecno_lider.apk                 → Android"
+          echo "  · tecno_lider.ipa                 → iOS"
+          echo "  · tecno_lider.dmg                 → macOS"
+          echo "  · tecno_lider-mac.zip             → macOS (alternativa)"
+          echo "  · TecnoLider-Windows.zip          → Windows completo"
+          echo "  · tecno_lider.exe                 → Windows (solo exe)"
+          echo ""
+          echo "═══════════════════════════════════════════════════════════"

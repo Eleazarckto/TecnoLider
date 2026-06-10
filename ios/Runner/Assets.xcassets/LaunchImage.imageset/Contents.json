@@ -1,0 +1,26 @@
+{
+  "images" : [
+    {
+      "comment" : "Logo Tecno Líder — splash screen iOS @1x (168x185 pt)",
+      "idiom" : "universal",
+      "filename" : "LaunchImage.png",
+      "scale" : "1x"
+    },
+    {
+      "comment" : "Logo Tecno Líder — splash screen iOS @2x (336x370 pt)",
+      "idiom" : "universal",
+      "filename" : "LaunchImage@2x.png",
+      "scale" : "2x"
+    },
+    {
+      "comment" : "Logo Tecno Líder — splash screen iOS @3x (504x555 pt)",
+      "idiom" : "universal",
+      "filename" : "LaunchImage@3x.png",
+      "scale" : "3x"
+    }
+  ],
+  "info" : {
+    "version" : 1,
+    "author" : "xcode"
+  }
+}

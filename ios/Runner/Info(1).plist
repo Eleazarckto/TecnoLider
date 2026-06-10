@@ -1,0 +1,187 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- ═════════════════════════════════════════════════════════════
+	     INFO.PLIST — TECNO LÍDER (iOS)
+	     ═════════════════════════════════════════════════════════════
+	     Permisos y configuración para todas las funcionalidades del
+	     main.dart. Todas las descripciones de uso (UsageDescription)
+	     están en español porque iOS las muestra textualmente al
+	     usuario en el primer prompt de permiso.
+	     ═════════════════════════════════════════════════════════════ -->
+
+	<key>CFBundleDevelopmentRegion</key>
+	<string>$(DEVELOPMENT_LANGUAGE)</string>
+	<key>CFBundleDisplayName</key>
+	<string>Tecno Líder</string>
+	<key>CFBundleExecutable</key>
+	<string>$(EXECUTABLE_NAME)</string>
+	<key>CFBundleIdentifier</key>
+	<string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>tecno_lider</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>$(FLUTTER_BUILD_NAME)</string>
+	<key>CFBundleSignature</key>
+	<string>????</string>
+	<key>CFBundleVersion</key>
+	<string>$(FLUTTER_BUILD_NUMBER)</string>
+	<key>LSRequiresIPhoneOS</key>
+	<true/>
+
+	<!-- ── Idioma de interfaz ─────────────────────────────────── -->
+	<key>CFBundleLocalizations</key>
+	<array>
+		<string>es</string>
+		<string>en</string>
+	</array>
+
+	<!-- ── Orientaciones soportadas ───────────────────────────── -->
+	<key>UISupportedInterfaceOrientations</key>
+	<array>
+		<string>UIInterfaceOrientationPortrait</string>
+		<string>UIInterfaceOrientationLandscapeLeft</string>
+		<string>UIInterfaceOrientationLandscapeRight</string>
+	</array>
+	<key>UISupportedInterfaceOrientations~ipad</key>
+	<array>
+		<string>UIInterfaceOrientationPortrait</string>
+		<string>UIInterfaceOrientationPortraitUpsideDown</string>
+		<string>UIInterfaceOrientationLandscapeLeft</string>
+		<string>UIInterfaceOrientationLandscapeRight</string>
+	</array>
+
+	<!-- ═══════════════════════════════════════════════════════════
+	     PERMISOS DE PRIVACIDAD (iOS muestra estos textos al usuario)
+	     ═══════════════════════════════════════════════════════════ -->
+
+	<!-- Cámara: image_picker + mobile_scanner (QR/IMEI) -->
+	<key>NSCameraUsageDescription</key>
+	<string>Tecno Líder necesita acceder a la cámara para escanear códigos QR, IMEI de equipos y tomar fotos de productos o documentos.</string>
+
+	<!-- Micrófono: record (mensajes de voz internos del chat) -->
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Tecno Líder necesita acceder al micrófono para grabar mensajes de voz en el chat interno entre vendedores.</string>
+
+	<!-- Galería de fotos (lectura) -->
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>Tecno Líder necesita acceder a tus fotos para adjuntar imágenes a productos, servicios técnicos y reportes.</string>
+
+	<!-- Galería de fotos (escritura) — guardar PDFs/comprobantes -->
+	<key>NSPhotoLibraryAddUsageDescription</key>
+	<string>Tecno Líder guarda comprobantes, facturas y reportes generados en tu galería para que puedas consultarlos sin conexión.</string>
+
+	<!-- Bluetooth: flutter_blue_plus (impresora térmica) -->
+	<key>NSBluetoothAlwaysUsageDescription</key>
+	<string>Tecno Líder se conecta a impresoras térmicas Bluetooth para imprimir tickets, facturas y comprobantes directamente desde el dispositivo.</string>
+	<key>NSBluetoothPeripheralUsageDescription</key>
+	<string>Tecno Líder se conecta a impresoras térmicas Bluetooth para imprimir tickets y facturas.</string>
+
+	<!-- Ubicación: requerida por iOS para escaneo BLE -->
+	<key>NSLocationWhenInUseUsageDescription</key>
+	<string>iOS requiere permisos de ubicación para que Tecno Líder pueda detectar impresoras Bluetooth cercanas. La app NO almacena ni transmite tu ubicación.</string>
+
+	<!-- Contactos (opcional, no usado actualmente — descomentar si se agrega): -->
+	<!--
+	<key>NSContactsUsageDescription</key>
+	<string>Tecno Líder accede a tus contactos para autocompletar datos de clientes.</string>
+	-->
+
+	<!-- ═══════════════════════════════════════════════════════════
+	     CONECTIVIDAD DE RED
+	     ═══════════════════════════════════════════════════════════
+	     La app se comunica con un backend HTTP (sin TLS) en LAN.
+	     iOS por defecto bloquea HTTP plano desde iOS 9. Permitimos
+	     "Arbitrary Loads" SOLO mientras el backend no migre a HTTPS.
+	     Cuando esté en HTTPS, eliminar `NSAllowsArbitraryLoads` y
+	     dejar solo las excepciones específicas.
+	     ═══════════════════════════════════════════════════════════ -->
+	<key>NSAppTransportSecurity</key>
+	<dict>
+		<key>NSAllowsArbitraryLoads</key>
+		<true/>
+		<key>NSAllowsArbitraryLoadsInWebContent</key>
+		<true/>
+		<!-- Cuando migres a HTTPS, reemplazar lo anterior por excepciones
+		     puntuales para los dominios específicos:
+		<key>NSExceptionDomains</key>
+		<dict>
+			<key>tecnolider-app.local</key>
+			<dict>
+				<key>NSIncludesSubdomains</key><true/>
+				<key>NSExceptionAllowsInsecureHTTPLoads</key><true/>
+			</dict>
+		</dict>
+		-->
+	</dict>
+
+	<!-- ═══════════════════════════════════════════════════════════
+	     SCHEMES QUE LA APP PUEDE ABRIR (url_launcher)
+	     ═══════════════════════════════════════════════════════════
+	     iOS 9+ exige declarar qué schemes externos usa la app.
+	     Sin esto, `canLaunchUrl` siempre devuelve false.
+	     ═══════════════════════════════════════════════════════════ -->
+	<key>LSApplicationQueriesSchemes</key>
+	<array>
+		<string>https</string>
+		<string>http</string>
+		<string>tel</string>
+		<string>mailto</string>
+		<string>sms</string>
+		<string>whatsapp</string>
+	</array>
+
+	<!-- ═══════════════════════════════════════════════════════════
+	     CAPACIDADES VARIAS
+	     ═══════════════════════════════════════════════════════════ -->
+
+	<!-- Encrypted comms: declara que NO usas cifrado custom (solo TLS
+	     estándar). Acelera la revisión en App Store al evitar el
+	     cuestionario de Export Compliance. -->
+	<key>ITSAppUsesNonExemptEncryption</key>
+	<false/>
+
+	<!-- Soporte de pantalla completa edge-to-edge (notch en iPhone X+) -->
+	<key>UIViewControllerBasedStatusBarAppearance</key>
+	<false/>
+	<key>UIStatusBarHidden</key>
+	<false/>
+
+	<!-- Modos de fondo: necesarios para que las notificaciones
+	     locales y la conexión Bluetooth a la impresora puedan
+	     persistir cuando la app está minimizada -->
+	<key>UIBackgroundModes</key>
+	<array>
+		<string>bluetooth-central</string>
+		<string>fetch</string>
+		<string>processing</string>
+		<string>remote-notification</string>
+	</array>
+
+	<!-- Indica que la app soporta gestos basados en hardware
+	     (necesario para Flutter en iPhone con Face ID) -->
+	<key>CADisableMinimumFrameDurationOnPhone</key>
+	<true/>
+
+	<!-- File sharing: permite que el usuario acceda a los PDFs
+	     generados desde la app Files de iOS -->
+	<key>UIFileSharingEnabled</key>
+	<true/>
+	<key>LSSupportsOpeningDocumentsInPlace</key>
+	<true/>
+
+	<!-- ═══════════════════════════════════════════════════════════
+	     STORYBOARDS / LAUNCH SCREEN
+	     ═══════════════════════════════════════════════════════════ -->
+	<key>UILaunchStoryboardName</key>
+	<string>LaunchScreen</string>
+	<key>UIMainStoryboardFile</key>
+	<string>Main</string>
+
+</dict>
+</plist>

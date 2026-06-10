@@ -1,0 +1,187 @@
+// ════════════════════════════════════════════════════════════════════
+//  build.gradle — TECNO LÍDER (módulo :app)
+// ════════════════════════════════════════════════════════════════════
+//  Configura el build de Android con:
+//    · Firma de release vía key.properties (NO commitear el JKS)
+//    · Soporte multidex (la app usa muchas dependencias)
+//    · MinSdk 21 (requerido por flutter_blue_plus / mobile_scanner)
+//    · TargetSdk 34 (Play Store requiere 34+ desde agosto 2024)
+//    · ProGuard / R8 deshabilitado por defecto para evitar romper
+//      reflection en pdf, excel y mailer (si lo activas, agregar
+//      reglas en proguard-rules.pro).
+// ════════════════════════════════════════════════════════════════════
+
+plugins {
+    id "com.android.application"
+    id "kotlin-android"
+    // El plugin de Flutter Gradle debe aplicarse después de los plugins
+    // de Android y Kotlin.
+    id "dev.flutter.flutter-gradle-plugin"
+}
+
+// ── Carga de credenciales de firma desde android/key.properties ─────
+// Este archivo NO se commitea (debe estar en .gitignore). Estructura:
+//
+//   storePassword=...
+//   keyPassword=...
+//   keyAlias=tecnolider
+//   storeFile=tecno_lider_keystore.jks
+//
+// Si no existe, los builds de release usarán la firma debug (válido
+// solo para pruebas internas, NO para Play Store).
+def keystoreProperties = new Properties()
+def keystorePropertiesFile = rootProject.file('key.properties')
+if (keystorePropertiesFile.exists()) {
+    keystoreProperties.load(new FileInputStream(keystorePropertiesFile))
+}
+
+android {
+    namespace = "com.tecnolider.tecno_lider"
+    compileSdk = 34
+    ndkVersion = flutter.ndkVersion
+
+    compileOptions {
+        // Java 11 + desugaring para usar APIs modernas en API < 26
+        // (necesario para flutter_local_notifications y java.time)
+        coreLibraryDesugaringEnabled = true
+        sourceCompatibility = JavaVersion.VERSION_11
+        targetCompatibility = JavaVersion.VERSION_11
+    }
+
+    kotlinOptions {
+        jvmTarget = JavaVersion.VERSION_11.toString()
+    }
+
+    sourceSets {
+        main.java.srcDirs += 'src/main/kotlin'
+    }
+
+    defaultConfig {
+        // ID único de la app en la tienda. Si lo cambias después de
+        // publicar, Play Store lo trata como una app NUEVA. Por eso
+        // está fijado en com.tecnolider.tecno_lider.
+        applicationId = "com.tecnolider.tecno_lider"
+
+        // minSdk 21: requerido por flutter_blue_plus, mobile_scanner
+        // y webview_flutter.
+        minSdkVersion = flutter.minSdkVersion
+        targetSdk = 34
+        versionCode = flutter.versionCode
+        versionName = flutter.versionName
+
+        // Multidex: la app supera los 64K métodos por la cantidad
+        // de dependencias (pdf, excel, BT, USB, mailer...).
+        multiDexEnabled = true
+
+        // Soporte de idiomas (reduce tamaño del APK eliminando
+        // recursos de otros idiomas que no usamos).
+        resourceConfigurations += ['es', 'en']
+    }
+
+    // ── Configuración de firmas ─────────────────────────────────────
+    signingConfigs {
+        release {
+            if (keystoreProperties['storeFile'] != null) {
+                keyAlias keystoreProperties['keyAlias']
+                keyPassword keystoreProperties['keyPassword']
+                storeFile file(keystoreProperties['storeFile'])
+                storePassword keystoreProperties['storePassword']
+            }
+        }
+    }
+
+    buildTypes {
+        debug {
+            // Builds de desarrollo: sin minify, debugeable, sufijo
+            // ".debug" para poder tener debug + release instalados
+            // al mismo tiempo en el dispositivo.
+            applicationIdSuffix ".debug"
+            versionNameSuffix "-debug"
+            debuggable true
+            minifyEnabled false
+            shrinkResources false
+        }
+
+        release {
+            // Si hay key.properties, usar firma de release.
+            // Si no, caer a debug (ÚTIL solo para `flutter run --release`
+            // en pruebas; nunca subir a Play Store sin firmar de verdad).
+            signingConfig keystoreProperties['storeFile'] != null
+                    ? signingConfigs.release
+                    : signingConfigs.debug
+
+            // R8/ProGuard: deshabilitado por defecto para evitar
+            // romper reflection en pdf/excel/mailer. Si quieres
+            // activarlo después, descomentar lo siguiente y agregar
+            // reglas en proguard-rules.pro:
+            //
+            //   minifyEnabled true
+            //   shrinkResources true
+            //   proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'),
+            //                 'proguard-rules.pro'
+            minifyEnabled false
+            shrinkResources false
+
+            // Optimizaciones de empaquetado seguras
+            zipAlignEnabled true
+            debuggable false
+        }
+    }
+
+    // ── Reducción de tamaño del APK ─────────────────────────────────
+    // Splitea el APK por arquitectura. Si subes a Play Store, usa
+    // mejor `flutter build appbundle` (AAB) que ya hace esto solo.
+    splits {
+        abi {
+            enable = false   // mantener false si usas AAB (recomendado)
+            reset()
+            include 'armeabi-v7a', 'arm64-v8a', 'x86_64'
+            universalApk false
+        }
+    }
+
+    // Evita errores tipo "Duplicate class kotlinx/..." que aparecen
+    // con la combinación pdf + excel + mailer en algunos casos.
+    packagingOptions {
+        resources {
+            excludes += [
+                'META-INF/AL2.0',
+                'META-INF/LGPL2.1',
+                'META-INF/DEPENDENCIES',
+                'META-INF/LICENSE*',
+                'META-INF/NOTICE*',
+                'META-INF/*.kotlin_module',
+            ]
+        }
+    }
+
+    // Lint: no rompas el build por warnings (la app usa muchas
+    // libs y algunas tienen warnings menores que no son críticos).
+    lintOptions {
+        disable 'InvalidPackage'
+        checkReleaseBuilds false
+        abortOnError false
+    }
+}
+
+flutter {
+    source = "../.."
+}
+
+dependencies {
+    // Necesario para core library desugaring (Java 8+ APIs en API < 26)
+    coreLibraryDesugaring 'com.android.tools.desugar_jdk_libs:desugar_jdk_libs:2.0.4'
+
+    // Kotlin stdlib (lo arrastra el plugin pero conviene fijar versión)
+    implementation "org.jetbrains.kotlin:kotlin-stdlib-jdk8:1.9.22"
+
+    // Multidex runtime (compatible con minSdk 21+)
+    implementation 'androidx.multidex:multidex:2.0.1'
+
+    // Lifecycle: requerido por flutter_local_notifications en backgrounds
+    implementation 'androidx.lifecycle:lifecycle-runtime-ktx:2.7.0'
+
+    // Window Manager: requerido por algunas versiones de webview_flutter
+    implementation 'androidx.window:window:1.2.0'
+    implementation 'androidx.window:window-java:1.2.0'
+}

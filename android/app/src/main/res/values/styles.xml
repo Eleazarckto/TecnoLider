@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- ═════════════════════════════════════════════════════════════
+         LaunchTheme — splash screen mostrado durante el arranque
+         de la app (antes de que Flutter inicialice el primer frame).
+         Aplica para Android < 12. Para Android 12+ ver values-v31/.
+         ═════════════════════════════════════════════════════════════ -->
+    <style name="LaunchTheme" parent="@android:style/Theme.Light.NoTitleBar">
+        <item name="android:windowBackground">@drawable/launch_background</item>
+    </style>
+
+    <!-- NormalTheme — tema usado mientras Flutter renderiza, después
+         del splash. Fondo neutro para evitar parpadeo entre el splash
+         y el primer frame de Dart. -->
+    <style name="NormalTheme" parent="@android:style/Theme.Light.NoTitleBar">
+        <item name="android:windowBackground">?android:colorBackground</item>
+    </style>
+</resources>
