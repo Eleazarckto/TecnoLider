@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- App Sandbox obligatorio para Mac App Store -->
+	<key>com.apple.security.app-sandbox</key>
+	<true/>
+
+	<!-- Red: cliente (llamadas HTTP/HTTPS al backend) -->
+	<key>com.apple.security.network.client</key>
+	<true/>
+
+	<!-- Red: servidor (mDNS para impresoras en LAN) -->
+	<key>com.apple.security.network.server</key>
+	<true/>
+
+	<!-- Cámara: image_picker + mobile_scanner -->
+	<key>com.apple.security.device.camera</key>
+	<true/>
+
+	<!-- Bluetooth: flutter_blue_plus para impresoras térmicas -->
+	<key>com.apple.security.device.bluetooth</key>
+	<true/>
+
+	<!-- USB: para impresoras conectadas por USB (esc_pos_utils_plus) -->
+	<key>com.apple.security.device.usb</key>
+	<true/>
+
+	<!-- Audio: para reproducir sonidos de notificación (audioplayers) -->
+	<key>com.apple.security.device.audio-input</key>
+	<false/>
+
+	<!-- Archivos: el usuario selecciona qué archivos abrir/guardar
+	     (file_picker, share_plus, open_filex) -->
+	<key>com.apple.security.files.user-selected.read-write</key>
+	<true/>
+
+	<!-- Carpeta Descargas (para guardar reportes) -->
+	<key>com.apple.security.files.downloads.read-write</key>
+	<true/>
+</dict>
+</plist>

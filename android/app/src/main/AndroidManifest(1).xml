@@ -1,0 +1,155 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!-- =====================================================================
+         PERMISOS DE LA APLICACION TECNO LIDER
+         =====================================================================
+         Esta lista cubre todas las funcionalidades del main.dart:
+           * Internet (HTTP al backend, Cashea, BDV, SMTP)
+           * Camara (image_picker, mobile_scanner para QR/IMEI)
+           * Microfono (record para mensajes de voz internos)
+           * Almacenamiento (path_provider, file_picker, PDFs)
+           * Bluetooth (flutter_blue_plus para impresoras termicas)
+           * USB (usb_serial para impresoras USB)
+           * Notificaciones (flutter_local_notifications)
+           * Ubicacion (requerida por flutter_blue_plus en Android < 12)
+         ===================================================================== -->
+
+    <!-- Internet / red -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+
+    <!-- Camara -->
+    <uses-permission android:name="android.permission.CAMERA" />
+    <uses-feature android:name="android.hardware.camera" android:required="false" />
+    <uses-feature android:name="android.hardware.camera.autofocus" android:required="false" />
+
+    <!-- Microfono (mensajes de voz internos) -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
+
+    <!-- Almacenamiento (PDFs, Excel, fotos de servicio) -->
+    <!-- < Android 13: lectura/escritura general -->
+    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE"
+        android:maxSdkVersion="32" />
+    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE"
+        android:maxSdkVersion="29" />
+    <!-- Android 13+ (granular media) -->
+    <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
+    <uses-permission android:name="android.permission.READ_MEDIA_VIDEO" />
+    <uses-permission android:name="android.permission.READ_MEDIA_AUDIO" />
+
+    <!-- Bluetooth (impresora termica BT) -->
+    <!-- Permisos legacy (Android < 12) -->
+    <uses-permission android:name="android.permission.BLUETOOTH"
+        android:maxSdkVersion="30" />
+    <uses-permission android:name="android.permission.BLUETOOTH_ADMIN"
+        android:maxSdkVersion="30" />
+    <!-- Android 12+ (runtime) -->
+    <uses-permission android:name="android.permission.BLUETOOTH_SCAN"
+        android:usesPermissionFlags="neverForLocation" />
+    <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
+    <uses-permission android:name="android.permission.BLUETOOTH_ADVERTISE" />
+
+    <!-- Ubicacion (requerida por escaneo BLE en Android 6-11) -->
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+
+    <!-- USB (impresora USB serial) -->
+    <uses-feature android:name="android.hardware.usb.host" android:required="false" />
+
+    <!-- Notificaciones -->
+    <!-- Android 13+ (runtime) -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- Heads-up + lock screen banners (full-screen intent) -->
+    <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT" />
+    <!-- Alertas exactas (recordatorios programados) -->
+    <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
+    <uses-permission android:name="android.permission.USE_EXACT_ALARM" />
+    <!-- Vibracion + sonido de notificaciones -->
+    <uses-permission android:name="android.permission.VIBRATE" />
+    <!-- Mantener la app despierta para recibir polling de mensajes -->
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+
+    <!-- Apertura de archivos externos (open_file) y url_launcher -->
+    <queries>
+        <intent>
+            <action android:name="android.intent.action.VIEW" />
+            <data android:mimeType="*/*" />
+        </intent>
+        <!-- url_launcher: abrir links http(s), tel:, mailto: -->
+        <intent>
+            <action android:name="android.intent.action.VIEW" />
+            <data android:scheme="https" />
+        </intent>
+        <intent>
+            <action android:name="android.intent.action.VIEW" />
+            <data android:scheme="http" />
+        </intent>
+        <intent>
+            <action android:name="android.intent.action.DIAL" />
+            <data android:scheme="tel" />
+        </intent>
+        <intent>
+            <action android:name="android.intent.action.SENDTO" />
+            <data android:scheme="mailto" />
+        </intent>
+    </queries>
+
+    <application
+        android:label="Tecno Lider"
+        android:name="${applicationName}"
+        android:icon="@mipmap/ic_launcher"
+        android:requestLegacyExternalStorage="true"
+        android:usesCleartextTraffic="true">
+        <!--
+          android:usesCleartextTraffic="true"
+          ─────────────────────────────────────
+          Necesario porque la app habla con el backend via HTTP
+          (no HTTPS) en LAN. Si en produccion el backend pasa a
+          HTTPS, cambiar a "false".
+        -->
+
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:launchMode="singleTop"
+            android:taskAffinity=""
+            android:theme="@style/LaunchTheme"
+            android:configChanges="orientation|keyboardHidden|keyboard|screenSize|smallestScreenSize|locale|layoutDirection|fontScale|screenLayout|density|uiMode"
+            android:hardwareAccelerated="true"
+            android:windowSoftInputMode="adjustResize">
+
+            <meta-data
+                android:name="io.flutter.embedding.android.NormalTheme"
+                android:resource="@style/NormalTheme" />
+
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+
+            <!-- USB: detección automática de impresoras térmicas
+                 cuando se conectan al dispositivo Android.
+                 El filtro de VID/PID está en res/xml/device_filter.xml. -->
+            <intent-filter>
+                <action android:name="android.hardware.usb.action.USB_DEVICE_ATTACHED" />
+            </intent-filter>
+            <meta-data
+                android:name="android.hardware.usb.action.USB_DEVICE_ATTACHED"
+                android:resource="@xml/device_filter" />
+        </activity>
+
+        <meta-data
+            android:name="flutterEmbedding"
+            android:value="2" />
+
+        <!-- Filtro USB para impresoras termicas
+             usb_serial: declara que la app responde a la conexion
+             de dispositivos USB (impresoras de etiquetas/tickets).
+             Crea res/xml/device_filter.xml con los VID/PID de las
+             impresoras que vas a soportar. -->
+
+    </application>
+</manifest>

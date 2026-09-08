@@ -1,0 +1,10 @@
+// Application-level settings for the Runner target.
+
+// El nombre visible al usuario en macOS (Dock, About, Spotlight)
+PRODUCT_NAME = Tecno Líder
+
+// Bundle identifier — debe coincidir con App Store Connect
+PRODUCT_BUNDLE_IDENTIFIER = com.tecnolider.tecnoLider
+
+// Copyright mostrado en información de la app
+PRODUCT_COPYRIGHT = Copyright © 2026 Sistemas Ceccato C.A. All rights reserved.

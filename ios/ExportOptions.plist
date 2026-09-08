@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- Método: app-store para subir a TestFlight / App Store -->
+    <key>method</key>
+    <string>app-store</string>
+
+    <!-- Team ID de tu cuenta Apple Developer -->
+    <key>teamID</key>
+    <string>Y3D33YTV52</string>
+
+    <!-- Firma automática con tu Distribution Certificate -->
+    <key>signingStyle</key>
+    <string>automatic</string>
+
+    <!-- Subir símbolos para crash reporting de App Store Connect -->
+    <key>uploadSymbols</key>
+    <true/>
+
+    <!-- Stripping para reducir tamaño -->
+    <key>stripSwiftSymbols</key>
+    <true/>
+
+    <!-- Bitcode NO se requiere desde Xcode 14 -->
+    <key>uploadBitcode</key>
+    <false/>
+    <key>compileBitcode</key>
+    <false/>
+
+    <key>destination</key>
+    <string>export</string>
+</dict>
+</plist>

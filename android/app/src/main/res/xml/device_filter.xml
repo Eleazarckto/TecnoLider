@@ -1,0 +1,106 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+═════════════════════════════════════════════════════════════════════
+  device_filter.xml — TECNO LÍDER
+═════════════════════════════════════════════════════════════════════
+  Filtro USB para impresoras térmicas POS más comunes en el mercado
+  (incluyendo modelos populares en Venezuela). Cuando el usuario
+  conecta una de estas impresoras al dispositivo Android vía USB
+  (con cable OTG), el sistema lanza Tecno Líder automáticamente y
+  le da permiso de acceso al puerto USB.
+
+  ─────────────────────────────────────────────────────────────────
+  CÓMO AGREGAR UNA IMPRESORA QUE NO ESTÉ EN ESTA LISTA
+  ─────────────────────────────────────────────────────────────────
+  1. Conecta la impresora a Windows.
+  2. Abre el Administrador de Dispositivos.
+  3. Click derecho en la impresora → Propiedades → Detalles.
+  4. En "Propiedad", elige "Id. de hardware".
+  5. Verás algo como: USB\VID_04B8&PID_0202
+     · VID_04B8 → vendor-id   = "0x04B8" → DECIMAL = 1208
+     · PID_0202 → product-id  = "0x0202" → DECIMAL = 514
+  6. Convierte de hex a decimal y agrega un nuevo <usb-device .../>
+     a esta lista. (El AndroidManifest USB filter requiere DECIMAL,
+     no hex.)
+
+  Vendors comunes en hexadecimal (referencia):
+   · 0x04B8 (1208) → Epson
+   · 0x0419 (1049) → Bixolon / Samsung Mini-Printers
+   · 0x0519 (1305) → Star Micronics
+   · 0x0FE6 (4070) → ICS Advent (chipset común en clones chinos)
+   · 0x0483 (1155) → STMicroelectronics (XPrinter algunos modelos)
+   · 0x1FC9 (8137) → NXP / clones POS
+   · 0x0DD4 (3540) → Custom Engineering
+   · 0x0416 (1046) → Winbond (Citizen, algunos clones)
+   · 0x154F (5455) → SNBC
+   · 0x1A86 (6790) → QinHeng (chip USB-Serial CH340/CH341 de muchos
+                              clones chinos genéricos)
+   · 0x067B (1659) → Prolific (chip PL2303 de adaptadores USB-Serial)
+═════════════════════════════════════════════════════════════════════
+-->
+<resources>
+
+    <!-- ═══ EPSON ═══ -->
+    <!-- Epson TM-T20 / TM-T20II / TM-T20III -->
+    <usb-device vendor-id="1208" product-id="514"  />  <!-- 0x04B8 / 0x0202 - TM-T88IV -->
+    <usb-device vendor-id="1208" product-id="3104" />  <!-- 0x04B8 / 0x0C20 - TM-T20 -->
+    <usb-device vendor-id="1208" product-id="3105" />  <!-- 0x04B8 / 0x0C21 - TM-T20II -->
+    <usb-device vendor-id="1208" product-id="3106" />  <!-- 0x04B8 / 0x0C22 - TM-T20III -->
+    <usb-device vendor-id="1208" product-id="514"  />  <!-- TM-T88V/VI -->
+
+    <!-- ═══ BIXOLON / SAMSUNG ═══ -->
+    <!-- Bixolon SRP-270 / SRP-350 / SRP-Q300 -->
+    <usb-device vendor-id="1049" product-id="15361" /> <!-- 0x0419 / 0x3C01 - SRP-270 -->
+    <usb-device vendor-id="1049" product-id="14336" /> <!-- 0x0419 / 0x3800 - SRP-350 -->
+    <usb-device vendor-id="1504" product-id="40963" /> <!-- 0x05E0 / 0xA003 - Bixolon genérico -->
+
+    <!-- ═══ STAR MICRONICS ═══ -->
+    <!-- Star TSP100 / TSP143 / TSP650 / SP700 -->
+    <usb-device vendor-id="1305" product-id="3"  />    <!-- 0x0519 / 0x0003 - TSP100 -->
+    <usb-device vendor-id="1305" product-id="11" />    <!-- 0x0519 / 0x000B - TSP143 -->
+    <usb-device vendor-id="1305" product-id="1" />     <!-- 0x0519 / 0x0001 - TSP650 -->
+
+    <!-- ═══ XPRINTER (muy común en Venezuela) ═══ -->
+    <!-- XP-58 / XP-58IIH / XP-58IIK / XP-80 / XP-Q200 / XP-T80 -->
+    <!-- Xprinter usa varios chipsets — la lista cubre los más vistos -->
+    <usb-device vendor-id="1155" product-id="22336" /> <!-- 0x0483 / 0x5740 - XP-58/80 (STMicro) -->
+    <usb-device vendor-id="1659" product-id="8211" />  <!-- 0x067B / 0x2303 - XP-58H (Prolific) -->
+    <usb-device vendor-id="6790" product-id="29987" /> <!-- 0x1A86 / 0x7523 - XP-58 clones (CH340) -->
+    <usb-device vendor-id="2965" product-id="20805" /> <!-- 0x0B95 / 0x5145 - XP genérico -->
+    <usb-device vendor-id="6790" product-id="21795" /> <!-- 0x1A86 / 0x5523 - clones genéricos -->
+
+    <!-- ═══ CITIZEN ═══ -->
+    <!-- Citizen CT-S310 / CT-S651 / CT-S801 -->
+    <usb-device vendor-id="1046" product-id="20492" /> <!-- 0x0416 / 0x500C - CT-S310 -->
+
+    <!-- ═══ SNBC (clones premium) ═══ -->
+    <!-- BTP-R580 / BTP-M280 -->
+    <usb-device vendor-id="5455" product-id="2240" />  <!-- 0x154F / 0x08C0 - BTP-R580 -->
+
+    <!-- ═══ HPRT (otro clon chino popular) ═══ -->
+    <!-- TP805 / TP808 -->
+    <usb-device vendor-id="32902" product-id="500"  /> <!-- 0x8086 / 0x01F4 - HPRT TP80x -->
+
+    <!-- ═══ Genéricos / clones chinos sin marca ═══ -->
+    <!-- La mayoría reportan VID 0x0483 (STMicro) o 0x1A86 (CH340)
+         con PIDs variables. Estos cubren ~70% de los clones del
+         mercado venezolano. -->
+    <usb-device vendor-id="1155" product-id="22304" /> <!-- 0x0483 / 0x5720 - STMicro variant -->
+    <usb-device vendor-id="6790" product-id="29986" /> <!-- 0x1A86 / 0x7522 - CH340 variant -->
+
+    <!-- ═══ CASH DRAWERS / OTROS POS ═══ -->
+    <!-- Custom Engineering VKP-80 (recibos kioscos) -->
+    <usb-device vendor-id="3540" product-id="320" />   <!-- 0x0DD4 / 0x0140 -->
+
+    <!--
+    ═════════════════════════════════════════════════════════════════
+    NOTA: Si el modelo del cliente no está aquí, tienes 2 opciones:
+      A) Agregar su VID/PID a esta lista (recomendado para impresoras
+         de la flota habitual).
+      B) Quitar el filtro USB y dejar que el usuario apruebe la
+         conexión manualmente cada vez (NO recomendado — el SO
+         pregunta SIEMPRE en cada reconexión).
+    ═════════════════════════════════════════════════════════════════
+    -->
+
+</resources>

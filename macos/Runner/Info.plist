@@ -1,0 +1,72 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>$(DEVELOPMENT_LANGUAGE)</string>
+	<key>CFBundleExecutable</key>
+	<string>$(EXECUTABLE_NAME)</string>
+	<key>CFBundleIconFile</key>
+	<string></string>
+	<key>CFBundleIdentifier</key>
+	<string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>$(PRODUCT_NAME)</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>$(FLUTTER_BUILD_NAME)</string>
+	<key>CFBundleVersion</key>
+	<string>$(FLUTTER_BUILD_NUMBER)</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>$(MACOSX_DEPLOYMENT_TARGET)</string>
+	<key>NSHumanReadableCopyright</key>
+	<string>$(PRODUCT_COPYRIGHT)</string>
+	<key>NSMainNibFile</key>
+	<string>MainMenu</string>
+	<key>NSPrincipalClass</key>
+	<string>NSApplication</string>
+
+	<!-- PERMISOS macOS -->
+	<key>NSCameraUsageDescription</key>
+	<string>Tecno Líder necesita acceder a la cámara para escanear códigos QR, IMEI de equipos y tomar fotos de productos.</string>
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>Tecno Líder necesita acceder a tus fotos para adjuntar imágenes a productos, servicios técnicos y reportes.</string>
+	<key>NSBluetoothAlwaysUsageDescription</key>
+	<string>Tecno Líder se conecta a impresoras térmicas Bluetooth para imprimir tickets, facturas y comprobantes.</string>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>Tecno Líder se comunica con impresoras conectadas a la misma red Wi-Fi de la tienda.</string>
+	<key>NSDownloadsFolderUsageDescription</key>
+	<string>Tecno Líder guarda facturas y reportes generados en tu carpeta Descargas.</string>
+	<key>NSDocumentsFolderUsageDescription</key>
+	<string>Tecno Líder guarda y abre documentos relacionados con tu negocio.</string>
+	<key>NSDesktopFolderUsageDescription</key>
+	<string>Tecno Líder puede guardar reportes y comprobantes en tu Escritorio cuando lo solicites.</string>
+
+	<!-- Export Compliance: solo HTTPS estándar -->
+	<key>ITSAppUsesNonExemptEncryption</key>
+	<false/>
+
+	<!-- url_launcher -->
+	<key>LSApplicationQueriesSchemes</key>
+	<array>
+		<string>https</string>
+		<string>http</string>
+		<string>tel</string>
+		<string>mailto</string>
+		<string>sms</string>
+		<string>whatsapp</string>
+	</array>
+
+	<!-- App Transport Security -->
+	<key>NSAppTransportSecurity</key>
+	<dict>
+		<key>NSAllowsArbitraryLoads</key>
+		<false/>
+		<key>NSAllowsArbitraryLoadsInWebContent</key>
+		<true/>
+	</dict>
+</dict>
+</plist>

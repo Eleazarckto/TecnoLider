@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- ═════════════════════════════════════════════════════════════
+         Paleta de colores Tecno Líder — referencia para recursos
+         nativos de Android (splash, themes, notificaciones).
+         Para colores en código Flutter ver `class AppColors` en
+         lib/main.dart.
+         ═════════════════════════════════════════════════════════════ -->
+
+    <!-- Azul royal del logo (T y wordmark) -->
+    <color name="tecnolider_blue">#2E3192</color>
+    <color name="tecnolider_blue_dark">#1F2270</color>
+
+    <!-- Amarillo dorado del logo (L y triángulos) -->
+    <color name="tecnolider_yellow">#FFC20E</color>
+    <color name="tecnolider_yellow_dark">#E5A800</color>
+
+    <!-- Neutros -->
+    <color name="white">#FFFFFFFF</color>
+    <color name="black">#FF000000</color>
+	<color name="ic_launcher_background">#2E3192</color>
+</resources>

@@ -1,0 +1,14 @@
+{
+  "android": {
+    "version": "1.0.11",
+    "url": "https://sistemasceccato.com/tecnolider/updates/tecnolider-1.0.11.apk",
+    "obligatoria": false,
+    "notas": "Consulta de precios: ahora cada lista se muestra u oculta por separado, aunque dos listas se llamen parecido."
+  },
+  "windows": {
+    "version": "1.0.11",
+    "url": "https://sistemasceccato.com/tecnolider/updates/tecnolider-windows-1.0.11.zip",
+    "obligatoria": false,
+    "notas": "Consulta de precios: ahora cada lista se muestra u oculta por separado, aunque dos listas se llamen parecido."
+  }
+}

@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Versión del splash para Android 5+ (idéntica a la base por ahora,
+    pero queda separada por si en el futuro se quiere hacer una
+    animación que solo soporten APIs >= 21).
+-->
+<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+    <item android:drawable="@color/tecnolider_blue" />
+    <item android:gravity="center">
+        <bitmap
+            android:gravity="center"
+            android:src="@mipmap/ic_launcher" />
+    </item>
+</layer-list>
