@@ -43,3 +43,10 @@ app.*.map.json
 /android/app/debug
 /android/app/profile
 /android/app/release
+
+# Firma de release de Android — NUNCA subir al repositorio.
+# Si se pierde el keystore, los equipos ya instalados no se pueden
+# actualizar mas y hay que reinstalar la app a mano en cada uno.
+android/key.properties
+*.jks
+*.keystore

@@ -2,8 +2,9 @@
 #  codemagic.yaml — Tecno Líder · Multi-plataforma
 # ════════════════════════════════════════════════════════════════════
 #
-#  Cuatro workflows:
+#  Cinco workflows:
 #
+#   0) ios-testflight  → iOS firmado, sube a App Store Connect · manual
 #   1) ios-unsigned    → solo iOS (.ipa)         · disparo manual
 #   2) apple-all       → APK + IPA + DMG en Mac  · disparo manual
 #   3) windows-build   → solo Windows (.exe)     · disparo manual
@@ -17,6 +18,177 @@
 # ════════════════════════════════════════════════════════════════════
 
 workflows:
+
+  # ══════════════════════════════════════════════════════════════════
+  #  iOS FIRMADO → APP STORE CONNECT (TestFlight)
+  # ══════════════════════════════════════════════════════════════════
+  #
+  #  ESTE ES EL FLUJO PARA SUBIR UNA VERSION NUEVA A LA APP STORE.
+  #  Los otros flujos de iOS compilan SIN FIRMA: sirven para comprobar
+  #  que compila, pero App Store Connect no acepta ese IPA.
+  #
+  #  Copiado del flujo `ios-testflight` de BrizuelaApp, sin la parte de
+  #  avisos push (TecnoLider no usa Firebase ni entitlements).
+  #
+  #  DE DONDE SALEN LAS CREDENCIALES
+  #  --------------------------------
+  #  Del grupo de variables `firma_ios`, el mismo nombre que usan
+  #  Brizuela y Transporte GG:
+  #
+  #    APP_STORE_CONNECT_PRIVATE_KEY     (el .p8 de App Store Connect)
+  #    APP_STORE_CONNECT_KEY_IDENTIFIER  (su Key ID)
+  #    APP_STORE_CONNECT_ISSUER_ID       (el Issuer ID de la cuenta)
+  #    CERTIFICATE_PRIVATE_KEY           (la clave del certificado de firma)
+  #
+  #  En Codemagic los grupos son POR APLICACION: si la app TecnoLider no
+  #  tiene ese grupo, se crea en TecnoLider > Settings > Environment
+  #  variables con esas cuatro variables (marcadas Secure) y los MISMOS
+  #  valores. La clave de App Store Connect autentica contra la CUENTA,
+  #  no contra una app: cada compilacion sube a la app de su bundle id.
+  #  Si el primer paso de firma dice que faltan variables, es esto.
+  #
+  #  La app en App Store Connect es la del bundle
+  #  com.tecnolider.tecnoLider (equipo Y3D33YTV52).
+  ios-testflight:
+    name: iOS · App Store Connect (firmado, TestFlight)
+    instance_type: mac_mini_m2
+    max_build_duration: 90
+
+    environment:
+      # Version fijada a proposito, la misma con la que se compila en
+      # Windows. Con `stable` Codemagic puede tomar otra version y que
+      # CocoaPods no resuelva el pod "Flutter".
+      flutter: 3.47.2
+      xcode: latest
+      cocoapods: default
+      groups:
+        - firma_ios
+      vars:
+        BUNDLE_ID: com.tecnolider.tecnoLider
+
+    triggering:
+      cancel_previous_builds: true
+
+    scripts:
+      - name: Comprobaciones previas
+        script: |
+          set -e
+          PBXPROJ="ios/Runner.xcodeproj/project.pbxproj"
+          if grep -q "PRODUCT_BUNDLE_IDENTIFIER = com.example" "$PBXPROJ"; then
+            echo "ERROR: el bundle id sigue siendo com.example.*"
+            exit 1
+          fi
+          if ! grep -q "PRODUCT_BUNDLE_IDENTIFIER = $BUNDLE_ID;" "$PBXPROJ"; then
+            echo "ERROR: el proyecto no usa el bundle id $BUNDLE_ID"
+            grep "PRODUCT_BUNDLE_IDENTIFIER" "$PBXPROJ" | sort -u
+            exit 1
+          fi
+          echo "Bundle id: $BUNDLE_ID"
+          grep "^version:" pubspec.yaml
+
+      - name: Dependencias de Flutter
+        script: flutter pub get
+
+      - name: Certificado y perfil de Apple (se crean si faltan)
+        # `CERTIFICATE_PRIVATE_KEY` no se puede omitir: el CLI no genera
+        # la clave por su cuenta. Se genera UNA vez y se guarda como
+        # variable; si se generara en cada compilacion, cada una crearia
+        # un certificado nuevo y a la tercera Apple no deja crear mas.
+        script: |
+          set -e
+          keychain initialize
+
+          faltan=""
+          for v in APP_STORE_CONNECT_ISSUER_ID APP_STORE_CONNECT_KEY_IDENTIFIER \
+                   APP_STORE_CONNECT_PRIVATE_KEY CERTIFICATE_PRIVATE_KEY; do
+            if [ -z "${!v}" ]; then faltan="$faltan $v"; fi
+          done
+          if [ -n "$faltan" ]; then
+            echo "=========================================================="
+            echo "ERROR: faltan variables de firma en ESTA aplicacion:"
+            echo "  $faltan"
+            echo
+            echo "En Codemagic los grupos de variables son POR APLICACION."
+            echo "En Codemagic > TecnoLider > Settings > Environment"
+            echo "variables, grupo 'firma_ios', marcadas como Secure, con"
+            echo "los MISMOS valores que tiene el grupo de Brizuela:"
+            echo
+            echo "  APP_STORE_CONNECT_ISSUER_ID      el Issuer ID"
+            echo "  APP_STORE_CONNECT_KEY_IDENTIFIER el Key ID"
+            echo "  APP_STORE_CONNECT_PRIVATE_KEY    el contenido del .p8"
+            echo "  CERTIFICATE_PRIVATE_KEY          la clave RSA en PEM"
+            echo "=========================================================="
+            exit 1
+          fi
+
+          # Con la clave, el CLI reutiliza el certificado de distribucion
+          # si ya existe y lo crea si no. Como la clave es siempre la
+          # misma, no se acumulan certificados.
+          app-store-connect fetch-signing-files "$BUNDLE_ID" \
+            --type IOS_APP_STORE \
+            --certificate-key=@env:CERTIFICATE_PRIVATE_KEY \
+            --create
+
+          keychain add-certificates
+          xcode-project use-profiles
+
+      - name: Numero de compilacion
+        # App Store Connect rechaza un numero de compilacion que ya subio.
+        # La app ya tiene compilaciones subidas (a mano o desde otro
+        # flujo), asi que el contador de Codemagic, que empieza en 1 en
+        # un flujo nuevo, podria quedar por debajo. Se toma el mayor de:
+        # la ultima compilacion en TestFlight + 1, la ultima en la App
+        # Store + 1, el numero del pubspec y el contador de Codemagic.
+        script: |
+          set -e
+          PUBSPEC_BUILD=$(grep "^version:" pubspec.yaml | sed 's/.*+//' | tr -d '[:space:]')
+          APP_ID=$(app-store-connect apps list \
+                     --bundle-id-identifier "$BUNDLE_ID" \
+                     --strict-match-identifier --json 2>/dev/null \
+                   | python3 -c "import sys,json; d=json.load(sys.stdin); print(d[0]['id'] if d else '')" \
+                   2>/dev/null || true)
+          echo "Apple ID de la app: ${APP_ID:-no encontrado}"
+          TF=0; AS=0
+          if [ -n "$APP_ID" ]; then
+            TF=$(app-store-connect get-latest-testflight-build-number "$APP_ID" 2>/dev/null || echo 0)
+            AS=$(app-store-connect get-latest-app-store-build-number "$APP_ID" 2>/dev/null || echo 0)
+          fi
+          # Solo digitos: si el CLI devolvio otra cosa, cuenta como 0.
+          case "$TF" in ''|*[!0-9]*) TF=0 ;; esac
+          case "$AS" in ''|*[!0-9]*) AS=0 ;; esac
+          case "$PUBSPEC_BUILD" in ''|*[!0-9]*) PUBSPEC_BUILD=0 ;; esac
+          N=$BUILD_NUMBER
+          for c in $((TF + 1)) $((AS + 1)) $PUBSPEC_BUILD; do
+            [ "$c" -gt "$N" ] && N=$c
+          done
+          echo "TestFlight: $TF · App Store: $AS · pubspec: $PUBSPEC_BUILD · Codemagic: $BUILD_NUMBER"
+          echo "Numero de compilacion a usar: $N"
+          echo "NUMERO_COMPILACION=$N" >> "$CM_ENV"
+
+      - name: Compilar el IPA firmado
+        # La version visible (1.0.x) sale del pubspec.yaml.
+        script: |
+          set -e
+          flutter build ipa --release \
+            --build-number=$NUMERO_COMPILACION \
+            --export-options-plist=/Users/builder/export_options.plist
+          ls -lh build/ios/ipa/
+
+    artifacts:
+      - build/ios/ipa/*.ipa
+
+    publishing:
+      app_store_connect:
+        api_key: $APP_STORE_CONNECT_PRIVATE_KEY
+        key_id: $APP_STORE_CONNECT_KEY_IDENTIFIER
+        issuer_id: $APP_STORE_CONNECT_ISSUER_ID
+        submit_to_testflight: true
+      email:
+        recipients:
+          - eleazarceccato@gmail.com
+        notify:
+          success: true
+          failure: true
 
   # ──────────────────────────────────────────────────────────
   # WORKFLOW 1: SOLO iOS (el original que ya tenías funcionando)

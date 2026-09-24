@@ -192,8 +192,43 @@ Los tres archivos originales quedaron en `_backup_20260828/`.
 
 # App — versionado y OTA
 
-La versión sincronizada es `1.0.11` (`kAppVersion` y `pubspec.yaml`, que va
-`1.0.11+11` — el `+11` es el versionCode de Android y también tiene que subir).
+La versión sincronizada es `1.0.12` (`kAppVersion` y `pubspec.yaml`, que va
+`1.0.12+12` — el `+12` es el versionCode de Android y también tiene que subir).
+
+## Firma de Android — LO MÁS IMPORTANTE DE ESTA SECCIÓN
+
+Hasta la 1.0.11 el APK se firmaba con el **keystore de depuración de la
+máquina que compilaba** (`signingConfig = signingConfigs.getByName("debug")`).
+Como ese keystore es distinto en cada equipo y en cada agente de CI, cada
+compilación producía una firma distinta y **Android rechazaba instalar la
+actualización encima** ("aplicación no instalada"). Se comprobó comparando
+certificados:
+
+| APK | SHA-256 del certificado |
+|---|---|
+| 1.0.10 publicado | `b5270982bb55…4d8872` |
+| 1.0.12 con la firma vieja | `cfbf79bcc39f…f65607` |
+
+Desde la 1.0.12 el proyecto tiene **keystore de release propio**:
+
+- `android/tecnolider-release.jks` — el keystore (RSA 4096, válido 30 años).
+- `android/key.properties` — alias y contraseñas.
+- Los dos están en `.gitignore` y **no se suben al repositorio**.
+
+⚠️ **Hay que respaldarlos fuera de esta PC** (gestor de contraseñas o disco
+cifrado). Si se pierde el keystore no se puede volver a firmar igual, y la
+única salida vuelve a ser desinstalar y reinstalar a mano en cada equipo.
+
+Si `key.properties` no existe, el build cae a la firma de depuración y
+produce un APK que **no sirve para actualizar**: sirve solo para pruebas.
+
+### Reinstalación manual, por única vez (Android)
+
+Los teléfonos que tienen la 1.0.10 están firmados con la clave vieja, así que
+la 1.0.12 **no se les instala encima**. Una sola vez, en cada teléfono:
+desinstalar Tecno Líder e instalar el APK 1.0.12. No se pierde información —
+todos los datos viven en el servidor. De ahí en adelante el OTA se sostiene
+solo, porque la firma ya no vuelve a cambiar.
 
 ### Compilar
 
@@ -207,8 +242,19 @@ flutter build windows --release    # Windows
 
 | Archivo | De dónde sale |
 |---|---|
-| `tecnolider-1.0.11.apk` | `build/app/outputs/flutter-apk/app-release.apk`, renombrado |
-| `tecnolider-windows-1.0.11.zip` | zip del contenido de `build/windows/x64/runner/Release/` |
+| `tecnolider-1.0.12.apk` | `build/app/outputs/flutter-apk/app-release.apk`, renombrado |
+| `tecnolider-windows-1.0.12.zip` | zip del contenido de `build/windows/x64/runner/Release/` |
+
+⚠️ Al comprimir Windows, **excluir los `.zip`**: la carpeta `Release/` suele
+quedar con el zip del release anterior adentro y se cuela en el nuevo (paso
+de 17 MB a 34 MB sin que nadie lo note).
+
+```powershell
+$items = Get-ChildItem "build\windows\x64\runner\Release" -Exclude *.zip
+Compress-Archive -Path $items -DestinationPath "tecnolider-windows-1.0.12.zip" -Force
+```
+
+El `.exe` y la carpeta `data/` tienen que quedar en la **raíz** del zip.
 
 ### Recién DESPUÉS, subir el `version.json`
 
@@ -227,6 +273,26 @@ Eran tres cosas a la vez, y cada una sola ya alcanzaba para romperlo:
 2. **Faltaba el permiso `REQUEST_INSTALL_PACKAGES`** en el AndroidManifest.
    Sin él, Android descarta el instalador sin mostrar nada.
 3. **El `version.json` decía `1.0.8`**, la misma versión instalada.
+4. **La firma cambiaba en cada compilación** (ver arriba). Resuelto en 1.0.12
+   con el keystore de release propio.
+
+## Lo que pasó con la 1.0.11
+
+La 1.0.11 se compiló y su zip de Windows se subió, pero **nunca se publicó el
+`version.json`**: siguió anunciando `1.0.10`. Ningún cliente la recibió, ni en
+Windows ni en Android (su APK tampoco se había subido). Por eso la 1.0.12 sale
+directo desde la 1.0.10 instalada. Antes de dar por cerrado un release,
+comprobar siempre:
+
+```bash
+curl https://sistemasceccato.com/tecnolider/updates/version.json
+curl -o /dev/null -w "%{http_code} %{size_download}
+"      https://sistemasceccato.com/tecnolider/updates/tecnolider-1.0.12.apk
+```
+
+El servidor responde `HTTP 200` con 15 bytes (`Hello World :-)`) para los
+archivos que no existen, así que **un 200 no alcanza**: hay que mirar el
+tamaño.
 
 En Windows el OTA sí venía funcionando.
 

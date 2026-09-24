@@ -1,14 +1,14 @@
 {
   "android": {
-    "version": "1.0.11",
-    "url": "https://sistemasceccato.com/tecnolider/updates/tecnolider-1.0.11.apk",
+    "version": "1.0.13",
+    "url": "https://sistemasceccato.com/tecnolider/updates/tecnolider-1.0.13.apk",
     "obligatoria": false,
-    "notas": "Consulta de precios: ahora cada lista se muestra u oculta por separado, aunque dos listas se llamen parecido."
+    "notas": "Reporte de Gestion de IMEIs: ya no sale vacio al elegir un rango de fechas (incluye el stock actual y lo que ingreso o se vendio en el periodo). Estadisticas de Productos: el Excel descargado trae Rentabilidad por tienda, Ventas y existencia por modelo y tienda con alerta de reposicion, y ganancia y margen por producto."
   },
   "windows": {
-    "version": "1.0.11",
-    "url": "https://sistemasceccato.com/tecnolider/updates/tecnolider-windows-1.0.11.zip",
+    "version": "1.0.13",
+    "url": "https://sistemasceccato.com/tecnolider/updates/tecnolider-windows-1.0.13.zip",
     "obligatoria": false,
-    "notas": "Consulta de precios: ahora cada lista se muestra u oculta por separado, aunque dos listas se llamen parecido."
+    "notas": "Reporte de Gestion de IMEIs: ya no sale vacio al elegir un rango de fechas (incluye el stock actual y lo que ingreso o se vendio en el periodo). Estadisticas de Productos: el Excel descargado trae Rentabilidad por tienda, Ventas y existencia por modelo y tienda con alerta de reposicion, y ganancia y margen por producto."
   }
 }

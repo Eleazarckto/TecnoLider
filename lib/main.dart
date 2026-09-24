@@ -18,6 +18,8 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
 import 'package:open_filex/open_filex.dart';
 import 'package:excel/excel.dart' hide Border, TextSpan;
+// Bordes de celda de Excel (el `Border` de arriba choca con el de Flutter).
+import 'package:excel/excel.dart' as xl show Border, BorderStyle;
 import 'package:file_picker/file_picker.dart';
 import 'package:pdf/pdf.dart';
 import 'package:pdf/widgets.dart' as pw;
@@ -75,7 +77,7 @@ import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 /// IMPORTANTE: subí este número CADA VEZ que compiles una versión
 /// nueva. Debe coincidir con el "version" del version.json del
 /// servidor. Formato: "MAYOR.MENOR.PARCHE".
-const String kAppVersion = "1.0.11";
+const String kAppVersion = "1.0.13";
 
 /// URL del archivo version.json en el servidor.
 /// Se descarga con http.get limpio, SIN cabeceras de autenticación.
@@ -6029,7 +6031,487 @@ class HistorialComision {
 }
 
 // ── LISTAS DE PRECIOS ─────────────────────────────────────────
-class ColumnaPrecio { String nombre; ColumnaPrecio({required this.nombre}); }
+
+/// FUNCIÓN CONFIGURABLE DE UNA COLUMNA DE PRECIOS
+/// ------------------------------------------------------------
+/// Cada columna de una lista puede tener su propia "función": la
+/// regla con la que se calcula su precio para TODOS los productos.
+/// Antes las columnas eran solo un título y el precio se escribía a
+/// mano uno por uno; ahora el usuario define, por ejemplo:
+///
+///   · "Mayorista"  = costo + 12 %          (redondeado al entero)
+///   · "Detal"      = venta × 1.35          (terminado en ,99)
+///   · "Contado"    = [Detal] − 20 $
+///   · "Bs"         = [Detal] × tasa        (múltiplos de 5)
+///   · "Especial"   = si(costo > 200; costo*1.15; costo*1.25)
+///
+/// Modos disponibles:
+///   manual        → nadie toca el precio; lo escribe el usuario
+///   porcentaje    → origen + (origen × valor / 100)
+///   monto         → origen + valor
+///   multiplicador → origen × valor
+///   expresion     → fórmula libre escrita por el usuario
+class FormulaColumna {
+  static const modoManual        = 'manual';
+  static const modoPorcentaje    = 'porcentaje';
+  static const modoMonto         = 'monto';
+  static const modoMultiplicador = 'multiplicador';
+  static const modoExpresion     = 'expresion';
+
+  /// Prefijo que identifica a las columnas virtuales de fórmula.
+  static const prefijoVirtual = '__fx__';
+
+  /// Cómo se calcula: manual / porcentaje / monto / multiplicador /
+  /// expresion.
+  String modo;
+
+  /// De dónde sale el número de partida: 'venta' (precio de venta del
+  /// catálogo), 'costo' (precio de costo), 'base' (primera columna de
+  /// la lista) o 'columna' (otra columna, ver [columnaOrigen]).
+  String origen;
+
+  /// Nombre de la columna de la que se toma el valor de partida
+  /// cuando [origen] es 'columna'.
+  String columnaOrigen;
+
+  /// Número que acompaña al modo (el %, el monto o el multiplicador).
+  double valor;
+
+  /// Fórmula libre cuando [modo] es 'expresion'.
+  String expresion;
+
+  /// Redondeo final: 'ninguno', 'dos' (2 decimales), 'entero',
+  /// 'arriba', 'abajo', 'psicologico' (termina en ,99) o 'multiplo'.
+  String redondeo;
+
+  /// Múltiplo al que se redondea cuando [redondeo] es 'multiplo'
+  /// (ej. 5 → 145, 150, 155…).
+  double multiplo;
+
+  /// Multiplica el resultado por la tasa del día de la lista. Útil
+  /// para columnas en bolívares dentro de una lista en dólares.
+  bool aplicarTasa;
+
+  /// Suma el % adicional configurado en la lista antes de redondear.
+  bool aplicarAdicional;
+
+  /// Si es true la columna se recalcula sola (al poblar la lista, al
+  /// cambiar la tasa o al editar el precio base). Si es false la
+  /// fórmula existe pero solo se aplica cuando el usuario pulsa
+  /// "Aplicar ahora".
+  bool auto;
+
+  FormulaColumna({
+    this.modo = modoManual,
+    this.origen = 'venta',
+    this.columnaOrigen = '',
+    this.valor = 0,
+    this.expresion = '',
+    this.redondeo = 'dos',
+    this.multiplo = 1,
+    this.aplicarTasa = false,
+    this.aplicarAdicional = false,
+    this.auto = true,
+  });
+
+  bool get esManual => modo == modoManual;
+
+  FormulaColumna copiar() => FormulaColumna(
+        modo: modo,
+        origen: origen,
+        columnaOrigen: columnaOrigen,
+        valor: valor,
+        expresion: expresion,
+        redondeo: redondeo,
+        multiplo: multiplo,
+        aplicarTasa: aplicarTasa,
+        aplicarAdicional: aplicarAdicional,
+        auto: auto,
+      );
+
+  /// Etiqueta corta para mostrar debajo del nombre de la columna.
+  String get descripcion {
+    if (esManual) return 'Manual';
+    final o = origen == 'venta'
+        ? 'Venta'
+        : origen == 'costo'
+            ? 'Costo'
+            : origen == 'base'
+                ? 'Base'
+                : (columnaOrigen.isEmpty ? 'Columna' : columnaOrigen);
+    String txt;
+    switch (modo) {
+      case modoPorcentaje:
+        txt = '$o ${valor >= 0 ? '+' : '−'} '
+            '${valor.abs().toStringAsFixed(valor.abs() % 1 == 0 ? 0 : 2)} %';
+        break;
+      case modoMonto:
+        txt = '$o ${valor >= 0 ? '+' : '−'} ${valor.abs().toStringAsFixed(2)}';
+        break;
+      case modoMultiplicador:
+        txt = '$o × ${valor.toStringAsFixed(valor % 1 == 0 ? 0 : 4)}';
+        break;
+      case modoExpresion:
+        txt = expresion.length > 28
+            ? '${expresion.substring(0, 28)}…'
+            : expresion;
+        break;
+      default:
+        txt = 'Manual';
+    }
+    if (aplicarAdicional) txt += ' +adic.';
+    if (aplicarTasa) txt += ' × tasa';
+    return txt;
+  }
+
+  Map<String, dynamic> toJson() => {
+        'modo': modo,
+        'origen': origen,
+        'columna_origen': columnaOrigen,
+        'valor': valor,
+        'expresion': expresion,
+        'redondeo': redondeo,
+        'multiplo': multiplo,
+        'aplicar_tasa': aplicarTasa,
+        'aplicar_adicional': aplicarAdicional,
+        'auto': auto,
+      };
+
+  factory FormulaColumna.fromJson(Map<String, dynamic> m) {
+    double d(dynamic v, [double def = 0]) {
+      if (v == null) return def;
+      if (v is num) return v.toDouble();
+      return double.tryParse(v.toString()) ?? def;
+    }
+
+    bool b(dynamic v, [bool def = false]) {
+      if (v == null) return def;
+      if (v is bool) return v;
+      final s = v.toString().toLowerCase();
+      return s == '1' || s == 'true';
+    }
+
+    return FormulaColumna(
+      modo: '${m['modo'] ?? modoManual}',
+      origen: '${m['origen'] ?? 'venta'}',
+      columnaOrigen: '${m['columna_origen'] ?? ''}',
+      valor: d(m['valor']),
+      expresion: '${m['expresion'] ?? ''}',
+      redondeo: '${m['redondeo'] ?? 'dos'}',
+      multiplo: d(m['multiplo'], 1),
+      aplicarTasa: b(m['aplicar_tasa']),
+      aplicarAdicional: b(m['aplicar_adicional']),
+      auto: b(m['auto'], true),
+    );
+  }
+
+  /// Serializa la fórmula en un texto seguro para viajar dentro del
+  /// NOMBRE de una columna virtual (ver `ListaPrecio.toMap`). El
+  /// backend guarda las columnas como simples cadenas, así que ésta es
+  /// la forma de persistir la configuración sin tocar el esquema.
+  String aCodigo(String nombreColumna) =>
+      '$prefijoVirtual${base64Url.encode(utf8.encode(jsonEncode({
+            'c': nombreColumna,
+            'f': toJson(),
+          })))}';
+
+  /// true si el nombre corresponde a una columna virtual (de fórmula
+  /// o de los overrides de financiamiento). Éstas NUNCA se muestran.
+  static bool esNombreVirtual(String nombre) =>
+      nombre.startsWith(prefijoVirtual) ||
+      (nombre.startsWith('__') && nombre.endsWith('__'));
+
+  /// Decodifica una columna virtual. Devuelve (nombreColumna, fórmula)
+  /// o null si el texto no es válido.
+  static MapEntry<String, FormulaColumna>? deCodigo(String codigo) {
+    if (!codigo.startsWith(prefijoVirtual)) return null;
+    try {
+      final json = jsonDecode(utf8
+          .decode(base64Url.decode(codigo.substring(prefijoVirtual.length))));
+      if (json is! Map) return null;
+      final nombre = '${json['c'] ?? ''}';
+      if (nombre.isEmpty) return null;
+      return MapEntry(nombre,
+          FormulaColumna.fromJson(Map<String, dynamic>.from(json['f'] as Map)));
+    } catch (_) {
+      return null;
+    }
+  }
+}
+
+/// EVALUADOR DE FÓRMULAS
+/// ------------------------------------------------------------
+/// Intérprete pequeño para las expresiones que escribe el usuario en
+/// una columna. Soporta:
+///   · números (con , o . como decimal)   · paréntesis
+///   · + − × / ^  y el módulo `mod`
+///   · variables: costo, venta, base, tasa, adicional, inicial,
+///     cuotas, recargo, stock
+///   · otras columnas entre corchetes: [Mayorista]
+///   · funciones: redondear(x[;dec]), techo(x), piso(x), abs(x),
+///     min(a;b), max(a;b), pot(a;b), raiz(x), si(cond; a; b)
+///   · comparaciones >, <, >=, <=, =, <> y los conectores `y` / `o`
+///
+/// Los argumentos se separan con `;` o con `,`.
+class EvaluadorFormula {
+  final Map<String, double> variables;
+  final String _src;
+  int _i = 0;
+
+  EvaluadorFormula(String fuente, this.variables)
+      : _src = fuente.replaceAll('\n', ' ');
+
+  /// Evalúa la expresión. Devuelve null si la fórmula tiene un error.
+  static double? evaluar(String expresion, Map<String, double> variables) {
+    if (expresion.trim().isEmpty) return null;
+    try {
+      final e = EvaluadorFormula(expresion, variables);
+      final v = e._expresion();
+      e._saltarEspacios();
+      if (e._i < e._src.length) return null; // sobró texto → error
+      if (v.isNaN || v.isInfinite) return null;
+      return v;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// Valida una fórmula y devuelve el mensaje de error, o null si es
+  /// correcta. Se usa para avisar en el editor mientras se escribe.
+  static String? validar(String expresion, Map<String, double> variables) {
+    if (expresion.trim().isEmpty) return 'Escribe una fórmula';
+    if (evaluar(expresion, variables) == null) {
+      return 'Fórmula inválida — revisa nombres, ; y paréntesis';
+    }
+    return null;
+  }
+
+  void _saltarEspacios() {
+    while (_i < _src.length && _src[_i] == ' ') {
+      _i++;
+    }
+  }
+
+  bool _consumir(String texto) {
+    _saltarEspacios();
+    if (_src.startsWith(texto, _i)) {
+      _i += texto.length;
+      return true;
+    }
+    return false;
+  }
+
+  /// Consume una palabra completa (no parte de un identificador).
+  bool _consumirPalabra(String palabra) {
+    _saltarEspacios();
+    if (!_src.startsWith(palabra, _i)) return false;
+    final fin = _i + palabra.length;
+    if (fin < _src.length && _esLetra(_src[fin])) return false;
+    _i = fin;
+    return true;
+  }
+
+  bool _esLetra(String c) =>
+      RegExp(r'[A-Za-zÁÉÍÓÚÑáéíóúñ_0-9]').hasMatch(c);
+
+  // expresion := comparacion (('y'|'o') comparacion)*
+  double _expresion() {
+    var izq = _comparacion();
+    while (true) {
+      _saltarEspacios();
+      if (_consumirPalabra('y')) {
+        final der = _comparacion();
+        izq = (izq != 0 && der != 0) ? 1 : 0;
+      } else if (_consumirPalabra('o')) {
+        final der = _comparacion();
+        izq = (izq != 0 || der != 0) ? 1 : 0;
+      } else {
+        return izq;
+      }
+    }
+  }
+
+  double _comparacion() {
+    final izq = _suma();
+    _saltarEspacios();
+    for (final op in ['>=', '<=', '<>', '!=', '==', '>', '<', '=']) {
+      if (_consumir(op)) {
+        final der = _suma();
+        switch (op) {
+          case '>=':
+            return izq >= der ? 1 : 0;
+          case '<=':
+            return izq <= der ? 1 : 0;
+          case '>':
+            return izq > der ? 1 : 0;
+          case '<':
+            return izq < der ? 1 : 0;
+          case '<>':
+          case '!=':
+            return (izq - der).abs() > 1e-9 ? 1 : 0;
+          default:
+            return (izq - der).abs() < 1e-9 ? 1 : 0;
+        }
+      }
+    }
+    return izq;
+  }
+
+  double _suma() {
+    var v = _producto();
+    while (true) {
+      _saltarEspacios();
+      if (_consumir('+')) {
+        v += _producto();
+      } else if (_consumir('-') || _consumir('−')) {
+        v -= _producto();
+      } else {
+        return v;
+      }
+    }
+  }
+
+  double _producto() {
+    var v = _potencia();
+    while (true) {
+      _saltarEspacios();
+      if (_consumir('*') || _consumir('×')) {
+        v *= _potencia();
+      } else if (_consumir('/') || _consumir('÷')) {
+        final d = _potencia();
+        if (d == 0) throw const FormatException('división entre cero');
+        v /= d;
+      } else if (_consumirPalabra('mod')) {
+        final d = _potencia();
+        if (d == 0) throw const FormatException('módulo cero');
+        v = v % d;
+      } else {
+        return v;
+      }
+    }
+  }
+
+  double _potencia() {
+    final base = _unario();
+    _saltarEspacios();
+    if (_consumir('^')) {
+      return math.pow(base, _potencia()).toDouble();
+    }
+    return base;
+  }
+
+  double _unario() {
+    _saltarEspacios();
+    if (_consumir('-') || _consumir('−')) return -_unario();
+    if (_consumir('+')) return _unario();
+    return _atomo();
+  }
+
+  double _atomo() {
+    _saltarEspacios();
+    if (_i >= _src.length) throw const FormatException('fin inesperado');
+
+    // Paréntesis
+    if (_consumir('(')) {
+      final v = _expresion();
+      if (!_consumir(')')) throw const FormatException('falta )');
+      return v;
+    }
+
+    // Referencia a otra columna: [Mayorista]
+    if (_consumir('[')) {
+      final cierre = _src.indexOf(']', _i);
+      if (cierre < 0) throw const FormatException('falta ]');
+      final nombre = _src.substring(_i, cierre).trim();
+      _i = cierre + 1;
+      final v = variables['[${nombre.toLowerCase()}]'];
+      if (v == null) throw FormatException('columna "$nombre" no existe');
+      return v;
+    }
+
+    // Número
+    final mNum = RegExp(r'^[0-9]+([.,][0-9]+)?').firstMatch(_src.substring(_i));
+    if (mNum != null) {
+      _i += mNum.group(0)!.length;
+      return double.parse(mNum.group(0)!.replaceAll(',', '.'));
+    }
+
+    // Identificador: función o variable
+    final mId = RegExp(r'^[A-Za-zÁÉÍÓÚÑáéíóúñ_][A-Za-zÁÉÍÓÚÑáéíóúñ_0-9]*')
+        .firstMatch(_src.substring(_i));
+    if (mId == null) {
+      throw FormatException('símbolo inesperado en "${_src.substring(_i)}"');
+    }
+    final id = mId.group(0)!.toLowerCase();
+    _i += mId.group(0)!.length;
+
+    _saltarEspacios();
+    if (_i < _src.length && _src[_i] == '(') {
+      return _llamarFuncion(id, _argumentos());
+    }
+
+    final v = variables[id];
+    if (v == null) throw FormatException('variable "$id" no existe');
+    return v;
+  }
+
+  List<double> _argumentos() {
+    if (!_consumir('(')) throw const FormatException('falta (');
+    final args = <double>[];
+    _saltarEspacios();
+    if (_consumir(')')) return args;
+    while (true) {
+      args.add(_expresion());
+      _saltarEspacios();
+      if (_consumir(';') || _consumir(',')) continue;
+      if (_consumir(')')) return args;
+      throw const FormatException('falta ) o ;');
+    }
+  }
+
+  double _llamarFuncion(String nombre, List<double> a) {
+    double arg(int i) {
+      if (i >= a.length) throw FormatException('faltan argumentos en $nombre');
+      return a[i];
+    }
+
+    switch (nombre) {
+      case 'redondear':
+        final dec = a.length > 1 ? a[1].round() : 2;
+        final f = math.pow(10, dec).toDouble();
+        return (arg(0) * f).round() / f;
+      case 'techo':
+        return arg(0).ceilToDouble();
+      case 'piso':
+        return arg(0).floorToDouble();
+      case 'abs':
+        return arg(0).abs();
+      case 'min':
+        return math.min(arg(0), arg(1));
+      case 'max':
+        return math.max(arg(0), arg(1));
+      case 'pot':
+        return math.pow(arg(0), arg(1)).toDouble();
+      case 'raiz':
+        return math.sqrt(arg(0));
+      case 'si':
+        return arg(0) != 0 ? arg(1) : arg(2);
+      default:
+        throw FormatException('función "$nombre" no existe');
+    }
+  }
+}
+
+class ColumnaPrecio {
+  String nombre;
+
+  /// Función configurable que calcula el precio de esta columna para
+  /// todos los productos. Por defecto es manual.
+  FormulaColumna formula;
+
+  ColumnaPrecio({required this.nombre, FormulaColumna? formula})
+      : formula = formula ?? FormulaColumna();
+}
 
 class ItemListaPrecio {
   final Producto producto;
@@ -6173,6 +6655,157 @@ class ListaPrecio {
     return n;
   }
 
+  // ── FUNCIONES DE COLUMNA ───────────────────────────────────
+  // Una columna puede tener una funcion propia (ver FormulaColumna).
+  // Todo lo que recalcula precios pasa por aca, asi la regla que el
+  // usuario configuro vale igual al poblar la lista, al cambiar la
+  // tasa, al editar el precio base y al pulsar "Aplicar ahora".
+
+  /// Tasa efectiva de la lista (la del dia; si no hay, la del sistema).
+  double get tasaEfectiva {
+    if (tasaDelDia > 0) return tasaDelDia;
+    return ConfigSistema.tasaCambio > 0 ? ConfigSistema.tasaCambio : 1.0;
+  }
+
+  /// Variables disponibles para las formulas de [it].
+  Map<String, double> variablesDe(ItemListaPrecio it) {
+    final base = columnas.isEmpty
+        ? 0.0
+        : (it.preciosPorColumna[columnas.first.nombre] ?? 0.0);
+    final vars = <String, double>{
+      'costo': it.producto.precioCosto,
+      'venta': it.producto.precioVenta,
+      'base': base,
+      'tasa': tasaEfectiva,
+      'adicional': porcentajeAdicional,
+      'inicial': pctInicialDe(it),
+      'cuotas': cuotasDe(it).toDouble(),
+      'recargo': porcentajeRecargoCuotas,
+      'stock': it.stockDisponible.toDouble(),
+    };
+    // Cada columna se puede referenciar con [Nombre] (sin distinguir
+    // mayusculas) y tambien por su nombre suelto si es una sola palabra.
+    for (final c in columnas) {
+      final v = it.preciosPorColumna[c.nombre] ?? 0.0;
+      vars['[${c.nombre.toLowerCase()}]'] = v;
+      final simple = c.nombre.toLowerCase().trim();
+      if (RegExp(r'^[a-zA-ZáéíóúñÁÉÍÓÚÑ_][a-zA-Z0-9áéíóúñÁÉÍÓÚÑ_]*$')
+              .hasMatch(simple) &&
+          !vars.containsKey(simple)) {
+        vars[simple] = v;
+      }
+    }
+    return vars;
+  }
+
+  /// Aplica el redondeo configurado en [f].
+  static double aplicarRedondeo(double v, FormulaColumna f) {
+    switch (f.redondeo) {
+      case 'ninguno':
+        return v;
+      case 'entero':
+        return v.roundToDouble();
+      case 'arriba':
+        return v.ceilToDouble();
+      case 'abajo':
+        return v.floorToDouble();
+      case 'psicologico':
+        // Termina siempre en ,99 (149.30 → 149.99; 150.00 → 149.99)
+        final techo = v.ceilToDouble();
+        return (techo - v).abs() < 0.0001 ? v - 0.01 : techo - 0.01;
+      case 'multiplo':
+        final m = f.multiplo > 0 ? f.multiplo : 1;
+        return (v / m).roundToDouble() * m;
+      default: // 'dos'
+        return redondearPrecio(v);
+    }
+  }
+
+  /// Calcula el precio que le corresponde a [it] en la columna [col]
+  /// segun la funcion configurada. Devuelve null si la columna es
+  /// manual o si la formula tiene un error.
+  double? calcularColumna(ColumnaPrecio col, ItemListaPrecio it) {
+    final f = col.formula;
+    if (f.esManual) return null;
+    final vars = variablesDe(it);
+
+    double? bruto;
+    if (f.modo == FormulaColumna.modoExpresion) {
+      bruto = EvaluadorFormula.evaluar(f.expresion, vars);
+    } else {
+      double origen;
+      switch (f.origen) {
+        case 'costo':
+          origen = it.producto.precioCosto;
+          break;
+        case 'base':
+          origen = vars['base'] ?? 0;
+          break;
+        case 'columna':
+          // Una columna no puede alimentarse de si misma.
+          if (f.columnaOrigen.isEmpty ||
+              f.columnaOrigen.toLowerCase() == col.nombre.toLowerCase()) {
+            return null;
+          }
+          origen = it.preciosPorColumna[f.columnaOrigen] ??
+              vars['[${f.columnaOrigen.toLowerCase()}]'] ??
+              0;
+          break;
+        default:
+          origen = it.producto.precioVenta;
+      }
+      switch (f.modo) {
+        case FormulaColumna.modoPorcentaje:
+          bruto = origen * (1 + f.valor / 100);
+          break;
+        case FormulaColumna.modoMonto:
+          bruto = origen + f.valor;
+          break;
+        case FormulaColumna.modoMultiplicador:
+          bruto = origen * f.valor;
+          break;
+        default:
+          bruto = origen;
+      }
+    }
+    if (bruto == null || bruto.isNaN || bruto.isInfinite) return null;
+    if (f.aplicarAdicional) bruto = bruto * (1 + porcentajeAdicional / 100);
+    if (f.aplicarTasa) bruto = bruto * tasaEfectiva;
+    return aplicarRedondeo(bruto, f);
+  }
+
+  /// Recalcula las columnas con funcion y escribe los precios.
+  ///
+  /// [soloAutomaticas] limita el recalculo a las columnas marcadas
+  /// como "auto"; [soloColumna] recalcula una sola columna.
+  /// Devuelve cuantos precios cambiaron.
+  int aplicarFormulas({
+    bool soloAutomaticas = true,
+    String? soloColumna,
+  }) {
+    var cambios = 0;
+    // En orden: asi una columna que se apoya en otra ya calculada usa
+    // el valor nuevo y no el viejo.
+    for (final col in columnas) {
+      if (col.formula.esManual) continue;
+      if (soloAutomaticas && !col.formula.auto) continue;
+      if (soloColumna != null && col.nombre != soloColumna) continue;
+      for (final it in items) {
+        final nuevo = calcularColumna(col, it);
+        if (nuevo == null) continue;
+        final actual = it.preciosPorColumna[col.nombre];
+        if (actual == null || (actual - nuevo).abs() > 0.0001) {
+          it.preciosPorColumna[col.nombre] = nuevo;
+          cambios++;
+        }
+      }
+    }
+    return cambios;
+  }
+
+  /// true si alguna columna tiene funcion configurada.
+  bool get tieneFormulas => columnas.any((c) => !c.formula.esManual);
+
   Map<String, dynamic> toMap() => {
     if (id != null) 'id': id,
     'nombre': nombre,
@@ -6191,9 +6824,22 @@ class ListaPrecio {
     'tiene_cuotas': tieneCuotas ? 1 : 0,
     // Las columnas e items van en arrays nested que `guardarListaPrecios`
     // del backend procesa como tablas relacionales separadas.
-    'columnas': columnas.map((c) => {
-      'nombre': c.nombre,
-    }).toList(),
+    // Las columnas viajan con su nombre y, cuando tienen una funcion
+    // configurada, tambien con la funcion serializada. Ademas de la
+    // clave `formula` (que un backend actualizado puede guardar tal
+    // cual) mandamos una columna VIRTUAL `__fx__...` por cada funcion:
+    // el backend guarda las columnas por nombre, asi que ese nombre
+    // codificado sobrevive el viaje aunque el esquema no cambie.
+    // `fromMap` las vuelve a separar y nunca se muestran en pantalla.
+    'columnas': [
+      ...columnas.map((c) => {
+        'nombre': c.nombre,
+        'formula': jsonEncode(c.formula.toJson()),
+      }),
+      ...columnas
+          .where((c) => !c.formula.esManual)
+          .map((c) => {'nombre': c.formula.aCodigo(c.nombre)}),
+    ],
     'items': items.map((it) {
       // Construimos la lista base de "valores" con los precios reales.
       final valores = it.preciosPorColumna.entries.map((e) => {
@@ -6253,12 +6899,50 @@ class ListaPrecio {
     bool toBool(dynamic v) =>
         v == 1 || v == '1' || v == true;
 
-    // Reconstruir columnas
+    // Reconstruir columnas.
+    //  · Las columnas reales entran con su nombre y, si el backend la
+    //    guardo, con su funcion en la clave `formula`.
+    //  · Las columnas VIRTUALES `__fx__...` no son columnas: llevan la
+    //    funcion de una columna real codificada en su propio nombre.
+    //    Se decodifican, se aplican a su columna y se descartan.
     final cols = <ColumnaPrecio>[];
+    final formulasVirtuales = <String, FormulaColumna>{};
     if (m['columnas'] is List) {
       for (final c in (m['columnas'] as List)) {
-        cols.add(ColumnaPrecio(nombre: '${c['nombre'] ?? ''}'));
+        final nombreCol = '${c['nombre'] ?? ''}';
+        if (nombreCol.isEmpty) continue;
+        // Columna virtual con la funcion de otra columna
+        if (nombreCol.startsWith(FormulaColumna.prefijoVirtual)) {
+          final par = FormulaColumna.deCodigo(nombreCol);
+          if (par != null) formulasVirtuales[par.key] = par.value;
+          continue;
+        }
+        // Cualquier otra columna con nombre reservado (__x__) tampoco
+        // es una columna de precios visible.
+        if (FormulaColumna.esNombreVirtual(nombreCol)) continue;
+        // Duplicados: el backend puede devolver la misma columna dos
+        // veces si se guardo mal alguna vez.
+        if (cols.any((x) => x.nombre.toLowerCase() ==
+            nombreCol.toLowerCase())) {
+          continue;
+        }
+        FormulaColumna? f;
+        final rawF = c['formula'];
+        if (rawF != null && '$rawF'.isNotEmpty) {
+          try {
+            final j = rawF is Map ? rawF : jsonDecode('$rawF');
+            if (j is Map) {
+              f = FormulaColumna.fromJson(Map<String, dynamic>.from(j));
+            }
+          } catch (_) {/* funcion ilegible: queda manual */}
+        }
+        cols.add(ColumnaPrecio(nombre: nombreCol, formula: f));
       }
+    }
+    // Aplicar las funciones que llegaron en columnas virtuales
+    for (final col in cols) {
+      final f = formulasVirtuales[col.nombre];
+      if (f != null) col.formula = f;
     }
     if (cols.isEmpty) cols.add(ColumnaPrecio(nombre: 'Precio'));
 
@@ -6300,6 +6984,9 @@ class ListaPrecio {
               if (n > 0) cuotasOv = n;
               continue;
             }
+            // Cualquier otro nombre reservado (__x__) se ignora: no es
+            // una columna de precios de verdad.
+            if (FormulaColumna.esNombreVirtual(colNombre)) continue;
             precios[colNombre] = toDouble(v['precio']);
           }
         }
@@ -12529,21 +13216,30 @@ FacturaModel construirFacturaModelDesdeJson(Map<String, dynamic> j) {
       String nombre = prodNombre.isNotEmpty ? prodNombre : 'Equipo IMEI $imei';
       String marca  = prodMarca;
       String modelo = prodModelo;
-      if (codigo.isNotEmpty &&
-          (modelo.isEmpty || marca.isEmpty || prodNombre.isEmpty)) {
+      String categoria = 'Telefono';
+      String tipo = '';
+      // Precios del catálogo: antes el equipo quedaba con costo y venta
+      // en 0, y las estadísticas mostraban ingresos $0 con ganancia
+      // positiva en las tiendas que vendieron esos equipos.
+      double precioCosto = 0, precioVenta = 0;
+      if (codigo.isNotEmpty) {
         final p = catalogoGlobal.where((x) => x.codigo == codigo).firstOrNull;
         if (p != null) {
           if (modelo.isEmpty) modelo = p.modelo;
           if (marca.isEmpty)  marca  = p.marca;
           if (prodNombre.isEmpty) nombre = p.nombre;
+          if (p.categoria.isNotEmpty) categoria = p.categoria;
+          tipo = p.tipo;
+          precioCosto = p.precioCosto;
+          precioVenta = p.precioVenta;
         }
       }
       equipos.add(ImeiRegistro(
         imei: imei,
         producto: Producto(
           codigo: codigo, nombre: nombre,
-          categoria: 'Telefono', marca: marca, modelo: modelo,
-          tipo: '', precioCosto: 0, precioVenta: 0),
+          categoria: categoria, marca: marca, modelo: modelo,
+          tipo: tipo, precioCosto: precioCosto, precioVenta: precioVenta),
         fechaIngreso: '', proveedor: '', color: '',
         ubicacion: '', vendido: true,
       ));
@@ -32637,8 +33333,20 @@ class _DetalleListaPrecioState extends State<DetalleListaPrecio> {
     // hacer clic en "Poblar automáticamente" cada vez que abría una
     // lista vacía — ahora se rellena sola con los productos del
     // catálogo según la categoría y marca configuradas en la lista.
-    WidgetsBinding.instance.addPostFrameCallback((_) {
+    WidgetsBinding.instance.addPostFrameCallback((_) async {
       if (!mounted) return;
+      // Reponer las funciones de columna guardadas en el dispositivo
+      // por si el servidor devolvio las columnas sin su funcion.
+      await _restaurarFormulasDeCache();
+      if (!mounted) return;
+      // Aplicar las funciones automaticas con los datos ya cargados
+      if (widget.lista.items.isNotEmpty && widget.lista.tieneFormulas) {
+        final n = widget.lista.aplicarFormulas();
+        if (n > 0) {
+          setState(() {});
+          _persistirLista();
+        }
+      }
       if (widget.lista.items.isEmpty &&
           widget.lista.columnas.isNotEmpty) {
         _autoPoblar();
@@ -32700,6 +33408,9 @@ class _DetalleListaPrecioState extends State<DetalleListaPrecio> {
         }
       }
       lista.tasaDelDia = tasaSistema;
+      // Las columnas con funcion automatica se recalculan con la tasa
+      // nueva (algunas multiplican por la tasa).
+      recalculados += lista.aplicarFormulas();
     });
 
     debugPrint('[Lista ${lista.nombre}] $recalculados precios recalculados, '
@@ -32796,6 +33507,9 @@ class _DetalleListaPrecioState extends State<DetalleListaPrecio> {
           },
         ));
       }
+      // Las columnas con funcion mandan sobre el precio automatico:
+      // se recalculan encima de lo que acabamos de poblar.
+      lista.aplicarFormulas();
     });
     // Persistir al backend después de poblar
     _persistirLista();
@@ -32849,6 +33563,29 @@ class _DetalleListaPrecioState extends State<DetalleListaPrecio> {
       final nueva = ListaPrecio.fromMap(
           Map<String, dynamic>.from(mServidor));
       if (!mounted) return;
+      // ── COLUMNAS: nunca se pierden las locales ──────────────
+      // Si el servidor devuelve MENOS columnas de las que hay aca (o
+      // sin su funcion), es porque todavia no habia guardado la
+      // columna recien creada. En ese caso conservamos las locales y
+      // volvemos a mandarlas; antes el polling las borraba a los 15
+      // segundos y parecia que el sistema "no dejaba" agregar columnas.
+      final nombresServidor =
+          nueva.columnas.map((c) => c.nombre.toLowerCase()).toSet();
+      final columnasSoloLocales = widget.lista.columnas
+          .where((c) => !nombresServidor.contains(c.nombre.toLowerCase()))
+          .toList();
+      // Funciones locales, para reponerlas si el servidor no las guardo
+      final formulasLocales = {
+        for (final c in widget.lista.columnas)
+          c.nombre.toLowerCase(): c.formula
+      };
+      for (final c in nueva.columnas) {
+        if (c.formula.esManual) {
+          final local = formulasLocales[c.nombre.toLowerCase()];
+          if (local != null && !local.esManual) c.formula = local;
+        }
+      }
+      if (!mounted) return;
       setState(() {
         // Actualizar TODOS los campos in-place (sin reasignar
         // widget.lista que es final)
@@ -32864,11 +33601,29 @@ class _DetalleListaPrecioState extends State<DetalleListaPrecio> {
         widget.lista.esFinanciamiento = nueva.esFinanciamiento;
         widget.lista.columnas
           ..clear()
-          ..addAll(nueva.columnas);
+          ..addAll(nueva.columnas)
+          ..addAll(columnasSoloLocales);
         widget.lista.items
           ..clear()
           ..addAll(nueva.items);
+        // Las columnas que el servidor todavia no conoce necesitan su
+        // precio en cada item recien traido.
+        for (final col in columnasSoloLocales) {
+          for (final it in widget.lista.items) {
+            if (it.preciosPorColumna.containsKey(col.nombre)) continue;
+            final calculado = widget.lista.calcularColumna(col, it);
+            it.preciosPorColumna[col.nombre] = calculado ??
+                (it.preciosPorColumna.values.isNotEmpty
+                    ? it.preciosPorColumna.values.first
+                    : it.producto.precioVenta);
+          }
+        }
+        // Recalcular lo que tenga funcion automatica con los datos
+        // nuevos que acaban de llegar.
+        widget.lista.aplicarFormulas();
       });
+      // Reponer en el servidor lo que le faltaba
+      if (columnasSoloLocales.isNotEmpty) _persistirLista();
       // Notificación discreta al usuario
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
@@ -32954,14 +33709,25 @@ class _DetalleListaPrecioState extends State<DetalleListaPrecio> {
     _ultimaEdicionLocal = DateTime.now();
     _debouncePersistir?.cancel();
     _debouncePersistir = Timer(const Duration(milliseconds: 600), () async {
-      if (widget.lista.id == null) return; // sin id no podemos persistir
       if (!mounted) return;
       setState(() => _guardandoBackend = true);
       try {
-        await _Api.put(
-            'listas_precios',
-            widget.lista.id.toString(),
-            widget.lista.toMap());
+        if (widget.lista.id == null) {
+          // La lista todavia no existe en el servidor: la creamos.
+          // Antes se salia sin guardar y el usuario perdia todo lo que
+          // habia hecho (columnas nuevas incluidas).
+          final resp = await _Api.post('listas_precios', widget.lista.toMap());
+          if (resp is Map && resp['id'] != null) {
+            widget.lista.id = resp['id'] is int
+                ? resp['id'] as int
+                : int.tryParse(resp['id'].toString());
+          }
+        } else {
+          await _Api.put(
+              'listas_precios',
+              widget.lista.id.toString(),
+              widget.lista.toMap());
+        }
         debugPrint('[ListaPrecio] ✓ Persistida en backend '
             '(id=${widget.lista.id})');
         // Reset de la marca de edición — la persistencia ya terminó
@@ -33014,43 +33780,829 @@ class _DetalleListaPrecioState extends State<DetalleListaPrecio> {
     return mapa;
   }
 
-  void _anadirColumna() {
+  // ════════════════════════════════════════════════════════════
+  //  COLUMNAS: alta, función configurable, renombrar y borrar
+  // ════════════════════════════════════════════════════════════
+
+  /// Producto de muestra para la vista previa del editor de funciones.
+  ItemListaPrecio? get _itemMuestra =>
+      widget.lista.items.isEmpty ? null : widget.lista.items.first;
+
+  /// Añade una columna nueva a la lista.
+  ///
+  /// El diálogo pide el nombre y permite configurar de una vez la
+  /// FUNCIÓN de la columna (cómo se calcula su precio). Si la función
+  /// queda en "Manual" los precios se heredan de la primera columna,
+  /// como antes; si tiene función, se calcula para todos los productos
+  /// en el momento de crearla.
+  Future<void> _anadirColumna() async {
     final colCtrl = TextEditingController();
-    showDialog(context: context, builder: (c) => AlertDialog(
-      title: const Text("Nueva Columna de Precio"),
-      content: TextField(
-        controller: colCtrl,
-        autofocus: true,
-        decoration: const InputDecoration(
-          hintText: "Ej: Detal, Mayorista, Contado...",
-          prefixIcon: Icon(Icons.view_column))),
-      actions: [
-        TextButton(onPressed: () => Navigator.pop(context), child: const Text("Cancelar")),
-        ElevatedButton(
-          onPressed: () {
-            if (colCtrl.text.trim().isNotEmpty) {
-              setState(() {
+    var formula = FormulaColumna();
+    String? error;
+
+    final creada = await showDialog<bool>(
+      context: context,
+      builder: (c) => StatefulBuilder(builder: (c, setD) {
+        final nombre = colCtrl.text.trim();
+        final vistaPrevia = _vistaPreviaTexto(
+            nombre.isEmpty ? 'Nueva' : nombre, formula);
+        return AlertDialog(
+          title: const Text("Nueva columna de precio"),
+          content: SizedBox(
+            width: 420,
+            child: SingleChildScrollView(
+              child: Column(mainAxisSize: MainAxisSize.min, children: [
+                TextField(
+                  controller: colCtrl,
+                  autofocus: true,
+                  textCapitalization: TextCapitalization.sentences,
+                  onChanged: (_) => setD(() => error = null),
+                  decoration: InputDecoration(
+                    labelText: "Nombre de la columna",
+                    hintText: "Ej: Detal, Mayorista, Contado...",
+                    errorText: error,
+                    prefixIcon: const Icon(Icons.view_column)),
+                ),
+                const SizedBox(height: 14),
+                // ── Resumen de la función elegida ────────────────
+                Container(
+                  width: double.infinity,
+                  padding: const EdgeInsets.all(10),
+                  decoration: BoxDecoration(
+                    color: formula.esManual
+                        ? Colors.grey.withValues(alpha: 0.10)
+                        : AppColors.primaryBlue.withValues(alpha: 0.08),
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                  child: Row(children: [
+                    Icon(formula.esManual ? Icons.edit_note : Icons.functions,
+                        size: 18,
+                        color: formula.esManual
+                            ? Colors.grey
+                            : AppColors.primaryBlue),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            formula.esManual
+                                ? 'Sin función — precios a mano'
+                                : 'Función: ${formula.descripcion}',
+                            style: const TextStyle(
+                                fontSize: 12, fontWeight: FontWeight.bold),
+                          ),
+                          if (vistaPrevia != null)
+                            Text(vistaPrevia,
+                                style: const TextStyle(
+                                    fontSize: 11, color: Colors.black54)),
+                        ],
+                      ),
+                    ),
+                    TextButton.icon(
+                      icon: const Icon(Icons.tune, size: 16),
+                      label: const Text('Configurar'),
+                      onPressed: () async {
+                        final f = await _editarFormula(
+                            nombre.isEmpty ? 'Nueva columna' : nombre,
+                            formula);
+                        if (f != null) setD(() => formula = f);
+                      },
+                    ),
+                  ]),
+                ),
+              ]),
+            ),
+          ),
+          actions: [
+            TextButton(
+                onPressed: () => Navigator.pop(c, false),
+                child: const Text("Cancelar")),
+            ElevatedButton(
+              onPressed: () {
                 final nombreCol = colCtrl.text.trim();
-                widget.lista.columnas.add(ColumnaPrecio(nombre: nombreCol));
-                for (var item in widget.lista.items) {
-                  if (!item.preciosPorColumna.containsKey(nombreCol)) {
-                    // Hereda el precio de la primera columna o el precio de venta
-                    final base = item.preciosPorColumna.values.isNotEmpty
-                        ? item.preciosPorColumna.values.first
-                        : (widget.lista.esEnBolivares
-                            ? item.producto.precioVenta * widget.lista.tasaDelDia
-                            : item.producto.precioVenta);
-                    item.preciosPorColumna[nombreCol] = base;
-                  }
+                if (nombreCol.isEmpty) {
+                  setD(() => error = 'Escribe un nombre para la columna');
+                  return;
                 }
-              });
-              _persistirLista(); // sincronizar con backend
-              colCtrl.dispose();
-              Navigator.pop(context);
-            }
-          },
-          child: const Text("Añadir")),
-      ]));
+                if (FormulaColumna.esNombreVirtual(nombreCol)) {
+                  setD(() => error = 'Ese nombre está reservado por el sistema');
+                  return;
+                }
+                if (widget.lista.columnas.any((x) =>
+                    x.nombre.toLowerCase() == nombreCol.toLowerCase())) {
+                  setD(() => error = 'Ya existe una columna con ese nombre');
+                  return;
+                }
+                Navigator.pop(c, true);
+              },
+              child: const Text("Añadir")),
+          ],
+        );
+      }),
+    );
+
+    final nombreCol = colCtrl.text.trim();
+    colCtrl.dispose();
+    if (creada != true || nombreCol.isEmpty || !mounted) return;
+
+    final col = ColumnaPrecio(nombre: nombreCol, formula: formula);
+    setState(() {
+      widget.lista.columnas.add(col);
+      for (final item in widget.lista.items) {
+        // Con función: se calcula. Sin función: hereda el precio de la
+        // primera columna (o el precio de venta del catálogo).
+        final calculado = widget.lista.calcularColumna(col, item);
+        if (calculado != null) {
+          item.preciosPorColumna[nombreCol] = calculado;
+        } else if (!item.preciosPorColumna.containsKey(nombreCol)) {
+          final base = item.preciosPorColumna.values.isNotEmpty
+              ? item.preciosPorColumna.values.first
+              : (widget.lista.esEnBolivares
+                  ? item.producto.precioVenta * widget.lista.tasaEfectiva
+                  : item.producto.precioVenta);
+          item.preciosPorColumna[nombreCol] = base;
+        }
+      }
+    });
+    _persistirLista(); // sincronizar con backend
+    _guardarFormulasEnCache();
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+      content: Text('✅ Columna "$nombreCol" añadida'
+          '${formula.esManual ? '' : ' con función ${formula.descripcion}'}'),
+      backgroundColor: AppColors.statusGreen,
+      duration: const Duration(seconds: 3),
+    ));
+  }
+
+  /// Texto de vista previa: cuánto daría la función para el primer
+  /// producto de la lista. Devuelve null si no se puede calcular.
+  String? _vistaPreviaTexto(String nombreColumna, FormulaColumna f) {
+    if (f.esManual) return null;
+    final it = _itemMuestra;
+    if (it == null) return null;
+    final v = widget.lista
+        .calcularColumna(ColumnaPrecio(nombre: nombreColumna, formula: f), it);
+    final moneda = widget.lista.esEnBolivares ? 'Bs' : '\$';
+    if (v == null) return 'No se pudo calcular — revisa la función';
+    return 'Ej: ${it.producto.nombre} → $moneda ${v.toStringAsFixed(2)}';
+  }
+
+  /// EDITOR COMPLETO DE LA FUNCIÓN DE UNA COLUMNA.
+  ///
+  /// Devuelve la función configurada, o null si el usuario canceló.
+  /// Todo es configurable: modo de cálculo, de dónde sale el valor de
+  /// partida, el número, el redondeo, si se le aplica la tasa o el %
+  /// adicional de la lista, y si se recalcula sola.
+  Future<FormulaColumna?> _editarFormula(
+      String nombreColumna, FormulaColumna original) async {
+    final f = original.copiar();
+    final valorCtrl = TextEditingController(
+        text: f.valor == 0 ? '' : _numeroTexto(f.valor));
+    final multiploCtrl =
+        TextEditingController(text: _numeroTexto(f.multiplo));
+    final exprCtrl = TextEditingController(text: f.expresion);
+
+    // Otras columnas que pueden servir de origen (no ella misma)
+    final otrasColumnas = widget.lista.columnas
+        .where((c) => c.nombre.toLowerCase() != nombreColumna.toLowerCase())
+        .map((c) => c.nombre)
+        .toList();
+    if (f.origen == 'columna' &&
+        (f.columnaOrigen.isEmpty || !otrasColumnas.contains(f.columnaOrigen))) {
+      f.columnaOrigen = otrasColumnas.isEmpty ? '' : otrasColumnas.first;
+    }
+
+    final resultado = await showDialog<FormulaColumna>(
+      context: context,
+      builder: (ctx) => StatefulBuilder(builder: (ctx, setD) {
+        f.valor = double.tryParse(valorCtrl.text.replaceAll(',', '.')) ?? 0;
+        f.multiplo =
+            double.tryParse(multiploCtrl.text.replaceAll(',', '.')) ?? 1;
+        f.expresion = exprCtrl.text;
+
+        final esExpr = f.modo == FormulaColumna.modoExpresion;
+        final usaOrigen = !f.esManual && !esExpr;
+        final vistaPrevia = _vistaPreviaTexto(nombreColumna, f);
+        final errorExpr = esExpr && _itemMuestra != null
+            ? EvaluadorFormula.validar(
+                f.expresion, widget.lista.variablesDe(_itemMuestra!))
+            : null;
+
+        String etiquetaValor() {
+          switch (f.modo) {
+            case FormulaColumna.modoPorcentaje:
+              return 'Porcentaje (10 = +10 %, -5 = −5 %)';
+            case FormulaColumna.modoMonto:
+              return 'Monto a sumar (negativo para restar)';
+            case FormulaColumna.modoMultiplicador:
+              return 'Multiplicador (ej: 1.35)';
+            default:
+              return 'Valor';
+          }
+        }
+
+        return AlertDialog(
+          title: Row(children: [
+            const Icon(Icons.functions, color: AppColors.primaryBlue),
+            const SizedBox(width: 8),
+            Expanded(
+                child: Text('Función de "$nombreColumna"',
+                    style: const TextStyle(fontSize: 16))),
+          ]),
+          content: SizedBox(
+            width: 460,
+            child: SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  // ── 1. Modo de cálculo ────────────────────────
+                  DropdownButtonFormField<String>(
+                    initialValue: f.modo,
+                    isExpanded: true,
+                    decoration: const InputDecoration(
+                      labelText: 'Cómo se calcula esta columna',
+                      prefixIcon: Icon(Icons.calculate),
+                      isDense: true,
+                    ),
+                    items: const [
+                      DropdownMenuItem(
+                          value: FormulaColumna.modoManual,
+                          child: Text('Manual — el precio se escribe a mano')),
+                      DropdownMenuItem(
+                          value: FormulaColumna.modoPorcentaje,
+                          child: Text('Porcentaje sobre un valor (+/− %)')),
+                      DropdownMenuItem(
+                          value: FormulaColumna.modoMonto,
+                          child: Text('Sumar o restar un monto fijo')),
+                      DropdownMenuItem(
+                          value: FormulaColumna.modoMultiplicador,
+                          child: Text('Multiplicar por un factor')),
+                      DropdownMenuItem(
+                          value: FormulaColumna.modoExpresion,
+                          child: Text('Fórmula libre (avanzado)')),
+                    ],
+                    onChanged: (v) => setD(() => f.modo = v ?? f.modo),
+                  ),
+
+                  // ── 2. Origen del valor ───────────────────────
+                  if (usaOrigen) ...[
+                    const SizedBox(height: 12),
+                    DropdownButtonFormField<String>(
+                      initialValue: f.origen,
+                      isExpanded: true,
+                      decoration: const InputDecoration(
+                        labelText: 'Se calcula a partir de',
+                        prefixIcon: Icon(Icons.input),
+                        isDense: true,
+                      ),
+                      items: [
+                        const DropdownMenuItem(
+                            value: 'venta',
+                            child: Text('Precio de venta del catálogo')),
+                        const DropdownMenuItem(
+                            value: 'costo',
+                            child: Text('Precio de costo del catálogo')),
+                        const DropdownMenuItem(
+                            value: 'base',
+                            child: Text('Precio base (primera columna)')),
+                        if (otrasColumnas.isNotEmpty)
+                          const DropdownMenuItem(
+                              value: 'columna',
+                              child: Text('Otra columna de esta lista')),
+                      ],
+                      onChanged: (v) => setD(() {
+                        f.origen = v ?? f.origen;
+                        if (f.origen == 'columna' &&
+                            f.columnaOrigen.isEmpty &&
+                            otrasColumnas.isNotEmpty) {
+                          f.columnaOrigen = otrasColumnas.first;
+                        }
+                      }),
+                    ),
+                    if (f.origen == 'columna' && otrasColumnas.isNotEmpty) ...[
+                      const SizedBox(height: 12),
+                      DropdownButtonFormField<String>(
+                        initialValue: otrasColumnas.contains(f.columnaOrigen)
+                            ? f.columnaOrigen
+                            : otrasColumnas.first,
+                        isExpanded: true,
+                        decoration: const InputDecoration(
+                          labelText: 'Columna de origen',
+                          prefixIcon: Icon(Icons.view_column),
+                          isDense: true,
+                        ),
+                        items: otrasColumnas
+                            .map((n) =>
+                                DropdownMenuItem(value: n, child: Text(n)))
+                            .toList(),
+                        onChanged: (v) =>
+                            setD(() => f.columnaOrigen = v ?? f.columnaOrigen),
+                      ),
+                    ],
+                    const SizedBox(height: 12),
+                    TextField(
+                      controller: valorCtrl,
+                      keyboardType: const TextInputType.numberWithOptions(
+                          decimal: true, signed: true),
+                      onChanged: (_) => setD(() {}),
+                      decoration: InputDecoration(
+                        labelText: etiquetaValor(),
+                        prefixIcon: Icon(
+                            f.modo == FormulaColumna.modoPorcentaje
+                                ? Icons.percent
+                                : f.modo == FormulaColumna.modoMultiplicador
+                                    ? Icons.close
+                                    : Icons.attach_money),
+                        isDense: true,
+                      ),
+                    ),
+                  ],
+
+                  // ── 3. Fórmula libre ──────────────────────────
+                  if (esExpr) ...[
+                    const SizedBox(height: 12),
+                    TextField(
+                      controller: exprCtrl,
+                      maxLines: 3,
+                      minLines: 2,
+                      onChanged: (_) => setD(() {}),
+                      style: const TextStyle(
+                          fontFamily: 'monospace', fontSize: 13),
+                      decoration: InputDecoration(
+                        labelText: 'Fórmula',
+                        hintText: 'Ej: costo * 1.25 + 10',
+                        errorText: errorExpr,
+                        isDense: true,
+                        border: const OutlineInputBorder(),
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    _AyudaFormula(columnas: widget.lista.columnas
+                        .map((c) => c.nombre)
+                        .toList()),
+                  ],
+
+                  // ── 4. Ajustes finales ────────────────────────
+                  if (!f.esManual) ...[
+                    const SizedBox(height: 12),
+                    DropdownButtonFormField<String>(
+                      initialValue: f.redondeo,
+                      isExpanded: true,
+                      decoration: const InputDecoration(
+                        labelText: 'Redondeo del resultado',
+                        prefixIcon: Icon(Icons.straighten),
+                        isDense: true,
+                      ),
+                      items: const [
+                        DropdownMenuItem(
+                            value: 'dos', child: Text('2 decimales (normal)')),
+                        DropdownMenuItem(
+                            value: 'ninguno', child: Text('Sin redondear')),
+                        DropdownMenuItem(
+                            value: 'entero', child: Text('Al entero más cercano')),
+                        DropdownMenuItem(
+                            value: 'arriba', child: Text('Siempre hacia arriba')),
+                        DropdownMenuItem(
+                            value: 'abajo', child: Text('Siempre hacia abajo')),
+                        DropdownMenuItem(
+                            value: 'psicologico',
+                            child: Text('Terminado en ,99')),
+                        DropdownMenuItem(
+                            value: 'multiplo',
+                            child: Text('A múltiplos de…')),
+                      ],
+                      onChanged: (v) => setD(() => f.redondeo = v ?? f.redondeo),
+                    ),
+                    if (f.redondeo == 'multiplo') ...[
+                      const SizedBox(height: 12),
+                      TextField(
+                        controller: multiploCtrl,
+                        keyboardType: const TextInputType.numberWithOptions(
+                            decimal: true),
+                        onChanged: (_) => setD(() {}),
+                        decoration: const InputDecoration(
+                          labelText: 'Múltiplo (ej: 5 → 145, 150, 155)',
+                          prefixIcon: Icon(Icons.linear_scale),
+                          isDense: true,
+                        ),
+                      ),
+                    ],
+                    const SizedBox(height: 4),
+                    SwitchListTile(
+                      dense: true,
+                      contentPadding: EdgeInsets.zero,
+                      title: const Text('Aplicar el % adicional de la lista',
+                          style: TextStyle(fontSize: 13)),
+                      subtitle: Text(
+                          'La lista tiene ${widget.lista.porcentajeAdicional
+                              .toStringAsFixed(2)} % adicional',
+                          style: const TextStyle(fontSize: 11)),
+                      value: f.aplicarAdicional,
+                      onChanged: (v) => setD(() => f.aplicarAdicional = v),
+                    ),
+                    SwitchListTile(
+                      dense: true,
+                      contentPadding: EdgeInsets.zero,
+                      title: const Text('Convertir a bolívares (× tasa)',
+                          style: TextStyle(fontSize: 13)),
+                      subtitle: Text(
+                          'Tasa de la lista: ${widget.lista.tasaEfectiva
+                              .toStringAsFixed(2)} Bs/\$',
+                          style: const TextStyle(fontSize: 11)),
+                      value: f.aplicarTasa,
+                      onChanged: (v) => setD(() => f.aplicarTasa = v),
+                    ),
+                    SwitchListTile(
+                      dense: true,
+                      contentPadding: EdgeInsets.zero,
+                      title: const Text('Recalcular automáticamente',
+                          style: TextStyle(fontSize: 13)),
+                      subtitle: const Text(
+                          'Se aplica sola al poblar la lista, al cambiar la '
+                          'tasa y al editar el precio base',
+                          style: TextStyle(fontSize: 11)),
+                      value: f.auto,
+                      onChanged: (v) => setD(() => f.auto = v),
+                    ),
+                  ],
+
+                  // ── 5. Vista previa ───────────────────────────
+                  if (vistaPrevia != null) ...[
+                    const SizedBox(height: 10),
+                    Container(
+                      width: double.infinity,
+                      padding: const EdgeInsets.all(10),
+                      decoration: BoxDecoration(
+                        color: AppColors.statusGreen.withValues(alpha: 0.10),
+                        borderRadius: BorderRadius.circular(8),
+                      ),
+                      child: Row(children: [
+                        const Icon(Icons.visibility,
+                            size: 16, color: AppColors.statusGreen),
+                        const SizedBox(width: 8),
+                        Expanded(
+                            child: Text(vistaPrevia,
+                                style: const TextStyle(fontSize: 12))),
+                      ]),
+                    ),
+                  ],
+                ],
+              ),
+            ),
+          ),
+          actions: [
+            TextButton(
+                onPressed: () => Navigator.pop(ctx),
+                child: const Text('Cancelar')),
+            ElevatedButton.icon(
+              icon: const Icon(Icons.check, size: 16),
+              label: const Text('Guardar función'),
+              onPressed: () {
+                if (esExpr && errorExpr != null) return;
+                Navigator.pop(ctx, f);
+              },
+            ),
+          ],
+        );
+      }),
+    );
+
+    valorCtrl.dispose();
+    multiploCtrl.dispose();
+    exprCtrl.dispose();
+    return resultado;
+  }
+
+  String _numeroTexto(double v) =>
+      v % 1 == 0 ? v.toStringAsFixed(0) : v.toString();
+
+  /// Menú de acciones sobre una columna (se abre al tocar su título).
+  Future<void> _menuColumna(ColumnaPrecio col) async {
+    final esPrimera = widget.lista.columnas.isNotEmpty &&
+        widget.lista.columnas.first.nombre == col.nombre;
+    await showModalBottomSheet<void>(
+      context: context,
+      builder: (ctx) => SafeArea(
+        child: Column(mainAxisSize: MainAxisSize.min, children: [
+          ListTile(
+            leading: const Icon(Icons.view_column, color: AppColors.primaryBlue),
+            title: Text(col.nombre,
+                style: const TextStyle(fontWeight: FontWeight.bold)),
+            subtitle: Text(col.formula.esManual
+                ? 'Sin función — precios a mano'
+                : 'Función: ${col.formula.descripcion}'
+                  '${col.formula.auto ? ' · automática' : ' · manual'}'),
+          ),
+          const Divider(height: 1),
+          ListTile(
+            leading: const Icon(Icons.functions),
+            title: const Text('Configurar función de la columna'),
+            subtitle: const Text('Define cómo se calcula su precio'),
+            onTap: () {
+              Navigator.pop(ctx);
+              _configurarFormula(col);
+            },
+          ),
+          if (!col.formula.esManual)
+            ListTile(
+              leading: const Icon(Icons.play_arrow, color: AppColors.statusGreen),
+              title: const Text('Aplicar la función ahora'),
+              subtitle: const Text('Recalcula esta columna en todos los productos'),
+              onTap: () {
+                Navigator.pop(ctx);
+                _aplicarFormulaColumna(col);
+              },
+            ),
+          ListTile(
+            leading: const Icon(Icons.percent),
+            title: const Text('Ajuste rápido de precios'),
+            subtitle: const Text('Sumar/restar % o monto a los precios actuales'),
+            onTap: () {
+              Navigator.pop(ctx);
+              _editarColumnaCompleta(col);
+            },
+          ),
+          ListTile(
+            leading: const Icon(Icons.drive_file_rename_outline),
+            title: const Text('Renombrar columna'),
+            onTap: () {
+              Navigator.pop(ctx);
+              _renombrarColumna(col);
+            },
+          ),
+          ListTile(
+            leading: Icon(Icons.delete_outline,
+                color: esPrimera ? Colors.grey : Colors.red),
+            title: Text('Eliminar columna',
+                style: TextStyle(color: esPrimera ? Colors.grey : Colors.red)),
+            subtitle: esPrimera
+                ? const Text('La primera columna es el precio base y no se '
+                    'puede eliminar')
+                : null,
+            onTap: esPrimera
+                ? null
+                : () {
+                    Navigator.pop(ctx);
+                    _eliminarColumna(col);
+                  },
+          ),
+        ]),
+      ),
+    );
+  }
+
+  /// Abre el editor de función para una columna existente y aplica el
+  /// resultado.
+  Future<void> _configurarFormula(ColumnaPrecio col) async {
+    final f = await _editarFormula(col.nombre, col.formula);
+    if (f == null || !mounted) return;
+    setState(() => col.formula = f);
+    var cambios = 0;
+    if (!f.esManual) {
+      final aplicar = await showDialog<bool>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          title: const Text('Función guardada'),
+          content: Text('¿Aplicarla ahora a los ${widget.lista.items.length} '
+              'productos de la lista?\n\nSi eliges "Ahora no", la función '
+              'queda guardada y se aplicará cuando pulses "Aplicar la '
+              'función ahora"'
+              '${f.auto ? ' o cuando la lista se recalcule sola' : ''}.'),
+          actions: [
+            TextButton(
+                onPressed: () => Navigator.pop(ctx, false),
+                child: const Text('Ahora no')),
+            ElevatedButton(
+                onPressed: () => Navigator.pop(ctx, true),
+                child: const Text('Aplicar ahora')),
+          ],
+        ),
+      );
+      if (aplicar == true && mounted) {
+        setState(() {
+          cambios = widget.lista.aplicarFormulas(
+              soloAutomaticas: false, soloColumna: col.nombre);
+        });
+      }
+    }
+    _persistirLista();
+    _guardarFormulasEnCache();
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+      content: Text(cambios > 0
+          ? '✅ Función guardada — $cambios precios recalculados en '
+              '"${col.nombre}"'
+          : '✅ Función de "${col.nombre}" guardada'),
+      backgroundColor: AppColors.statusGreen,
+      duration: const Duration(seconds: 3),
+    ));
+  }
+
+  /// Recalcula UNA columna con su función en todos los productos.
+  void _aplicarFormulaColumna(ColumnaPrecio col) {
+    if (col.formula.esManual) return;
+    final cambios = widget.lista
+        .aplicarFormulas(soloAutomaticas: false, soloColumna: col.nombre);
+    setState(() {});
+    _persistirLista();
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+      content: Text(cambios > 0
+          ? '✅ $cambios precios recalculados en "${col.nombre}"'
+          : 'Los precios de "${col.nombre}" ya estaban al día'),
+      backgroundColor:
+          cambios > 0 ? AppColors.statusGreen : AppColors.primaryBlue,
+      duration: const Duration(seconds: 3),
+    ));
+  }
+
+  /// Recalcula TODAS las columnas que tengan función.
+  void _aplicarTodasLasFormulas() {
+    if (!widget.lista.tieneFormulas) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+        content: Text('Ninguna columna tiene función configurada. '
+            'Toca el título de una columna para configurarla.'),
+        backgroundColor: AppColors.primaryBlue,
+        duration: Duration(seconds: 4),
+      ));
+      return;
+    }
+    final cambios = widget.lista.aplicarFormulas(soloAutomaticas: false);
+    setState(() {});
+    _persistirLista();
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+      content: Text(cambios > 0
+          ? '✅ $cambios precios recalculados con las funciones de las columnas'
+          : 'Todos los precios ya estaban al día'),
+      backgroundColor:
+          cambios > 0 ? AppColors.statusGreen : AppColors.primaryBlue,
+      duration: const Duration(seconds: 3),
+    ));
+  }
+
+  /// Renombra una columna arrastrando con ella los precios guardados y
+  /// las referencias de otras funciones.
+  Future<void> _renombrarColumna(ColumnaPrecio col) async {
+    final ctrl = TextEditingController(text: col.nombre);
+    String? error;
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setD) => AlertDialog(
+          title: const Text('Renombrar columna'),
+          content: TextField(
+            controller: ctrl,
+            autofocus: true,
+            onChanged: (_) => setD(() => error = null),
+            decoration: InputDecoration(
+                labelText: 'Nombre', errorText: error,
+                prefixIcon: const Icon(Icons.view_column)),
+          ),
+          actions: [
+            TextButton(
+                onPressed: () => Navigator.pop(ctx, false),
+                child: const Text('Cancelar')),
+            ElevatedButton(
+              onPressed: () {
+                final n = ctrl.text.trim();
+                if (n.isEmpty) {
+                  setD(() => error = 'Escribe un nombre');
+                  return;
+                }
+                if (FormulaColumna.esNombreVirtual(n)) {
+                  setD(() => error = 'Ese nombre está reservado');
+                  return;
+                }
+                if (n.toLowerCase() != col.nombre.toLowerCase() &&
+                    widget.lista.columnas
+                        .any((x) => x.nombre.toLowerCase() == n.toLowerCase())) {
+                  setD(() => error = 'Ya existe una columna con ese nombre');
+                  return;
+                }
+                Navigator.pop(ctx, true);
+              },
+              child: const Text('Guardar')),
+          ],
+        ),
+      ),
+    );
+    final nuevo = ctrl.text.trim();
+    ctrl.dispose();
+    if (ok != true || nuevo.isEmpty || nuevo == col.nombre || !mounted) return;
+    final viejo = col.nombre;
+    setState(() {
+      for (final it in widget.lista.items) {
+        if (it.preciosPorColumna.containsKey(viejo)) {
+          it.preciosPorColumna[nuevo] = it.preciosPorColumna.remove(viejo)!;
+        }
+      }
+      for (final c in widget.lista.columnas) {
+        if (c.formula.columnaOrigen == viejo) c.formula.columnaOrigen = nuevo;
+        if (c.formula.expresion.isNotEmpty) {
+          c.formula.expresion =
+              c.formula.expresion.replaceAll('[$viejo]', '[$nuevo]');
+        }
+      }
+      col.nombre = nuevo;
+    });
+    _persistirLista();
+    _guardarFormulasEnCache();
+  }
+
+  /// Elimina una columna (y sus precios) previa confirmación.
+  Future<void> _eliminarColumna(ColumnaPrecio col) async {
+    final dependientes = widget.lista.columnas
+        .where((c) =>
+            c.nombre != col.nombre &&
+            (c.formula.columnaOrigen == col.nombre ||
+                c.formula.expresion
+                    .toLowerCase()
+                    .contains('[${col.nombre.toLowerCase()}]')))
+        .map((c) => c.nombre)
+        .toList();
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text('Eliminar "${col.nombre}"'),
+        content: Text(
+            'Se borrarán los precios de esta columna en los '
+            '${widget.lista.items.length} productos de la lista.'
+            '${dependientes.isEmpty ? '' : '\n\n⚠ Estas columnas usan '
+                '"${col.nombre}" en su función y dejarán de calcularse: '
+                '${dependientes.join(", ")}.'}'),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('Cancelar')),
+          ElevatedButton(
+            style: ElevatedButton.styleFrom(backgroundColor: Colors.red),
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('Eliminar')),
+        ],
+      ),
+    );
+    if (ok != true || !mounted) return;
+    setState(() {
+      widget.lista.columnas.removeWhere((c) => c.nombre == col.nombre);
+      for (final it in widget.lista.items) {
+        it.preciosPorColumna.remove(col.nombre);
+      }
+    });
+    _persistirLista();
+    _guardarFormulasEnCache();
+  }
+
+  // ── Copia local de las funciones ────────────────────────────
+  // El backend guarda las columnas por nombre; para que la
+  // configuración no se pierda aunque el servidor recorte algo,
+  // también la guardamos en el dispositivo y la reponemos al abrir
+  // la lista si lo que llegó del servidor viene sin función.
+
+  String get _claveCacheFormulas => 'formulas_columnas_${widget.lista.id}';
+
+  Future<void> _guardarFormulasEnCache() async {
+    if (widget.lista.id == null) return;
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final mapa = {
+        for (final c in widget.lista.columnas)
+          if (!c.formula.esManual) c.nombre: c.formula.toJson()
+      };
+      if (mapa.isEmpty) {
+        await prefs.remove(_claveCacheFormulas);
+      } else {
+        await prefs.setString(_claveCacheFormulas, jsonEncode(mapa));
+      }
+    } catch (e) {
+      debugPrint('[ListaPrecio] No se pudo cachear las funciones: $e');
+    }
+  }
+
+  Future<void> _restaurarFormulasDeCache() async {
+    if (widget.lista.id == null) return;
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final raw = prefs.getString(_claveCacheFormulas);
+      if (raw == null || raw.isEmpty) return;
+      final mapa = jsonDecode(raw);
+      if (mapa is! Map) return;
+      var repuestas = 0;
+      for (final col in widget.lista.columnas) {
+        if (!col.formula.esManual) continue; // el servidor sí la trajo
+        final j = mapa[col.nombre];
+        if (j is Map) {
+          col.formula =
+              FormulaColumna.fromJson(Map<String, dynamic>.from(j));
+          repuestas++;
+        }
+      }
+      if (repuestas > 0 && mounted) setState(() {});
+    } catch (e) {
+      debugPrint('[ListaPrecio] No se pudo leer el caché de funciones: $e');
+    }
   }
 
   /// Persiste los cambios de precios al servidor. Se llama desde el
@@ -33124,7 +34676,6 @@ class _DetalleListaPrecioState extends State<DetalleListaPrecio> {
             setState(() => item.preciosPorColumna[nombreColumna] =
                 double.tryParse(priceCtrl.text) ?? 0.0);
             _persistirLista(); // sincronizar con backend
-            priceCtrl.dispose();
             Navigator.pop(context);
           },
           child: const Text("Guardar")),
@@ -33139,6 +34690,21 @@ class _DetalleListaPrecioState extends State<DetalleListaPrecio> {
       builder: (ctx, setD) => AlertDialog(
         title: Text("Ajustar columna: ${col.nombre}"),
         content: Column(mainAxisSize: MainAxisSize.min, children: [
+          if (!col.formula.esManual && col.formula.auto)
+            Container(
+              padding: const EdgeInsets.all(8),
+              margin: const EdgeInsets.only(bottom: 8),
+              decoration: BoxDecoration(
+                color: Colors.orange.withValues(alpha: 0.12),
+                borderRadius: BorderRadius.circular(6),
+              ),
+              child: Text(
+                  '⚠ Esta columna se calcula sola con la función '
+                  '"${col.formula.descripcion}". El ajuste que hagas acá '
+                  'se perderá en el próximo recálculo. Si quieres que el '
+                  'cambio sea permanente, edita la función de la columna.',
+                  style: const TextStyle(fontSize: 11)),
+            ),
           SwitchListTile(
             title: Text(esPorcentaje ? "Ajuste por porcentaje (%)" : "Valor fijo a sumar/restar"),
             value: esPorcentaje,
@@ -33167,7 +34733,6 @@ class _DetalleListaPrecioState extends State<DetalleListaPrecio> {
                 }
               });
               _persistirLista(); // sincronizar con backend
-              porcentajeCtrl.dispose();
               Navigator.pop(ctx);
               ScaffoldMessenger.of(context).showSnackBar(SnackBar(
                 content: Text("✅ ${widget.lista.items.length} precios actualizados en ${col.nombre}"),
@@ -34454,7 +36019,43 @@ class _DetalleListaPrecioState extends State<DetalleListaPrecio> {
                 onPressed: () => _guardarCambios(),
               ),
             ),
-            IconButton(icon: const Icon(Icons.view_column), tooltip: "Nueva columna", onPressed: _anadirColumna),
+            // ── Columnas ──────────────────────────────────────
+            // Un solo boton para no saturar la barra en pantallas
+            // chicas: crear una columna nueva (con su funcion) y
+            // recalcular las que ya tienen funcion.
+            PopupMenuButton<String>(
+              icon: const Icon(Icons.view_column),
+              tooltip: "Columnas de precio",
+              onSelected: (v) {
+                if (v == 'nueva') {
+                  _anadirColumna();
+                } else if (v == 'aplicar') {
+                  _aplicarTodasLasFormulas();
+                }
+              },
+              itemBuilder: (_) => const [
+                PopupMenuItem(
+                  value: 'nueva',
+                  child: ListTile(
+                    dense: true,
+                    contentPadding: EdgeInsets.zero,
+                    leading: Icon(Icons.add),
+                    title: Text('Nueva columna'),
+                    subtitle: Text('Con función configurable'),
+                  ),
+                ),
+                PopupMenuItem(
+                  value: 'aplicar',
+                  child: ListTile(
+                    dense: true,
+                    contentPadding: EdgeInsets.zero,
+                    leading: Icon(Icons.functions),
+                    title: Text('Aplicar funciones'),
+                    subtitle: Text('Recalcula las columnas con función'),
+                  ),
+                ),
+              ],
+            ),
             IconButton(
               icon: const Icon(Icons.add_shopping_cart),
               tooltip: "Agregar productos manualmente",
@@ -34502,6 +36103,9 @@ class _DetalleListaPrecioState extends State<DetalleListaPrecio> {
                             preciosPorColumna: { for (var col in widget.lista.columnas) col.nombre: precioBase },
                           ));
                         }
+                        // Las columnas con funcion mandan sobre el
+                        // precio heredado del catalogo.
+                        widget.lista.aplicarFormulas();
                       });
                       Navigator.pop(ctx);
                       ScaffoldMessenger.of(context).showSnackBar(SnackBar(
@@ -34618,19 +36222,16 @@ class _DetalleListaPrecioState extends State<DetalleListaPrecio> {
                         style: TextStyle(fontSize: 10, fontWeight: FontWeight.bold, color: Colors.orange))),
                       const Expanded(flex: 2, child: Text("CUOTA", textAlign: TextAlign.right,
                         style: TextStyle(fontSize: 10, fontWeight: FontWeight.bold, color: AppColors.royalBlue))),
+                      // Columnas EXTRA de una lista de financiamiento.
+                      // La primera columna es el precio base (ya sale
+                      // arriba como BASE); de la segunda en adelante son
+                      // columnas que agrego el usuario y antes no se
+                      // veian en ningun lado — parecia que el sistema no
+                      // dejaba agregarlas.
+                      ..._encabezadosColumnas(
+                          widget.lista.columnas.skip(1), esAdmin),
                     ] else
-                      ...widget.lista.columnas.map((col) => Expanded(
-                        flex: 2,
-                        child: GestureDetector(
-                          onTap: esAdmin ? () => _editarColumnaCompleta(col) : null,
-                          child: Row(mainAxisAlignment: MainAxisAlignment.end, children: [
-                            Flexible(child: Text(col.nombre.toUpperCase(),
-                              style: const TextStyle(fontSize: 10, fontWeight: FontWeight.bold, color: AppColors.primaryBlue),
-                              overflow: TextOverflow.ellipsis, textAlign: TextAlign.right)),
-                            if (esAdmin) const Icon(Icons.edit, size: 10, color: AppColors.primaryBlue),
-                          ]),
-                        ),
-                      )),
+                      ..._encabezadosColumnas(widget.lista.columnas, esAdmin),
                     if (esAdmin) const SizedBox(width: 32),
                   ]),
                 ),
@@ -34668,6 +36269,103 @@ class _DetalleListaPrecioState extends State<DetalleListaPrecio> {
               ),
             ]),
     );
+  }
+
+  /// Encabezados de las columnas de precio. Al tocarlos (si es admin)
+  /// se abre el menu de la columna: configurar su funcion, aplicarla,
+  /// ajustar precios, renombrar o eliminar.
+  List<Widget> _encabezadosColumnas(
+      Iterable<ColumnaPrecio> columnas, bool esAdmin) {
+    return columnas
+        .map((col) => Expanded(
+              flex: 2,
+              child: GestureDetector(
+                onTap: esAdmin ? () => _menuColumna(col) : null,
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.end,
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Row(mainAxisAlignment: MainAxisAlignment.end, children: [
+                      Flexible(
+                          child: Text(col.nombre.toUpperCase(),
+                              style: const TextStyle(
+                                  fontSize: 10,
+                                  fontWeight: FontWeight.bold,
+                                  color: AppColors.primaryBlue),
+                              overflow: TextOverflow.ellipsis,
+                              textAlign: TextAlign.right)),
+                      if (!col.formula.esManual)
+                        const Icon(Icons.functions,
+                            size: 10, color: AppColors.statusGreen),
+                      if (esAdmin)
+                        const Icon(Icons.more_vert,
+                            size: 10, color: AppColors.primaryBlue),
+                    ]),
+                    if (!col.formula.esManual)
+                      Text(col.formula.descripcion,
+                          style: const TextStyle(
+                              fontSize: 8, color: Colors.black54),
+                          overflow: TextOverflow.ellipsis,
+                          textAlign: TextAlign.right),
+                  ],
+                ),
+              ),
+            ))
+        .toList();
+  }
+
+  /// Celdas de precio de [item] para las [columnas] indicadas.
+  ///
+  /// Si la columna tiene una funcion AUTOMATICA el precio no se edita
+  /// a mano (se recalcularia solo): la celda se muestra en modo lectura
+  /// con el icono de funcion y al tocarla se abre su configuracion.
+  List<Widget> _celdasColumnas(ItemListaPrecio item, bool esAdmin,
+      String moneda, Iterable<ColumnaPrecio> columnas) {
+    return columnas.map((col) {
+      final valor = item.preciosPorColumna[col.nombre] ?? 0.0;
+      final calculada = !col.formula.esManual && col.formula.auto;
+      return Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 3),
+        child: SizedBox(
+          width: 90,
+          child: _CeldaConEtiqueta(
+            etiqueta: calculada ? 'ƒ ${col.nombre}' : col.nombre,
+            colorEtiqueta:
+                calculada ? AppColors.statusGreen : AppColors.primaryBlue,
+            child: esAdmin && !calculada
+                ? _CeldaPrecioInline(
+                    key: ValueKey('${item.producto.codigo}-${col.nombre}'),
+                    valor: valor,
+                    moneda: moneda,
+                    onCambio: (v) {
+                      setState(() {
+                        item.preciosPorColumna[col.nombre] = v;
+                        // Si otras columnas se calculan a partir de
+                        // esta, se actualizan al instante.
+                        widget.lista.aplicarFormulas();
+                      });
+                      _persistirLista(); // sincronizar con backend
+                    },
+                  )
+                : GestureDetector(
+                    onTap: esAdmin && calculada
+                        ? () => _menuColumna(col)
+                        : null,
+                    child: Text(
+                      "$moneda ${valor.toStringAsFixed(2)}",
+                      textAlign: TextAlign.right,
+                      style: TextStyle(
+                          fontSize: 13,
+                          fontWeight: FontWeight.bold,
+                          color: calculada
+                              ? AppColors.statusGreen
+                              : AppColors.primaryBlue),
+                    ),
+                  ),
+          ),
+        ),
+      );
+    }).toList();
   }
 
   Widget _buildItemRow(ItemListaPrecio item, bool esAdmin, String moneda) {
@@ -34741,8 +36439,13 @@ class _DetalleListaPrecioState extends State<DetalleListaPrecio> {
                     valor: precioBase,
                     moneda: moneda,
                     onCambio: (v) {
-                      setState(() => item
-                          .preciosPorColumna[widget.lista.columnas.first.nombre] = v);
+                      setState(() {
+                        item.preciosPorColumna[
+                            widget.lista.columnas.first.nombre] = v;
+                        // Las columnas que dependen del precio base se
+                        // recalculan al momento.
+                        widget.lista.aplicarFormulas();
+                      });
                       _persistirLista(); // sincronizar con backend
                     },
                   )
@@ -34853,34 +36556,13 @@ class _DetalleListaPrecioState extends State<DetalleListaPrecio> {
                             ? AppColors.statusOrange
                             : AppColors.royalBlue)),
           )),
+          // ── Columnas EXTRA de la lista de financiamiento ──
+          // (la primera columna es el precio base, ya mostrado arriba)
+          ..._celdasColumnas(
+              item, esAdmin, moneda, widget.lista.columnas.skip(1)),
         ] else
           // ── Columnas normales (modo no-financiamiento) ──
-          ...widget.lista.columnas.map((col) {
-            return Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 3),
-              child: SizedBox(width: 90, child: _CeldaConEtiqueta(
-                etiqueta: col.nombre,
-                colorEtiqueta: AppColors.primaryBlue,
-                child: esAdmin
-                    ? _CeldaPrecioInline(
-                        key: ValueKey('${item.producto.codigo}-${col.nombre}'),
-                        valor: item.preciosPorColumna[col.nombre] ?? 0.0,
-                        moneda: moneda,
-                        onCambio: (v) {
-                          setState(() =>
-                              item.preciosPorColumna[col.nombre] = v);
-                          _persistirLista(); // sincronizar con backend
-                        },
-                      )
-                    : Text(
-                        "$moneda ${(item.preciosPorColumna[col.nombre] ?? 0.0).toStringAsFixed(2)}",
-                        textAlign: TextAlign.right,
-                        style: const TextStyle(
-                            fontSize: 13, fontWeight: FontWeight.bold,
-                            color: AppColors.primaryBlue)),
-              )),
-            );
-          }),
+          ..._celdasColumnas(item, esAdmin, moneda, widget.lista.columnas),
         const SizedBox(width: 8),
         // ── Stock disponible (DESPUÉS de los precios) ────────
         SizedBox(width: 56, child: _CeldaConEtiqueta(
@@ -34918,6 +36600,81 @@ class _DetalleListaPrecioState extends State<DetalleListaPrecio> {
             onPressed: () => setState(() => widget.lista.items.remove(item)),
           )),
       ]),
+    );
+  }
+}
+
+/// Estilo de los ejemplos de fórmula del panel de ayuda.
+const TextStyle _estiloEjemploFormula = TextStyle(
+    fontSize: 11, fontFamily: 'monospace', color: Colors.black54);
+
+/// Panel de ayuda del editor de funciones: lista las variables, las
+/// funciones y algunos ejemplos listos para copiar. Se muestra dentro
+/// del editor cuando el modo es "Fórmula libre".
+class _AyudaFormula extends StatelessWidget {
+  final List<String> columnas;
+  const _AyudaFormula({required this.columnas});
+
+  @override
+  Widget build(BuildContext context) {
+    Widget fila(String titulo, String cuerpo) => Padding(
+          padding: const EdgeInsets.only(bottom: 6),
+          child: RichText(
+            text: TextSpan(
+              style: const TextStyle(fontSize: 11, color: Colors.black87),
+              children: [
+                TextSpan(
+                    text: '$titulo: ',
+                    style: const TextStyle(fontWeight: FontWeight.bold)),
+                TextSpan(
+                    text: cuerpo,
+                    style: const TextStyle(fontFamily: 'monospace')),
+              ],
+            ),
+          ),
+        );
+
+    return Theme(
+      data: Theme.of(context).copyWith(dividerColor: Colors.transparent),
+      child: ExpansionTile(
+        tilePadding: EdgeInsets.zero,
+        childrenPadding: const EdgeInsets.only(bottom: 8),
+        leading: const Icon(Icons.help_outline, size: 18),
+        title: const Text('¿Qué puedo escribir en la fórmula?',
+            style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold)),
+        children: [
+          fila('Valores del producto',
+              'costo, venta, base, stock'),
+          fila('Valores de la lista',
+              'tasa, adicional, inicial, cuotas, recargo'),
+          if (columnas.isNotEmpty)
+            fila('Otras columnas',
+                columnas.map((c) => '[$c]').join('  ')),
+          fila('Operaciones', '+  -  *  /  ^  mod  ( )'),
+          fila('Funciones',
+              'redondear(x;dec)  techo(x)  piso(x)  abs(x)  min(a;b)  '
+              'max(a;b)  pot(a;b)  raiz(x)  si(cond;a;b)'),
+          fila('Comparaciones', '>  <  >=  <=  =  <>   y / o'),
+          const SizedBox(height: 4),
+          const Text('Ejemplos',
+              style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold)),
+          const Padding(
+            padding: EdgeInsets.only(top: 2),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text('costo * 1.25 + 10', style: _estiloEjemploFormula),
+                Text('techo(venta * 1.4)', style: _estiloEjemploFormula),
+                Text('si(costo > 200; costo * 1.15; costo * 1.30)',
+                    style: _estiloEjemploFormula),
+                Text('base * tasa', style: _estiloEjemploFormula),
+                Text('redondear(costo * (1 + adicional / 100); 0)',
+                    style: _estiloEjemploFormula),
+              ],
+            ),
+          ),
+        ],
+      ),
     );
   }
 }
@@ -35038,6 +36795,7 @@ class _SelectorProductosListaState extends State<SelectorProductosLista> {
                     producto: p,
                     stockDisponible: stock,
                     preciosPorColumna: { for (var col in widget.lista.columnas) col.nombre: precioBase }));
+                  widget.lista.aplicarFormulas();
                 });
                 ScaffoldMessenger.of(context).showSnackBar(SnackBar(
                   content: Text("✅ ${p.nombre} agregado"),
@@ -36564,34 +38322,56 @@ Future<void> generarReporteIMEI({DateTime? desde, DateTime? hasta}) async {
   final filas = <List<dynamic>>[];
   final detalles = <Map<String, dynamic>>[];
   int vendidos = 0, disponibles = 0;
-  // Conteos por marca y modelo para el resumen
+  int ingresadosPeriodo = 0, vendidosPeriodo = 0;
+  // Conteos por marca, modelo y ubicación para el resumen
   final Map<String, int> porMarca = {};
   final Map<String, int> porModelo = {};
+  final Map<String, int> disponiblesPorUbicacion = {};
+  final hayRango = desde != null || hasta != null;
 
+  // Sin el listado de IMEIs no hay reporte: antes el error se tragaba
+  // y se guardaba un reporte vacío que parecía "no hay equipos". Ahora
+  // el error sube y la pantalla lo muestra.
+  final rawI = (await _Api.get('stock_imei') as List?) ?? [];
+  // Productos solo completan marca/modelo; si fallan, el reporte sigue.
+  List productosRaw = [];
   try {
-    // Cargar IMEIs y productos para garantizar marca/modelo correctos.
-    // Si stock_imei trae marca/modelo vacío (porque no se hizo JOIN o el
-    // producto se editó después), los completamos con la tabla productos
-    // usando el código del producto como llave.
-    List rawI = [];
-    List productosRaw = [];
-    try {
-      rawI = (await _Api.get('stock_imei') as List?) ?? [];
-    } catch (_) {}
-    try {
-      productosRaw = (await _Api.get('productos') as List?) ?? [];
-    } catch (_) {}
+    productosRaw = (await _Api.get('productos') as List?) ?? [];
+  } catch (e) {
+    debugPrint('generarReporteIMEI productos: $e');
+  }
 
-    final prodPorCodigo = <String, Map>{};
-    for (final p in productosRaw) {
-      final c = (p['codigo'] ?? '').toString();
-      if (c.isNotEmpty) prodPorCodigo[c] = p as Map;
-    }
+  final prodPorCodigo = <String, Map>{};
+  for (final p in productosRaw) {
+    if (p is! Map) continue;
+    final c = (p['codigo'] ?? '').toString();
+    if (c.isNotEmpty) prodPorCodigo[c] = p;
+  }
 
-    for (var i in rawI) {
-      if (!_enRango(i['fecha_ingreso'], desde, hasta)) continue;
-      final v = (i['vendido'] == 1 || i['vendido'] == '1');
+  for (var i in rawI) {
+    if (i is! Map) continue;
+    try {
+      final v = (i['vendido'] == 1 || i['vendido'] == '1' || i['vendido'] == true);
+      // Antes se filtraba SOLO por fecha_ingreso: con cualquier rango
+      // de fechas quedaban fuera todos los equipos que entraron antes
+      // (casi todo el stock) y los que tienen fecha_ingreso vacía o en
+      // formato raro, y el reporte salía vacío. Ahora, con rango, entra:
+      //   · todo equipo disponible hoy (es el stock actual),
+      //   · lo que ingresó en el período,
+      //   · lo que se vendió en el período.
+      final ingresoEnRango = hayRango && _enRango(i['fecha_ingreso'], desde, hasta);
+      final ventaEnRango = hayRango && v && _enRango(i['fecha_venta'], desde, hasta);
+      if (hayRango && v && !ingresoEnRango && !ventaEnRango) continue;
+      if (ingresoEnRango) ingresadosPeriodo++;
+      if (ventaEnRango) vendidosPeriodo++;
       if (v) vendidos++; else disponibles++;
+      final movimiento = !hayRango
+          ? (v ? 'Vendido' : 'En stock')
+          : ventaEnRango
+              ? 'Vendido en el período'
+              : ingresoEnRango
+                  ? 'Ingresó en el período'
+                  : 'En stock';
 
       // Resolver marca/modelo/nombre cruzando con productos.
       final codigoProd = (i['producto_codigo'] ?? i['codigo'] ?? '').toString();
@@ -36618,19 +38398,26 @@ Future<void> generarReporteIMEI({DateTime? desde, DateTime? hasta}) async {
       // Conteos
       porMarca[marca]   = (porMarca[marca]   ?? 0) + 1;
       porModelo[modelo] = (porModelo[modelo] ?? 0) + 1;
+      final ubicacion = (i['ubicacion'] ?? '').toString().trim();
+      if (!v) {
+        final u = ubicacion.isEmpty ? 'Sin asignar' : ubicacion;
+        disponiblesPorUbicacion[u] = (disponiblesPorUbicacion[u] ?? 0) + 1;
+      }
 
       filas.add([
-        i['imei'] ?? '',
+        (i['imei'] ?? '').toString(),
         codigoProd,
         nombreEquipo,
         marca,
         modelo,
-        i['proveedor'] ?? '',
-        i['color'] ?? '',
-        i['porcentaje_bateria'] ?? '',
-        i['ubicacion'] ?? '',
+        (i['proveedor'] ?? '').toString(),
+        (i['color'] ?? '').toString(),
+        (i['porcentaje_bateria'] ?? '').toString(),
+        ubicacion,
         v ? 'Sí' : 'No',
-        i['fecha_ingreso'] ?? '',
+        (i['fecha_ingreso'] ?? '').toString(),
+        (i['fecha_venta'] ?? '').toString(),
+        movimiento,
       ]);
       detalles.add({
         'imei': (i['imei'] ?? '').toString(),
@@ -36641,13 +38428,16 @@ Future<void> generarReporteIMEI({DateTime? desde, DateTime? hasta}) async {
         'proveedor': (i['proveedor'] ?? '').toString(),
         'color': (i['color'] ?? '').toString(),
         'porcentaje_bateria': (i['porcentaje_bateria'] ?? '').toString(),
-        'ubicacion': (i['ubicacion'] ?? '').toString(),
+        'ubicacion': ubicacion,
         'vendido': v,
         'fecha_ingreso': (i['fecha_ingreso'] ?? '').toString(),
+        'fecha_venta': (i['fecha_venta'] ?? '').toString(),
+        'movimiento': movimiento,
       });
+    } catch (e) {
+      // Una fila con datos raros no debe tumbar el reporte entero.
+      debugPrint('generarReporteIMEI fila ${i['imei']}: $e');
     }
-  } catch (e) {
-    debugPrint('generarReporteIMEI: $e');
   }
 
   // Función helper para obtener el top N de un mapa por valor descendente.
@@ -36667,13 +38457,17 @@ Future<void> generarReporteIMEI({DateTime? desde, DateTime? hasta}) async {
     hastaIso: hasta?.toIso8601String(),
     encabezados: const [
       'IMEI','Código','Equipo','Marca','Modelo','Proveedor','Color',
-      '% Batería','Ubicación','Vendido','Fecha Ingreso'],
+      '% Batería','Ubicación','Vendido','Fecha Ingreso','Fecha Venta',
+      'Movimiento'],
     filas: filas,
     detalles: detalles,
     resumen: {
       'total_imeis': filas.length,
       'vendidos': vendidos,
       'disponibles': disponibles,
+      if (hayRango) 'ingresados_en_periodo': ingresadosPeriodo,
+      if (hayRango) 'vendidos_en_periodo': vendidosPeriodo,
+      'disponibles_por_ubicacion': disponiblesPorUbicacion,
       'por_marca':  topN(porMarca, 10),
       'por_modelo': topN(porModelo, 10),
     },
@@ -50493,6 +52287,8 @@ class _VentanaEstadisticasProductosState
 
   late TabController _tabs;
   bool _cargando = false;
+  /// Tiendas activas según el backend (orden de la tabla `tiendas`).
+  List<String> _tiendas = [];
 
   @override
   void initState() {
@@ -50533,6 +52329,19 @@ class _VentanaEstadisticasProductosState
       ventasGlobal = ((results[2] as List?) ?? [])
           .map((m) => construirFacturaModelDesdeJson(m as Map<String, dynamic>))
           .toList();
+      // Tiendas activas, para que el Excel muestre también las que no
+      // vendieron en el rango (con 0). Si falla, el reporte usa las
+      // tiendas que aparecen en ventas y existencias.
+      try {
+        final rawT = (await _Api.get('tiendas') as List?) ?? [];
+        _tiendas = rawT.whereType<Map>().where((m) {
+          final a = m['activa'];
+          return a == null || a == 1 || a == '1' || a == true;
+        }).map((m) => (m['nombre'] ?? '').toString().trim())
+          .where((n) => n.isNotEmpty).toList();
+      } catch (e) {
+        debugPrint('[Estadisticas] tiendas: $e');
+      }
     } catch (e) {
       debugPrint('[Estadisticas] error: $e');
     } finally {
@@ -50586,6 +52395,7 @@ class _VentanaEstadisticasProductosState
     final e = m.putIfAbsent(key, () => _StatsItem(producto: p));
     e.unidades += unidades;
     e.total    += monto;
+    e.costo    += p.precioCosto * unidades;
     // Desglose por vendedor
     e.unidadesPorVendedor[vendedor] =
         (e.unidadesPorVendedor[vendedor] ?? 0) + unidades;
@@ -50602,6 +52412,7 @@ class _VentanaEstadisticasProductosState
       'imei'      : imei,
       'tienda'    : factura.tienda,
       'precio'    : monto,
+      'costo'     : p.precioCosto * unidades,
     });
   }
 
@@ -50681,6 +52492,7 @@ class _VentanaEstadisticasProductosState
       final a = agrup.putIfAbsent(k, () => _StatsItem(producto: e.producto));
       a.unidades += e.unidades;
       a.total    += e.total;
+      a.costo    += e.costo;
       // Fusionar desglose por vendedor
       e.unidadesPorVendedor.forEach((v, u) {
         a.unidadesPorVendedor[v] = (a.unidadesPorVendedor[v] ?? 0) + u;
@@ -50954,113 +52766,422 @@ class _VentanaEstadisticasProductosState
     );
   }
 
-  /// Exporta a Excel toda la información del ranking actual,
-  /// incluido el desglose por vendedor y el detalle de cada venta.
-  /// El Excel tiene 3 hojas:
-  ///   1. Ranking — productos ordenados por unidades
-  ///   2. Por vendedor — fila por (producto × vendedor)
-  ///   3. Detalle — fila por cada venta individual (auditoría)
+  /// Nombre de tienda normalizado para agrupar (vacío → "Sin asignar").
+  String _nombreTienda(String t) {
+    final s = t.trim();
+    return s.isEmpty ? 'Sin asignar' : s;
+  }
+
+  bool _pasaFiltros(Producto p) {
+    if (_marcaFiltro != null && p.marca != _marcaFiltro) return false;
+    if (_categoriaFiltro != null && p.categoria != _categoriaFiltro) return false;
+    return true;
+  }
+
+  /// Existencia ACTUAL por producto y tienda: código → (tienda → unidades).
+  /// Teléfonos: IMEIs no vendidos según su ubicación. Resto: stock
+  /// manual del producto en su tienda. Respeta los filtros de marca y
+  /// categoría (la existencia es de hoy, no del rango de fechas).
+  Map<String, Map<String, int>> _existenciaPorTienda(
+      Map<String, Producto> productos) {
+    final ex = <String, Map<String, int>>{};
+    final codigosConImei = <String>{};
+    final catalogo = {for (final p in catalogoGlobal) p.codigo: p};
+    for (final i in stockImeiGlobal) {
+      final codigo = i.producto.codigo;
+      if (codigo.isEmpty) continue;
+      codigosConImei.add(codigo);
+      if (i.vendido) continue;
+      final p = catalogo[codigo] ?? i.producto;
+      if (!_pasaFiltros(p)) continue;
+      productos.putIfAbsent(codigo, () => p);
+      final t = _nombreTienda(i.ubicacion);
+      final m = ex.putIfAbsent(codigo, () => {});
+      m[t] = (m[t] ?? 0) + 1;
+    }
+    for (final p in catalogoGlobal) {
+      if (p.stockManual <= 0) continue;
+      if (codigosConImei.contains(p.codigo) || p.categoria == 'Telefono') continue;
+      if (!_pasaFiltros(p)) continue;
+      productos.putIfAbsent(p.codigo, () => p);
+      final t = _nombreTienda(p.tienda);
+      final m = ex.putIfAbsent(p.codigo, () => {});
+      m[t] = (m[t] ?? 0) + p.stockManual;
+    }
+    return ex;
+  }
+
+  /// Exporta a Excel el análisis del rango y filtros actuales.
+  /// Hojas:
+  ///   1. Rentabilidad por tienda — ventas, unidades, ingresos, costo,
+  ///      ganancia, margen, ticket promedio y existencia de cada tienda.
+  ///   2. Modelos por tienda — unidades vendidas de cada modelo en cada
+  ///      tienda, existencia actual por tienda y alerta de reposición.
+  ///   3. Ranking — productos ordenados por unidades, con ganancia.
+  ///   4. Por vendedor — fila por (producto × vendedor).
+  ///   5. Detalle — fila por cada venta individual (auditoría).
   Future<void> _exportarExcel() async {
     try {
       final ranking = _calcularRanking().values.toList()
         ..sort((a, b) => b.unidades.compareTo(a.unidades));
-      if (ranking.isEmpty) {
+      final productos = <String, Producto>{
+        for (final e in ranking) e.producto.codigo: e.producto,
+      };
+      final existencia = _existenciaPorTienda(productos);
+      if (ranking.isEmpty && existencia.isEmpty) {
         if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-          content: Text('No hay datos para exportar en el rango seleccionado'),
+          content: Text('No hay ventas ni existencias para exportar con estos filtros'),
           backgroundColor: AppColors.statusOrange));
         return;
       }
-      final excel = Excel.createExcel();
-      // El paquete crea por defecto una hoja llamada 'Sheet1' — la
-      // borramos para que la primera hoja sea "Ranking".
-      excel.delete('Sheet1');
 
-      final ts = DateTime.now().millisecondsSinceEpoch;
-      final rangoTxt = '${_desde?.day.toString().padLeft(2,"0") ?? "?"}/'
-          '${_desde?.month.toString().padLeft(2,"0") ?? "?"}/'
-          '${_desde?.year ?? "?"} → '
-          '${_hasta?.day.toString().padLeft(2,"0") ?? "?"}/'
-          '${_hasta?.month.toString().padLeft(2,"0") ?? "?"}/'
-          '${_hasta?.year ?? "?"}';
-
-      // ── Hoja 1: Ranking ──
-      final h1 = excel['Ranking'];
-      h1.appendRow(_filaCeldas(['ESTADÍSTICAS DE PRODUCTOS — TECNO LÍDER']));
-      h1.appendRow(_filaCeldas(['Rango', rangoTxt]));
-      if (_categoriaFiltro != null) {
-        h1.appendRow(_filaCeldas(['Categoría', _categoriaFiltro!]));
-      }
-      if (_marcaFiltro != null) {
-        h1.appendRow(_filaCeldas(['Marca', _marcaFiltro!]));
-      }
-      h1.appendRow(_filaCeldas([]));
-      h1.appendRow(_filaCeldas([
-        '#', 'Código', 'Producto', 'Marca', 'Modelo', 'Categoría',
-        'Unidades', 'Precio Unit USD', 'Monto USD'
-      ]));
-      for (int i = 0; i < ranking.length; i++) {
-        final e = ranking[i];
-        h1.appendRow(_filaCeldas([
-          i + 1,
-          e.producto.codigo,
-          e.producto.nombre,
-          e.producto.marca,
-          e.producto.modelo,
-          e.producto.categoria,
-          e.unidades,
-          e.producto.precioVenta,
-          e.total,
-        ]));
-      }
-
-      // ── Hoja 2: Por vendedor ──
-      // Una fila por cada combinación producto × vendedor.
-      // Útil para tablas dinámicas y para calcular comisiones manuales.
-      final h2 = excel['Por vendedor'];
-      h2.appendRow(_filaCeldas([
-        'Producto', 'Código', 'Marca', 'Categoría',
-        'Vendedor', 'Unidades', 'Monto USD'
-      ]));
-      for (final e in ranking) {
-        for (final v in e.vendedoresOrdenados) {
-          final monto = e.montoPorVendedor[v.key] ?? 0;
-          h2.appendRow(_filaCeldas([
-            e.producto.nombre,
-            e.producto.codigo,
-            e.producto.marca,
-            e.producto.categoria,
-            v.key,
-            v.value,
-            monto,
-          ]));
-        }
-      }
-
-      // ── Hoja 3: Detalle (cada venta individual) ──
-      final h3 = excel['Detalle'];
-      h3.appendRow(_filaCeldas([
-        'Fecha', 'Nro Factura', 'Cliente', 'Cédula',
-        'Producto', 'Código', 'Marca', 'Categoría', 'IMEI',
-        'Vendedor', 'Creador (cajero)', 'Tienda', 'Precio USD'
-      ]));
+      // ── Agregados por tienda y por (producto × tienda) ──
+      final facturasPorTienda = <String, Set<String>>{};
+      final unidadesTienda = <String, int>{};
+      final ingresoTienda = <String, double>{};
+      final costoTienda = <String, double>{};
+      final vendidoProdTienda = <String, Map<String, int>>{};
       for (final e in ranking) {
         for (final v in e.ventas) {
-          h3.appendRow(_filaCeldas([
-            v['fecha'],
-            v['nroFactura'],
-            v['cliente'],
-            v['cedula'],
-            e.producto.nombre,
-            e.producto.codigo,
-            e.producto.marca,
-            e.producto.categoria,
-            v['imei'],
-            v['vendedor'],
-            v['creador'],
-            v['tienda'],
-            v['precio'],
-          ]));
+          final t = _nombreTienda((v['tienda'] ?? '').toString());
+          facturasPorTienda.putIfAbsent(t, () => {})
+              .add((v['nroFactura'] ?? '').toString());
+          unidadesTienda[t] = (unidadesTienda[t] ?? 0) + 1;
+          ingresoTienda[t] = (ingresoTienda[t] ?? 0) +
+              ((v['precio'] as num?)?.toDouble() ?? 0);
+          costoTienda[t] = (costoTienda[t] ?? 0) +
+              ((v['costo'] as num?)?.toDouble() ?? 0);
+          final m = vendidoProdTienda.putIfAbsent(e.producto.codigo, () => {});
+          m[t] = (m[t] ?? 0) + 1;
         }
+      }
+      final existTienda = <String, int>{};
+      final valorInvTienda = <String, double>{};
+      existencia.forEach((codigo, porTienda) {
+        final costo = productos[codigo]?.precioCosto ?? 0;
+        porTienda.forEach((t, u) {
+          existTienda[t] = (existTienda[t] ?? 0) + u;
+          valorInvTienda[t] = (valorInvTienda[t] ?? 0) + costo * u;
+        });
+      });
+
+      // Tiendas: primero las del backend en su orden; luego cualquier
+      // otra ubicación que aparezca en ventas o existencias.
+      final tiendas = <String>[..._tiendas.map(_nombreTienda)];
+      final extras = <String>{
+        ...unidadesTienda.keys, ...existTienda.keys,
+      }.where((t) => !tiendas.contains(t)).toList()..sort();
+      tiendas.addAll(extras);
+
+      final excel = Excel.createExcel();
+
+      final ts = DateTime.now().millisecondsSinceEpoch;
+      String f2(int n) => n.toString().padLeft(2, '0');
+      String fecha(DateTime? d) =>
+          d == null ? '?' : '${f2(d.day)}/${f2(d.month)}/${d.year}';
+      final ahora = DateTime.now();
+      final subtitulo = [
+        'Período: ${fecha(_desde)} al ${fecha(_hasta)}',
+        'Categoría: ${_categoriaFiltro ?? "Todas"}',
+        'Marca: ${_marcaFiltro ?? "Todas"}',
+        'Generado: ${fecha(ahora)} ${f2(ahora.hour)}:${f2(ahora.minute)}',
+      ].join('   ·   ');
+
+      // ════════ Hoja 1: Rentabilidad por tienda ════════
+      {
+        final h = _HojaXlsx(excel['Rentabilidad por tienda']);
+        // 'Sheet1' (la hoja por defecto del paquete) solo se puede
+        // borrar cuando ya existe otra; borrarla antes no hace nada y
+        // el archivo abría en una hoja vacía.
+        excel.delete('Sheet1');
+        const cols = [
+          ('TIENDA', _XlsxColores.navy, _XlsxColores.naranja),
+          ('# VENTAS', _XlsxColores.azul, _XlsxColores.blanco),
+          ('UNIDADES', _XlsxColores.teal, _XlsxColores.blanco),
+          ('INGRESOS', _XlsxColores.verde, _XlsxColores.blanco),
+          ('COSTO', _XlsxColores.gris, _XlsxColores.blanco),
+          ('GANANCIA TOTAL', _XlsxColores.coral, _XlsxColores.blanco),
+          ('MARGEN %', _XlsxColores.teal2, _XlsxColores.blanco),
+          ('TICKET PROM.', _XlsxColores.azul, _XlsxColores.blanco),
+          ('% DE LAS VENTAS', _XlsxColores.teal, _XlsxColores.blanco),
+          ('EXISTENCIA HOY', _XlsxColores.morado, _XlsxColores.blanco),
+          ('VALOR INVENTARIO', _XlsxColores.morado, _XlsxColores.blanco),
+        ];
+        h.titulo(0, cols.length, 'RENTABILIDAD POR TIENDA — TECNO LÍDER', subtitulo);
+        const fh = 4;
+        for (var c = 0; c < cols.length; c++) {
+          h.encabezado(c, fh, cols[c].$1, fondo: cols[c].$2, texto: cols[c].$3);
+        }
+        h.alto(fh, 30);
+        final totalIngreso = ingresoTienda.values.fold<double>(0, (s, v) => s + v);
+        var r = fh + 1;
+        var tVentas = 0, tUnid = 0, tExist = 0;
+        var tIng = 0.0, tCosto = 0.0, tValInv = 0.0;
+        for (var i = 0; i < tiendas.length; i++) {
+          final t = tiendas[i];
+          final ventas = facturasPorTienda[t]?.length ?? 0;
+          final unid = unidadesTienda[t] ?? 0;
+          final ing = ingresoTienda[t] ?? 0;
+          final costo = costoTienda[t] ?? 0;
+          final gan = ing - costo;
+          final exist = existTienda[t] ?? 0;
+          final valInv = valorInvTienda[t] ?? 0;
+          tVentas += ventas; tUnid += unid; tExist += exist;
+          tIng += ing; tCosto += costo; tValInv += valInv;
+          final fondo = i.isEven ? _XlsxColores.fila1 : _XlsxColores.fila2;
+          h.celda(0, r, t, fondo: _XlsxColores.paleta[i % _XlsxColores.paleta.length],
+              color: _XlsxColores.blanco, negrita: true);
+          h.entero(1, r, ventas, fondo: fondo);
+          h.entero(2, r, unid, fondo: fondo);
+          h.dinero(3, r, ing, fondo: fondo);
+          h.dinero(4, r, costo, fondo: fondo);
+          h.dinero(5, r, gan, fondo: _XlsxColores.verdeClaro,
+              color: _XlsxColores.verdeTexto, negrita: true);
+          h.porcentaje(6, r, ing > 0 ? gan / ing : 0, fondo: _XlsxColores.amarillo);
+          h.dinero(7, r, ventas > 0 ? ing / ventas : 0, fondo: fondo);
+          h.porcentaje(8, r, totalIngreso > 0 ? ing / totalIngreso : 0, fondo: fondo);
+          h.entero(9, r, exist, fondo: fondo);
+          h.dinero(10, r, valInv, fondo: fondo);
+          h.alto(r, 22);
+          r++;
+        }
+        final tGan = tIng - tCosto;
+        h.celda(0, r, '⚡ TOTAL GENERAL', fondo: _XlsxColores.navy,
+            color: _XlsxColores.naranja, negrita: true);
+        h.entero(1, r, tVentas, fondo: _XlsxColores.navy, color: _XlsxColores.naranja, negrita: true);
+        h.entero(2, r, tUnid, fondo: _XlsxColores.navy, color: _XlsxColores.naranja, negrita: true);
+        h.dinero(3, r, tIng, fondo: _XlsxColores.navy, color: _XlsxColores.naranja, negrita: true);
+        h.dinero(4, r, tCosto, fondo: _XlsxColores.navy, color: _XlsxColores.naranja, negrita: true);
+        h.dinero(5, r, tGan, fondo: _XlsxColores.navy, color: _XlsxColores.naranja, negrita: true);
+        h.porcentaje(6, r, tIng > 0 ? tGan / tIng : 0, fondo: _XlsxColores.navy, color: _XlsxColores.naranja, negrita: true);
+        h.dinero(7, r, tVentas > 0 ? tIng / tVentas : 0, fondo: _XlsxColores.navy, color: _XlsxColores.naranja, negrita: true);
+        h.porcentaje(8, r, tIng > 0 ? 1 : 0, fondo: _XlsxColores.navy, color: _XlsxColores.naranja, negrita: true);
+        h.entero(9, r, tExist, fondo: _XlsxColores.navy, color: _XlsxColores.naranja, negrita: true);
+        h.dinero(10, r, tValInv, fondo: _XlsxColores.navy, color: _XlsxColores.naranja, negrita: true);
+        h.alto(r, 26);
+        h.nota(0, r + 2, cols.length,
+            'Ingresos y costo según precios del catálogo de cada producto vendido. '
+            '# Ventas = facturas distintas. Existencia y valor de inventario son de hoy '
+            '(teléfonos por IMEI disponible en su ubicación).');
+        h.anchos([24, 11, 11, 15, 15, 17, 11, 14, 15, 14, 17]);
+      }
+
+      // ════════ Hoja 2: Modelos por tienda ════════
+      {
+        final h = _HojaXlsx(excel['Modelos por tienda']);
+        final nT = tiendas.length;
+        // Columnas: MODELO, CATEGORÍA, [vendidos × tienda], TOTAL VENDIDO,
+        //           [existencia × tienda], TOTAL EXISTENCIA, INGRESOS,
+        //           GANANCIA, ESTADO
+        const cVend = 2;
+        final cTotV = cVend + nT;
+        final cExist = cTotV + 1;
+        final cTotE = cExist + nT;
+        final cIng = cTotE + 1;
+        final cGan = cIng + 1;
+        final cEst = cGan + 1;
+        final nCols = cEst + 1;
+        h.titulo(0, nCols, 'VENTAS Y EXISTENCIA POR MODELO Y TIENDA — TECNO LÍDER', subtitulo);
+        // Fila de grupos
+        const fg = 4, fh = 5;
+        h.grupo(cVend, cTotV, fg, 'VENDIDOS EN EL PERÍODO', _XlsxColores.azul);
+        h.grupo(cExist, cTotE, fg, 'EXISTENCIA HOY', _XlsxColores.morado);
+        h.grupo(cIng, cGan, fg, 'RESULTADO', _XlsxColores.verde);
+        h.encabezado(0, fh, 'MODELO', fondo: _XlsxColores.navy, texto: _XlsxColores.naranja);
+        h.encabezado(1, fh, 'CATEGORÍA', fondo: _XlsxColores.navy, texto: _XlsxColores.naranja);
+        for (var i = 0; i < nT; i++) {
+          h.encabezado(cVend + i, fh, tiendas[i].toUpperCase(), fondo: _XlsxColores.azul);
+          h.encabezado(cExist + i, fh, tiendas[i].toUpperCase(), fondo: _XlsxColores.morado);
+        }
+        h.encabezado(cTotV, fh, 'TOTAL VENDIDO', fondo: _XlsxColores.navy, texto: _XlsxColores.naranja);
+        h.encabezado(cTotE, fh, 'TOTAL EXISTENCIA', fondo: _XlsxColores.navy, texto: _XlsxColores.naranja);
+        h.encabezado(cIng, fh, 'INGRESOS', fondo: _XlsxColores.verde);
+        h.encabezado(cGan, fh, 'GANANCIA', fondo: _XlsxColores.coral);
+        h.encabezado(cEst, fh, 'ESTADO', fondo: _XlsxColores.teal2);
+        h.alto(fh, 32);
+
+        final porCodigo = {for (final e in ranking) e.producto.codigo: e};
+        final codigos = productos.keys.toList();
+        int vendidoDe(String c) => porCodigo[c]?.unidades ?? 0;
+        int existeDe(String c) =>
+            (existencia[c]?.values ?? const <int>[]).fold(0, (s, v) => s + v);
+        codigos.sort((a, b) {
+          final d = vendidoDe(b).compareTo(vendidoDe(a));
+          if (d != 0) return d;
+          final d2 = existeDe(b).compareTo(existeDe(a));
+          if (d2 != 0) return d2;
+          return _nombreModelo(productos[a]!).compareTo(_nombreModelo(productos[b]!));
+        });
+
+        final totVendT = List<int>.filled(nT, 0);
+        final totExistT = List<int>.filled(nT, 0);
+        var totV = 0, totE = 0;
+        var totIng = 0.0, totGan = 0.0;
+        var r = fh + 1;
+        for (var k = 0; k < codigos.length; k++) {
+          final c = codigos[k];
+          final p = productos[c]!;
+          final st = porCodigo[c];
+          final fondo = k.isEven ? _XlsxColores.fila1 : _XlsxColores.fila2;
+          h.celda(0, r, _nombreModelo(p), fondo: fondo, negrita: true);
+          h.celda(1, r, p.categoria, fondo: fondo);
+          final vend = vendidoDe(c);
+          final exist = existeDe(c);
+          for (var i = 0; i < nT; i++) {
+            final u = vendidoProdTienda[c]?[tiendas[i]] ?? 0;
+            final e = existencia[c]?[tiendas[i]] ?? 0;
+            totVendT[i] += u;
+            totExistT[i] += e;
+            h.entero(cVend + i, r, u, fondo: fondo, gris: u == 0);
+            h.entero(cExist + i, r, e, fondo: fondo, gris: e == 0);
+          }
+          h.entero(cTotV, r, vend, fondo: _XlsxColores.azulClaro, negrita: true);
+          h.entero(cTotE, r, exist, fondo: _XlsxColores.moradoClaro, negrita: true);
+          final ing = st?.total ?? 0;
+          final gan = ing - (st?.costo ?? 0);
+          totV += vend; totE += exist; totIng += ing; totGan += gan;
+          h.dinero(cIng, r, ing, fondo: fondo);
+          h.dinero(cGan, r, gan, fondo: _XlsxColores.verdeClaro,
+              color: _XlsxColores.verdeTexto, negrita: true);
+          final String estado;
+          final String fondoEstado;
+          if (exist == 0 && vend > 0) {
+            estado = 'AGOTADO'; fondoEstado = _XlsxColores.rojoClaro;
+          } else if (exist < vend) {
+            estado = 'REPONER'; fondoEstado = _XlsxColores.amarillo;
+          } else if (vend == 0) {
+            estado = 'SIN MOVIMIENTO'; fondoEstado = _XlsxColores.grisClaro;
+          } else {
+            estado = 'OK'; fondoEstado = _XlsxColores.verdeClaro;
+          }
+          h.celda(cEst, r, estado, fondo: fondoEstado, negrita: true, centrado: true);
+          r++;
+        }
+        h.celda(0, r, '⚡ TOTAL', fondo: _XlsxColores.navy, color: _XlsxColores.naranja, negrita: true);
+        h.celda(1, r, '', fondo: _XlsxColores.navy);
+        for (var i = 0; i < nT; i++) {
+          h.entero(cVend + i, r, totVendT[i], fondo: _XlsxColores.navy, color: _XlsxColores.naranja, negrita: true);
+          h.entero(cExist + i, r, totExistT[i], fondo: _XlsxColores.navy, color: _XlsxColores.naranja, negrita: true);
+        }
+        h.entero(cTotV, r, totV, fondo: _XlsxColores.navy, color: _XlsxColores.naranja, negrita: true);
+        h.entero(cTotE, r, totE, fondo: _XlsxColores.navy, color: _XlsxColores.naranja, negrita: true);
+        h.dinero(cIng, r, totIng, fondo: _XlsxColores.navy, color: _XlsxColores.naranja, negrita: true);
+        h.dinero(cGan, r, totGan, fondo: _XlsxColores.navy, color: _XlsxColores.naranja, negrita: true);
+        h.celda(cEst, r, '', fondo: _XlsxColores.navy);
+        h.alto(r, 24);
+        h.nota(0, r + 2, nCols,
+            'ESTADO: AGOTADO = se vendió y no queda existencia · REPONER = queda menos '
+            'de lo que se vendió en el período · SIN MOVIMIENTO = hay existencia pero '
+            'no se vendió en el período.');
+        h.anchos([
+          30, 14,
+          for (var i = 0; i < nT; i++) 13.0, 13,
+          for (var i = 0; i < nT; i++) 13.0, 14,
+          15, 15, 16,
+        ]);
+      }
+
+      // ════════ Hoja 3: Ranking ════════
+      {
+        final h = _HojaXlsx(excel['Ranking']);
+        const cab = [
+          '#', 'Código', 'Producto', 'Marca', 'Modelo', 'Categoría',
+          'Unidades', 'Precio Unit USD', 'Ingresos USD', 'Costo USD',
+          'Ganancia USD', 'Margen %',
+        ];
+        h.titulo(0, cab.length, 'RANKING DE PRODUCTOS — TECNO LÍDER', subtitulo);
+        for (var c = 0; c < cab.length; c++) {
+          h.encabezado(c, 4, cab[c]);
+        }
+        var r = 5;
+        for (var i = 0; i < ranking.length; i++) {
+          final e = ranking[i];
+          final fondo = i.isEven ? _XlsxColores.fila1 : _XlsxColores.fila2;
+          final gan = e.total - e.costo;
+          h.entero(0, r, i + 1, fondo: i < 3 ? _XlsxColores.amarillo : fondo, negrita: i < 3);
+          h.celda(1, r, e.producto.codigo, fondo: fondo);
+          h.celda(2, r, e.producto.nombre, fondo: fondo);
+          h.celda(3, r, e.producto.marca, fondo: fondo);
+          h.celda(4, r, e.producto.modelo, fondo: fondo);
+          h.celda(5, r, e.producto.categoria, fondo: fondo);
+          h.entero(6, r, e.unidades, fondo: fondo, negrita: true);
+          h.dinero(7, r, e.producto.precioVenta, fondo: fondo);
+          h.dinero(8, r, e.total, fondo: fondo);
+          h.dinero(9, r, e.costo, fondo: fondo);
+          h.dinero(10, r, gan, fondo: _XlsxColores.verdeClaro,
+              color: _XlsxColores.verdeTexto, negrita: true);
+          h.porcentaje(11, r, e.total > 0 ? gan / e.total : 0, fondo: fondo);
+          r++;
+        }
+        h.anchos([6, 14, 34, 14, 18, 14, 10, 14, 14, 14, 14, 10]);
+      }
+
+      // ════════ Hoja 4: Por vendedor ════════
+      // Una fila por cada combinación producto × vendedor.
+      // Útil para tablas dinámicas y para calcular comisiones manuales.
+      {
+        final h = _HojaXlsx(excel['Por vendedor']);
+        const cab = [
+          'Producto', 'Código', 'Marca', 'Categoría',
+          'Vendedor', 'Unidades', 'Monto USD',
+        ];
+        for (var c = 0; c < cab.length; c++) {
+          h.encabezado(c, 0, cab[c]);
+        }
+        var r = 1;
+        for (final e in ranking) {
+          for (final v in e.vendedoresOrdenados) {
+            final fondo = r.isEven ? _XlsxColores.fila2 : _XlsxColores.fila1;
+            h.celda(0, r, e.producto.nombre, fondo: fondo);
+            h.celda(1, r, e.producto.codigo, fondo: fondo);
+            h.celda(2, r, e.producto.marca, fondo: fondo);
+            h.celda(3, r, e.producto.categoria, fondo: fondo);
+            h.celda(4, r, v.key, fondo: fondo);
+            h.entero(5, r, v.value, fondo: fondo);
+            h.dinero(6, r, e.montoPorVendedor[v.key] ?? 0, fondo: fondo);
+            r++;
+          }
+        }
+        h.anchos([34, 14, 14, 14, 22, 10, 14]);
+      }
+
+      // ════════ Hoja 5: Detalle (cada venta individual) ════════
+      {
+        final h = _HojaXlsx(excel['Detalle']);
+        const cab = [
+          'Fecha', 'Nro Factura', 'Cliente', 'Cédula',
+          'Producto', 'Código', 'Marca', 'Categoría', 'IMEI',
+          'Vendedor', 'Creador (cajero)', 'Tienda', 'Precio USD',
+          'Costo USD', 'Ganancia USD',
+        ];
+        for (var c = 0; c < cab.length; c++) {
+          h.encabezado(c, 0, cab[c]);
+        }
+        var r = 1;
+        for (final e in ranking) {
+          for (final v in e.ventas) {
+            final fondo = r.isEven ? _XlsxColores.fila2 : _XlsxColores.fila1;
+            final precio = (v['precio'] as num?)?.toDouble() ?? 0;
+            final costo = (v['costo'] as num?)?.toDouble() ?? 0;
+            h.celda(0, r, (v['fecha'] ?? '').toString(), fondo: fondo);
+            h.celda(1, r, (v['nroFactura'] ?? '').toString(), fondo: fondo);
+            h.celda(2, r, (v['cliente'] ?? '').toString(), fondo: fondo);
+            h.celda(3, r, (v['cedula'] ?? '').toString(), fondo: fondo);
+            h.celda(4, r, e.producto.nombre, fondo: fondo);
+            h.celda(5, r, e.producto.codigo, fondo: fondo);
+            h.celda(6, r, e.producto.marca, fondo: fondo);
+            h.celda(7, r, e.producto.categoria, fondo: fondo);
+            h.celda(8, r, (v['imei'] ?? '').toString(), fondo: fondo);
+            h.celda(9, r, (v['vendedor'] ?? '').toString(), fondo: fondo);
+            h.celda(10, r, (v['creador'] ?? '').toString(), fondo: fondo);
+            h.celda(11, r, _nombreTienda((v['tienda'] ?? '').toString()), fondo: fondo);
+            h.dinero(12, r, precio, fondo: fondo);
+            h.dinero(13, r, costo, fondo: fondo);
+            h.dinero(14, r, precio - costo, fondo: fondo);
+            r++;
+          }
+        }
+        h.anchos([18, 12, 26, 12, 30, 14, 12, 12, 18, 18, 18, 16, 12, 12, 13]);
       }
 
       final bytes = excel.encode();
@@ -51080,6 +53201,14 @@ class _VentanaEstadisticasProductosState
     }
   }
 
+  /// Nombre del modelo para el Excel: el nombre del producto (incluye
+  /// la variante, p. ej. "HONOR PLAY 10 4/128"); si falta, marca+modelo.
+  String _nombreModelo(Producto p) {
+    final n = p.nombre.trim();
+    if (n.isNotEmpty) return n;
+    return _etiqueta(p);
+  }
+
   String _etiqueta(Producto p) {
     if (p.modelo.isNotEmpty && p.modelo != 'N/A') {
       return '${p.marca} ${p.modelo}'.trim();
@@ -51092,6 +53221,8 @@ class _StatsItem {
   final Producto producto;
   int unidades;
   double total;
+  /// Costo de lo vendido (precio de costo del catálogo × unidades).
+  double costo;
   /// Desglose: unidades vendidas por cada vendedor.
   /// Clave = nombre del vendedor (de `vendedorDeEquipo`/`vendedorDeItem`).
   /// Valor = cantidad de unidades que ese vendedor movió.
@@ -51109,6 +53240,7 @@ class _StatsItem {
     required this.producto,
     this.unidades = 0,
     this.total = 0,
+    this.costo = 0,
     Map<String, int>? unidadesPorVendedor,
     Map<String, double>? montoPorVendedor,
     List<Map<String, dynamic>>? ventas,
@@ -51122,6 +53254,169 @@ class _StatsItem {
       ..sort((a, b) => b.value.compareTo(a.value));
     return entries;
   }
+}
+
+// ════════════════════════════════════════════════════════════
+//  Helpers de Excel con formato (Estadísticas de Productos)
+// ════════════════════════════════════════════════════════════
+//  Pequeña capa sobre el paquete `excel` para escribir celdas con
+//  fondo, bordes y formato numérico sin repetir CellStyle en cada
+//  llamada. Los colores siguen el reporte "Rentabilidad por tienda".
+class _XlsxColores {
+  static const navy = '#1B2A41';
+  static const naranja = '#F5A524';
+  static const blanco = '#FFFFFF';
+  static const azul = '#1E88E5';
+  static const teal = '#2E7D83';
+  static const teal2 = '#3A8A96';
+  static const verde = '#2E6B4F';
+  static const coral = '#E8623A';
+  static const gris = '#607D8B';
+  static const morado = '#5E35B1';
+  static const fila1 = '#EEF6FB';
+  static const fila2 = '#FFFFFF';
+  static const amarillo = '#FFF4B8';
+  static const verdeClaro = '#E6F4EA';
+  static const verdeTexto = '#1E7B34';
+  static const azulClaro = '#DCEBFA';
+  static const moradoClaro = '#EAE3F7';
+  static const rojoClaro = '#FAD4D0';
+  static const grisClaro = '#ECEFF1';
+  static const textoGris = '#9E9E9E';
+  static const borde = '#B0BEC5';
+  /// Colores de la columna TIENDA, uno por tienda (se repiten).
+  static const paleta = [
+    '#1E88E5', '#26A69A', '#3949AB', '#8E24AA', '#F4511E', '#6D4C41',
+  ];
+}
+
+class _HojaXlsx {
+  final Sheet hoja;
+  _HojaXlsx(this.hoja);
+
+  static final _fmtDinero =
+      NumFormat.custom(formatCode: r'"$"#,##0.00;[Red]-"$"#,##0.00');
+  static final _fmtPorc = NumFormat.custom(formatCode: '0.0%');
+  static final _fmtEntero = NumFormat.custom(formatCode: '#,##0');
+
+  xl.Border get _borde => xl.Border(
+      borderStyle: xl.BorderStyle.Thin,
+      borderColorHex: ExcelColor.fromHexString(_XlsxColores.borde));
+
+  CellStyle _estilo({
+    String? fondo,
+    String color = '#000000',
+    bool negrita = false,
+    HorizontalAlign alineado = HorizontalAlign.Left,
+    NumFormat numFormat = NumFormat.standard_0,
+    int? tamano,
+    bool bordes = true,
+    bool ajustar = false,
+  }) =>
+      CellStyle(
+        backgroundColorHex:
+            fondo == null ? ExcelColor.none : ExcelColor.fromHexString(fondo),
+        fontColorHex: ExcelColor.fromHexString(color),
+        bold: negrita,
+        fontSize: tamano,
+        horizontalAlign: alineado,
+        verticalAlign: VerticalAlign.Center,
+        textWrapping: ajustar ? TextWrapping.WrapText : null,
+        numberFormat: numFormat,
+        leftBorder: bordes ? _borde : null,
+        rightBorder: bordes ? _borde : null,
+        topBorder: bordes ? _borde : null,
+        bottomBorder: bordes ? _borde : null,
+      );
+
+  CellIndex _i(int c, int r) =>
+      CellIndex.indexByColumnRow(columnIndex: c, rowIndex: r);
+
+  /// Combina c0..c1 × r0..r1 y escribe el valor con estilo en la celda
+  /// inicial. `setMergedCellStyle` del paquete no siempre conserva el
+  /// estilo (probado con excel 4.0.6); escribir después de combinar sí.
+  void _combinar(int c0, int r0, int c1, int r1, String valor, CellStyle estilo) {
+    if (c1 > c0 || r1 > r0) hoja.merge(_i(c0, r0), _i(c1, r1));
+    hoja.updateCell(_i(c0, r0), TextCellValue(valor), cellStyle: estilo);
+  }
+
+  /// Título grande combinado (filas 0-1) + subtítulo combinado (fila 2).
+  void titulo(int c0, int nCols, String texto, String subtitulo) {
+    final fin = c0 + nCols - 1;
+    _combinar(c0, 0, fin, 1, texto, _estilo(
+        fondo: _XlsxColores.navy, color: _XlsxColores.blanco, negrita: true,
+        tamano: 16, alineado: HorizontalAlign.Center, bordes: false));
+    _combinar(c0, 2, fin, 2, subtitulo, _estilo(
+        fondo: _XlsxColores.grisClaro, color: '#37474F', tamano: 10,
+        alineado: HorizontalAlign.Center, bordes: false));
+    hoja.setRowHeight(0, 22);
+    hoja.setRowHeight(1, 22);
+    hoja.setRowHeight(2, 18);
+  }
+
+  /// Encabezado de grupo combinado sobre las columnas c0..c1.
+  void grupo(int c0, int c1, int r, String valor, String fondo) {
+    _combinar(c0, r, c1, r, valor, _estilo(fondo: fondo,
+        color: _XlsxColores.blanco, negrita: true,
+        alineado: HorizontalAlign.Center));
+  }
+
+  void encabezado(int c, int r, String valor,
+      {String fondo = _XlsxColores.navy, String texto = _XlsxColores.blanco}) {
+    hoja.updateCell(_i(c, r), TextCellValue(valor), cellStyle: _estilo(
+        fondo: fondo, color: texto, negrita: true,
+        alineado: HorizontalAlign.Center, ajustar: true));
+  }
+
+  void celda(int c, int r, String valor,
+      {String? fondo, String color = '#000000', bool negrita = false,
+       bool centrado = false}) {
+    hoja.updateCell(_i(c, r), TextCellValue(valor), cellStyle: _estilo(
+        fondo: fondo, color: color, negrita: negrita,
+        alineado: centrado ? HorizontalAlign.Center : HorizontalAlign.Left));
+  }
+
+  /// Entero centrado. `gris` atenúa los ceros para que resalten los datos.
+  void entero(int c, int r, int valor,
+      {String? fondo, String? color, bool negrita = false, bool gris = false}) {
+    hoja.updateCell(_i(c, r), IntCellValue(valor), cellStyle: _estilo(
+        fondo: fondo,
+        color: color ?? (gris ? _XlsxColores.textoGris : '#000000'),
+        negrita: negrita, alineado: HorizontalAlign.Center,
+        numFormat: _fmtEntero));
+  }
+
+  void dinero(int c, int r, double valor,
+      {String? fondo, String color = '#000000', bool negrita = false}) {
+    hoja.updateCell(_i(c, r), DoubleCellValue(_redondear(valor)),
+        cellStyle: _estilo(fondo: fondo, color: color, negrita: negrita,
+            alineado: HorizontalAlign.Right, numFormat: _fmtDinero));
+  }
+
+  /// `valor` es una fracción (0.25 = 25%).
+  void porcentaje(int c, int r, double valor,
+      {String? fondo, String color = '#000000', bool negrita = false}) {
+    hoja.updateCell(_i(c, r), DoubleCellValue(valor), cellStyle: _estilo(
+        fondo: fondo, color: color, negrita: negrita,
+        alineado: HorizontalAlign.Center, numFormat: _fmtPorc));
+  }
+
+  /// Texto explicativo combinado a lo ancho de la tabla.
+  void nota(int c0, int r, int nCols, String valor) {
+    _combinar(c0, r, c0 + nCols - 1, r, valor, _estilo(
+        color: '#546E7A', tamano: 9, bordes: false, ajustar: true));
+    hoja.setRowHeight(r, 30);
+  }
+
+  void alto(int r, double alto) => hoja.setRowHeight(r, alto);
+
+  void anchos(List<num> anchos) {
+    for (var c = 0; c < anchos.length; c++) {
+      hoja.setColumnWidth(c, anchos[c].toDouble());
+    }
+  }
+
+  static double _redondear(double v) => (v * 100).roundToDouble() / 100;
 }
 
 // ════════════════════════════════════════════════════════════
