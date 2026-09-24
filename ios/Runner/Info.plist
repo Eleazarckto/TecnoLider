@@ -152,15 +152,15 @@
 	<key>UIStatusBarHidden</key>
 	<false/>
 
-	<!-- Modos de fondo: necesarios para que las notificaciones
-	     locales y la conexión Bluetooth a la impresora puedan
-	     persistir cuando la app está minimizada -->
+	<!-- Modos de fondo: solo Bluetooth, para que la conexión a la
+	     impresora persista cuando la app está minimizada.
+	     Se quitaron fetch, processing y remote-notification: la app
+	     no usa tareas en segundo plano ni avisos push, y con
+	     "processing" App Store Connect rechaza la subida si falta
+	     BGTaskSchedulerPermittedIdentifiers (error 90771). -->
 	<key>UIBackgroundModes</key>
 	<array>
 		<string>bluetooth-central</string>
-		<string>fetch</string>
-		<string>processing</string>
-		<string>remote-notification</string>
 	</array>
 
 	<!-- Indica que la app soporta gestos basados en hardware
