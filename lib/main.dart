@@ -77,7 +77,7 @@ import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 /// IMPORTANTE: subí este número CADA VEZ que compiles una versión
 /// nueva. Debe coincidir con el "version" del version.json del
 /// servidor. Formato: "MAYOR.MENOR.PARCHE".
-const String kAppVersion = "1.0.13";
+const String kAppVersion = "1.0.14";
 
 /// URL del archivo version.json en el servidor.
 /// Se descarga con http.get limpio, SIN cabeceras de autenticación.
@@ -5590,7 +5590,87 @@ class CategoriasProductos {
     final c = listaObjetos.firstWhere(
         (x) => x.nombre.toLowerCase() == categoria.toLowerCase(),
         orElse: () => CategoriaProducto(nombre: ''));
-    return c.usaIMEI;
+    return c.usaIMEI ||
+        _categoriasConSeriales.contains(categoria.trim().toLowerCase());
+  }
+
+  /// Categorías que tienen al menos un serial/IMEI cargado en la BD.
+  ///
+  /// El interruptor "usa IMEI" de cada categoría se guardaba SOLO en el
+  /// dispositivo donde se activó. En cualquier otro equipo (o tras
+  /// reinstalar) la categoría volvía a contarse por `stock_manual`, que
+  /// para productos con serial es 0: un televisor con 7 seriales
+  /// cargados aparecía con existencia 0 y ni siquiera salía en ventas.
+  ///
+  /// Los datos mandan: si la categoría tiene seriales registrados, se
+  /// cuenta por seriales en todos los dispositivos.
+  static Set<String> _categoriasConSeriales = {};
+
+  static void registrarCategoriasConSeriales(List<ImeiRegistro> imeis) {
+    _categoriasConSeriales = {
+      for (final i in imeis)
+        if (i.producto.categoria.trim().isNotEmpty)
+          i.producto.categoria.trim().toLowerCase(),
+    };
+  }
+
+  static const String _claveBackend = 'cfg_categorias_productos';
+  static const String _prefsSincronizado = 'categorias_productos_sync';
+
+  /// Comparte la lista de categorías (y su interruptor de IMEI) entre
+  /// todos los dispositivos usando el endpoint `configuracion`.
+  ///
+  ///  · La primera vez que un dispositivo sincroniza, FUSIONA lo suyo
+  ///    con lo del servidor (une las categorías y deja el IMEI activo
+  ///    si lo estaba en cualquiera de los dos) y sube el resultado. Así
+  ///    no se pierde lo que cada equipo tenía configurado por su lado.
+  ///  · Después manda el servidor: lo que se cambie en un equipo llega
+  ///    a los demás en su próximo inicio.
+  static Future<void> sincronizarConBackend() async {
+    try {
+      final raw = await _Api.get('configuracion');
+      final prefs = await SharedPreferences.getInstance();
+      final yaSincronizado = prefs.getBool(_prefsSincronizado) ?? false;
+
+      List<CategoriaProducto> remotas = [];
+      final texto = raw is Map ? (raw[_claveBackend] ?? '').toString() : '';
+      if (texto.isNotEmpty) {
+        remotas = (jsonDecode(texto) as List)
+            .whereType<Map>()
+            .map((m) => CategoriaProducto.fromMap(
+                m.map((k, v) => MapEntry(k.toString(), v))))
+            .where((c) => c.nombre.trim().isNotEmpty)
+            .toList();
+      }
+
+      if (remotas.isNotEmpty && yaSincronizado) {
+        listaObjetos = remotas;
+        await _guardarLocal();
+        return;
+      }
+
+      // Primera sincronización de este dispositivo: fusionar y subir.
+      for (final r in remotas) {
+        final idx = listaObjetos.indexWhere(
+            (c) => c.nombre.toLowerCase() == r.nombre.toLowerCase());
+        if (idx < 0) {
+          listaObjetos.add(r);
+        } else if (r.usaIMEI) {
+          listaObjetos[idx].usaIMEI = true;
+        }
+      }
+      await _guardarLocal();
+      await _subirAlBackend();
+      await prefs.setBool(_prefsSincronizado, true);
+    } catch (e) {
+      debugPrint('[CategoriasProductos] sincronizar error: $e');
+    }
+  }
+
+  static Future<void> _subirAlBackend() async {
+    await _Api.post('configuracion', {
+      _claveBackend: jsonEncode(listaObjetos.map((c) => c.toMap()).toList()),
+    });
   }
 
   /// Activa o desactiva el uso de IMEI para una categoría.
@@ -5643,6 +5723,15 @@ class CategoriasProductos {
 
   /// Persiste la lista actual en formato v2 (con usaIMEI por categoría).
   static Future<void> guardar() async {
+    await _guardarLocal();
+    // Sync al backend en segundo plano — si falla, el disco local
+    // sigue con los datos.
+    _subirAlBackend().catchError((e) {
+      debugPrint('[CategoriasProductos] Error enviando al backend: $e');
+    });
+  }
+
+  static Future<void> _guardarLocal() async {
     try {
       final prefs = await SharedPreferences.getInstance();
       await prefs.setString(_prefsKey,
@@ -7036,7 +7125,15 @@ List<ListaPrecio> listasPreciosGlobal = [];
 List<FacturaModel>             ventasGlobal                   = [];
 List<LineaModel>               lineasGlobal                   = [];
 List<Producto>                 catalogoGlobal                 = [];
-List<ImeiRegistro>             stockImeiGlobal                = [];
+List<ImeiRegistro>             _stockImeiGlobal               = [];
+List<ImeiRegistro> get stockImeiGlobal => _stockImeiGlobal;
+/// Cada vez que se recarga el stock de IMEIs se anotan las categorías
+/// que tienen seriales registrados, para que `CategoriasProductos.usaIMEI`
+/// las reconozca aunque este dispositivo no tenga el interruptor activado.
+set stockImeiGlobal(List<ImeiRegistro> lista) {
+  _stockImeiGlobal = lista;
+  CategoriasProductos.registrarCategoriasConSeriales(lista);
+}
 List<CuentaPorCobrar>          cuentasGlobal                  = [];
 List<CuentaPorPagar>           cuentasPorPagarGlobal          = [];
 List<CuentaPorPagarProveedor>  cuentasPorPagarProveedorGlobal = [];
@@ -7492,6 +7589,11 @@ class _MyAppState extends State<MyApp> {
 //       sobre azul que se pierde visualmente)
 //    · Card sombra de marca en claro, profunda en oscuro
 // ════════════════════════════════════════════════════════════════════
+/// Tema claro de la app, para `tool/capturas_ipad_test.dart`, que dibuja
+/// las pantallas fuera de la app para las capturas de App Store.
+@visibleForTesting
+ThemeData temaAppClaro() => _buildAppTheme(Brightness.light);
+
 ThemeData _buildAppTheme(Brightness brightness) {
   final isDark = brightness == Brightness.dark;
 
@@ -7802,6 +7904,9 @@ class _LoginPageState extends State<LoginPage> with SingleTickerProviderStateMix
     // de pie de factura, nombre de empresa, etc.) desde el backend.
     // Si el backend está vacío, hace push automático de lo local.
     ConfigSistema.sincronizarConfigBackend();
+    // Categorías de producto y su interruptor de IMEI: compartidos
+    // entre todos los dispositivos.
+    CategoriasProductos.sincronizarConBackend();
     _intentarAutoLogin();
   }
 

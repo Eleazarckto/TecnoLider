@@ -1,14 +1,14 @@
 {
   "android": {
-    "version": "1.0.13",
-    "url": "https://sistemasceccato.com/tecnolider/updates/tecnolider-1.0.13.apk",
+    "version": "1.0.14",
+    "url": "https://sistemasceccato.com/tecnolider/updates/tecnolider-1.0.14.apk",
     "obligatoria": false,
-    "notas": "Reporte de Gestion de IMEIs: ya no sale vacio al elegir un rango de fechas (incluye el stock actual y lo que ingreso o se vendio en el periodo). Estadisticas de Productos: el Excel descargado trae Rentabilidad por tienda, Ventas y existencia por modelo y tienda con alerta de reposicion, y ganancia y margen por producto."
+    "notas": "Existencias: los productos con serial (televisores, aires, linea blanca y cualquier categoria con IMEI) ahora muestran su existencia real en todos los equipos y vuelven a salir en ventas; antes aparecian en 0 en los dispositivos donde la categoria no tenia activado el IMEI. Las categorias y su configuracion de IMEI se comparten entre todos los equipos. IMEIs eliminados: ya se pueden volver a registrar sin el aviso de que ya existen."
   },
   "windows": {
-    "version": "1.0.13",
-    "url": "https://sistemasceccato.com/tecnolider/updates/tecnolider-windows-1.0.13.zip",
+    "version": "1.0.14",
+    "url": "https://sistemasceccato.com/tecnolider/updates/tecnolider-windows-1.0.14.zip",
     "obligatoria": false,
-    "notas": "Reporte de Gestion de IMEIs: ya no sale vacio al elegir un rango de fechas (incluye el stock actual y lo que ingreso o se vendio en el periodo). Estadisticas de Productos: el Excel descargado trae Rentabilidad por tienda, Ventas y existencia por modelo y tienda con alerta de reposicion, y ganancia y margen por producto."
+    "notas": "Existencias: los productos con serial (televisores, aires, linea blanca y cualquier categoria con IMEI) ahora muestran su existencia real en todos los equipos y vuelven a salir en ventas; antes aparecian en 0 en los dispositivos donde la categoria no tenia activado el IMEI. Las categorias y su configuracion de IMEI se comparten entre todos los equipos. IMEIs eliminados: ya se pueden volver a registrar sin el aviso de que ya existen."
   }
 }
