@@ -1,0 +1,14 @@
+{
+  "android": {
+    "version": "1.0.12",
+    "url": "https://sistemasceccato.com/tecnolider/updates/tecnolider-1.0.12.apk",
+    "obligatoria": false,
+    "notas": "Listas de precios: ya se pueden agregar columnas nuevas (antes desaparecian solas) y cada columna puede tener su propia funcion configurable: porcentaje, monto fijo, multiplicador o formula libre, con redondeo a eleccion."
+  },
+  "windows": {
+    "version": "1.0.12",
+    "url": "https://sistemasceccato.com/tecnolider/updates/tecnolider-windows-1.0.12.zip",
+    "obligatoria": false,
+    "notas": "Listas de precios: ya se pueden agregar columnas nuevas (antes desaparecian solas) y cada columna puede tener su propia funcion configurable: porcentaje, monto fijo, multiplicador o formula libre, con redondeo a eleccion."
+  }
+}
