@@ -122,6 +122,35 @@ Devuelve `null` ante cualquier error (nunca lanza hacia la UI).
 la del sistema, se detecta qué precios seguían la fórmula automática
 (tolerancia de 1 Bs) y solo esos se recalculan; los editados a mano se respetan.
 
+**Sólo productos con stock**: el stock de cada item se calcula EN VIVO
+(`stockVivoDeItem`, índice `_IndiceStockListas`) sumando todas las tiendas
+(una fila de `productos` por tienda) y las variantes: IMEIs no vendidos para
+categorías con IMEI, `stockManual` para el resto. Al poblar no se agregan
+productos nuevos agotados; los que ya estaban y se agotan se CONSERVAN (con sus
+precios) pero se ocultan en pantalla (el admin puede mostrarlos), en el PDF, en
+la imagen y en la Consulta Rápida (`ListaPrecio.itemsConStock`).
+
+**Cambio de precio en el inventario**: `actualizarListasPorCambioDePrecio`
+(llamado al guardar `FormularioProducto`) recalcula el producto en todas las
+listas y hace PUT de las afectadas: columnas con función automática siempre;
+columnas manuales sólo si su valor era el "por defecto" calculado con el precio
+viejo; inicial/cuota fijas sólo si coincidían con el cálculo viejo.
+
+**Cambio de % inicial / cuotas / recargo de la lista**: inicial y cuota se
+recalculan solas; si hay montos escritos a mano (`inicialManual`/`cuotaManual`)
+con las condiciones viejas, se pregunta si recalcularlos
+(`contarMontosFijosAfectados` / `limpiarMontosFijosAfectados`).
+
+**Consulta Rápida**: en listas con varias columnas se elige UNA columna por
+lista (guardado por equipo en `consulta_rapida_columna_por_lista`); se
+pregunta al abrir si falta la elección.
+
+**Exportar PDF / imagen**: ambos salen del mismo documento `pdf` con TODAS las
+columnas de precio y, en financiamiento, inicial (monto y %), número de cuotas y
+monto de la cuota. La imagen es una página de alto variable rasterizada con
+`Printing.raster` (~230 ppp). En escritorio se guarda con "Guardar como" (o en
+Descargas) y se abre; en el teléfono se comparte.
+
 ## 1.4 Contrato de API
 
 Recurso REST único `listas_precios` (`GET` listar, `POST` crear, `PUT ?id=`
