@@ -1,7 +1,7 @@
 name: tecno_lider
 description: "Sistema POS Tecno Líder"
 publish_to: 'none'
-version: 1.0.14+14
+version: 1.0.15+15
 
 environment:
   sdk: ^3.5.0

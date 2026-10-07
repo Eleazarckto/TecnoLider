@@ -78,7 +78,7 @@ import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 /// IMPORTANTE: subí este número CADA VEZ que compiles una versión
 /// nueva. Debe coincidir con el "version" del version.json del
 /// servidor. Formato: "MAYOR.MENOR.PARCHE".
-const String kAppVersion = "1.0.14";
+const String kAppVersion = "1.0.15";
 
 /// URL del archivo version.json en el servidor.
 /// Se descarga con http.get limpio, SIN cabeceras de autenticación.
@@ -14736,9 +14736,6 @@ FacturaModel construirFacturaModelDesdeJson(Map<String, dynamic> j) {
       telefonoPagador: _strONull(map['telefono_pagador']),
       telefonoDestino: _strONull(map['telefono_destino']),
       fechaPago      : _strONull(map['fecha_pago']),
-      esInicial      : map['es_inicial'] == true || map['es_inicial'] == 1
-          || map['es_inicial']?.toString() == '1'
-          || map['es_inicial']?.toString().toLowerCase() == 'true',
     );
   }).toList();
 

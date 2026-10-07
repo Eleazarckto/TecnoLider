@@ -1,14 +1,14 @@
 {
   "android": {
-    "version": "1.0.14",
-    "url": "https://sistemasceccato.com/tecnolider/updates/tecnolider-1.0.14.apk",
+    "version": "1.0.15",
+    "url": "https://sistemasceccato.com/tecnolider/updates/tecnolider-1.0.15.apk",
     "obligatoria": false,
-    "notas": "Existencias: los productos con serial (televisores, aires, linea blanca y cualquier categoria con IMEI) ahora muestran su existencia real en todos los equipos y vuelven a salir en ventas; antes aparecian en 0 en los dispositivos donde la categoria no tenia activado el IMEI. Las categorias y su configuracion de IMEI se comparten entre todos los equipos. IMEIs eliminados: ya se pueden volver a registrar sin el aviso de que ya existen."
+    "notas": "Listas de precios: solo productos con stock, todas las columnas con inicial y cuotas en PDF/imagen, imagen en alta resolucion y guardado en laptop, se actualizan solas al cambiar precios o % de inicial; consulta rapida permite elegir columna. Auditoria: datos de pago movil (referencia, cedula, telefono), reporte de ventas por tienda, monto correcto por renglon, Bs y $ separados. Factura sin vendedor y con la Inicial rotulada. Inventario con total global y desglose por tienda. Abonos a financiadora por equipo. Nueva billetera de comisiones e historial de clientes."
   },
   "windows": {
-    "version": "1.0.14",
-    "url": "https://sistemasceccato.com/tecnolider/updates/tecnolider-windows-1.0.14.zip",
+    "version": "1.0.15",
+    "url": "https://sistemasceccato.com/tecnolider/updates/tecnolider-windows-1.0.15.zip",
     "obligatoria": false,
-    "notas": "Existencias: los productos con serial (televisores, aires, linea blanca y cualquier categoria con IMEI) ahora muestran su existencia real en todos los equipos y vuelven a salir en ventas; antes aparecian en 0 en los dispositivos donde la categoria no tenia activado el IMEI. Las categorias y su configuracion de IMEI se comparten entre todos los equipos. IMEIs eliminados: ya se pueden volver a registrar sin el aviso de que ya existen."
+    "notas": "Listas de precios: solo productos con stock, todas las columnas con inicial y cuotas en PDF/imagen, imagen en alta resolucion y guardado en laptop, se actualizan solas al cambiar precios o % de inicial; consulta rapida permite elegir columna. Auditoria: datos de pago movil (referencia, cedula, telefono), reporte de ventas por tienda, monto correcto por renglon, Bs y $ separados. Factura sin vendedor y con la Inicial rotulada. Inventario con total global y desglose por tienda. Abonos a financiadora por equipo. Nueva billetera de comisiones e historial de clientes."
   }
 }
