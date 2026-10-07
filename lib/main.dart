@@ -3388,7 +3388,212 @@ const List<String> _metodosEnBolivares = [
 /// Determina si un método de pago está denominado en bolívares (Bs).
 bool esMetodoEnBolivares(String metodo) {
   final m = metodo.trim().toLowerCase();
-  return _metodosEnBolivares.any((x) => x.toLowerCase() == m);
+  if (_metodosEnBolivares.any((x) => x.toLowerCase() == m)) return true;
+  // Variantes que aparecen en otros diálogos (abonos, cuentas) o que el
+  // dueño escribe distinto en la configuración: "Pago móvil", "Punto",
+  // "Punto de Venta BDV", "Transferencia Bs", "Efectivo Bs.", etc.
+  // Antes la comparación era EXACTA y esas variantes se formateaban
+  // con "$" aunque el monto estuviera en bolívares.
+  if (m.contains('\$') || m.contains('usd') || m.contains('divisa')) {
+    return false;
+  }
+  return m.contains('pago móvil') || m.contains('pago movil') ||
+      m.startsWith('punto') || m.startsWith('transferencia') ||
+      m.contains('efectivo bs') ||
+      RegExp(r'(^|[^a-z])bs\.?$').hasMatch(m);
+}
+
+/// Convierte a USD un monto cobrado con [metodo]. Si el método es en
+/// bolívares divide entre la tasa del pago ([tasa], la histórica que se
+/// guardó al facturar) o, si no la hay, la tasa actual del sistema.
+/// Los métodos en divisas se devuelven tal cual.
+double montoPagoEnUsd(double monto, String metodo, {double? tasa}) {
+  if (!esMetodoEnBolivares(metodo)) return monto;
+  final t = (tasa != null && tasa > 0) ? tasa : ConfigSistema.tasaCambio;
+  return t > 0 ? monto / t : 0.0;
+}
+
+/// Totales de una lista de pagos CRUDOS (maps del backend: metodo, monto,
+/// tasa_cambio) separados por moneda real. NUNCA sumar Bs con $ directo:
+/// el campo `total` de la factura es la suma cruda de los pagos y mezcla
+/// monedas (por eso salía "$100.000" en vez de "100.000 Bs").
+///   · bs:       suma de pagos en bolívares (sin convertir)
+///   · usd:      suma de pagos en divisas
+///   · equivUsd: usd + bs convertidos con la tasa histórica de cada pago
+({double bs, double usd, double equivUsd}) totalesPagosPorMoneda(
+    Iterable<dynamic> pagos) {
+  double bs = 0, usd = 0, equiv = 0;
+  for (final p in pagos) {
+    if (p is! Map) continue;
+    final met = (p['metodo'] ?? '').toString();
+    final monto = double.tryParse(p['monto']?.toString() ?? '') ?? 0;
+    final tasa = double.tryParse(p['tasa_cambio']?.toString() ?? '');
+    if (esMetodoEnBolivares(met)) {
+      bs += monto;
+    } else {
+      usd += monto;
+    }
+    equiv += montoPagoEnUsd(monto, met, tasa: tasa);
+  }
+  return (bs: bs, usd: usd, equivUsd: equiv);
+}
+
+/// Texto "$1,234.00 + Bs 5.000,00" con cada moneda en su símbolo.
+/// Si sólo hay una moneda muestra sólo esa; si no hay nada, "$0.00".
+String formatTotalesPorMoneda(double usd, double bs) {
+  final partes = <String>[
+    if (usd.abs() > 0.004) formatCurrency(usd),
+    if (bs.abs() > 0.004) formatBolivares(bs),
+  ];
+  return partes.isEmpty ? formatCurrency(0) : partes.join(' + ');
+}
+
+/// Igual que [formatTotalesPorMoneda] pero a partir de un mapa
+/// método → monto (como el desglose de un cierre de caja).
+String formatTotalesPorMetodos(Map<String, double> porMetodo) {
+  double usd = 0, bs = 0;
+  porMetodo.forEach((met, monto) {
+    if (esMetodoEnBolivares(met)) {
+      bs += monto;
+    } else {
+      usd += monto;
+    }
+  });
+  return formatTotalesPorMoneda(usd, bs);
+}
+
+/// Reparte lo cobrado en una factura (en USD) entre sus renglones para
+/// que cada renglón del reporte muestre el monto de SU producto y la suma
+/// de los renglones sea igual al total cobrado (sin duplicar).
+///
+/// La factura no guarda el precio de cada renglón, así que se usa el
+/// precio de referencia (catálogo / lista) de cada producto:
+///  · Renglones de contado (accesorios): se les asigna su precio.
+///  · Renglones financiados: se reparten lo que sobra (la inicial
+///    cobrada) en proporción a su precio.
+///  · Si no hay financiados, todo se reparte en proporción al precio.
+/// Ej.: teléfono financiado (inicial $50) + vidrio $4 → cobrado $54 →
+///      vidrio $4, teléfono $50 (antes salía $54 en cada renglón).
+List<double> repartirCobroEntreRenglones({
+  required List<double> precios,
+  required List<bool> financiados,
+  required double cobradoUsd,
+}) {
+  final n = precios.length;
+  if (n == 0) return const [];
+  final res = List<double>.filled(n, 0.0);
+  if (cobradoUsd <= 0) return res;
+
+  // Reparto proporcional de [monto] entre los índices [idx].
+  void proporcional(List<int> idx, double monto) {
+    if (idx.isEmpty || monto <= 0) return;
+    final suma = idx.fold<double>(0, (s, i) => s + math.max(precios[i], 0));
+    for (final i in idx) {
+      res[i] = suma > 0
+          ? monto * math.max(precios[i], 0) / suma
+          : monto / idx.length;
+    }
+  }
+
+  final idxFin = [for (var i = 0; i < n; i++) if (financiados[i]) i];
+  final idxCont = [for (var i = 0; i < n; i++) if (!financiados[i]) i];
+  if (idxFin.isEmpty || idxCont.isEmpty) {
+    proporcional(List<int>.generate(n, (i) => i), cobradoUsd);
+  } else {
+    final sumaContado =
+        idxCont.fold<double>(0, (s, i) => s + math.max(precios[i], 0));
+    if (sumaContado >= cobradoUsd) {
+      // Lo cobrado no alcanza ni para los accesorios: se reparte entre
+      // ellos y los financiados quedan en 0 (inicial no cobrada).
+      proporcional(idxCont, cobradoUsd);
+    } else {
+      for (final i in idxCont) { res[i] = math.max(precios[i], 0); }
+      proporcional(idxFin, cobradoUsd - sumaContado);
+    }
+  }
+  // Redondeo a centavos; la diferencia de redondeo va al último renglón
+  // para que la suma cuadre exacta con lo cobrado.
+  double acumulado = 0;
+  for (var i = 0; i < n; i++) {
+    res[i] = double.parse(res[i].toStringAsFixed(2));
+    acumulado += res[i];
+  }
+  final dif = double.parse((cobradoUsd - acumulado).toStringAsFixed(2));
+  if (dif != 0) res[n - 1] = double.parse((res[n - 1] + dif).toStringAsFixed(2));
+  return res;
+}
+
+/// Datos de auditoría de un pago móvil (referencia, cédula y teléfono del
+/// pagador, banco origen) en una sola línea legible. Devuelve '' si el
+/// pago no trae ninguno. Acepta el map crudo del backend.
+String datosPagoMovilTexto(Map p) {
+  // Los abonos de cuentas por cobrar no tienen columnas de cédula ni
+  // teléfono: se guardan en `notas` con la marca parseable
+  // [[pm:ced=V123;tel=0414...;bs=1500.00;tasa=36.5]] (ver
+  // marcaPagoMovilNotas). Se leen de ahí si no vienen como campo.
+  final marca = leerMarcaPagoMovil((p['notas'] ?? '').toString());
+  String v(String k) {
+    final directo = (p[k] ?? '').toString().trim();
+    if (directo.isNotEmpty) return directo;
+    switch (k) {
+      case 'cedula_pagador':   return marca['ced'] ?? '';
+      case 'telefono_pagador': return marca['tel'] ?? '';
+      case 'banco_origen':     return marca['banco'] ?? '';
+    }
+    return '';
+  }
+  final partes = <String>[
+    if (v('referencia').isNotEmpty) 'Ref: ${v('referencia')}',
+    if (v('cedula_pagador').isNotEmpty) 'C.I.: ${v('cedula_pagador')}',
+    if (v('telefono_pagador').isNotEmpty) 'Tel: ${v('telefono_pagador')}',
+    if (v('banco_origen').isNotEmpty)
+      'Banco: ${BancosVenezuela.nombre(v('banco_origen'))}',
+    if (v('fecha_pago').isNotEmpty) 'Fecha: ${v('fecha_pago')}',
+  ];
+  return partes.join(' · ');
+}
+
+/// String no vacío o null (para campos opcionales que vienen del backend
+/// como null, "" o incluso como número).
+String? _strONull(dynamic v) {
+  if (v == null) return null;
+  final s = v.toString().trim();
+  return s.isEmpty ? null : s;
+}
+
+/// Marca parseable con los datos del pago móvil para guardarlos en un
+/// campo de texto libre (`notas`) cuando la tabla no tiene columnas
+/// propias (abonos de cuentas por cobrar). Mismo patrón que [[favor:N]].
+/// Se quitan ';', '=' y ']' de los valores para no romper el formato.
+String marcaPagoMovilNotas({
+  required String cedula,
+  required String telefono,
+  String? banco,
+  double? montoBs,
+  double? tasa,
+}) {
+  String limpio(String s) => s.replaceAll(RegExp(r'[;=\]\[]'), '').trim();
+  final campos = <String>[
+    'ced=${limpio(cedula)}',
+    'tel=${limpio(telefono)}',
+    if (banco != null && banco.isNotEmpty) 'banco=${limpio(banco)}',
+    if (montoBs != null && montoBs > 0) 'bs=${montoBs.toStringAsFixed(2)}',
+    if (tasa != null && tasa > 0) 'tasa=${tasa.toStringAsFixed(4)}',
+  ];
+  return '[[pm:${campos.join(';')}]]';
+}
+
+/// Lee la marca [[pm:...]] de un texto libre. Devuelve {} si no existe.
+Map<String, String> leerMarcaPagoMovil(String texto) {
+  final m = RegExp(r'\[\[pm:([^\]]*)\]\]').firstMatch(texto);
+  if (m == null) return const {};
+  final res = <String, String>{};
+  for (final par in (m.group(1) ?? '').split(';')) {
+    final i = par.indexOf('=');
+    if (i <= 0) continue;
+    res[par.substring(0, i).trim()] = par.substring(i + 1).trim();
+  }
+  return res;
 }
 
 /// Formatea un monto aplicando la moneda correcta según el método de pago,
@@ -5265,13 +5470,15 @@ class PagoFactura {
     financiador: m['financiador'],
     financiadora: m['financiadora'] as String?,
     monto: double.tryParse(m['monto'].toString())??0,
-    bancoDestino       : m['banco_destino']        as String?,
-    bancoOrigen        : m['banco_origen']         as String?,
-    referencia         : m['referencia']           as String?,
-    cedulaPagador      : m['cedula_pagador']       as String?,
-    telefonoPagador    : m['telefono_pagador']     as String?,
-    telefonoDestino    : m['telefono_destino']     as String?,
-    fechaPago          : m['fecha_pago']           as String?,
+    // _strONull en vez de `as String?`: el backend puede devolver la
+    // referencia o el teléfono como número y el cast reventaba.
+    bancoDestino       : _strONull(m['banco_destino']),
+    bancoOrigen        : _strONull(m['banco_origen']),
+    referencia         : _strONull(m['referencia']),
+    cedulaPagador      : _strONull(m['cedula_pagador']),
+    telefonoPagador    : _strONull(m['telefono_pagador']),
+    telefonoDestino    : _strONull(m['telefono_destino']),
+    fechaPago          : _strONull(m['fecha_pago']),
     esInicial          : m['es_inicial'] == true || m['es_inicial'] == 1
         || m['es_inicial'].toString() == '1'
         || m['es_inicial'].toString().toLowerCase() == 'true',
@@ -13397,6 +13604,20 @@ FacturaModel construirFacturaModelDesdeJson(Map<String, dynamic> j) {
           ? null
           : double.tryParse(map['tasa_cambio'].toString()),
       nombreLista: map['nombre_lista']?.toString(),
+      // ── Datos de auditoría del pago móvil ──
+      // Antes se descartaban aquí y, al EDITAR la factura (PUT con este
+      // modelo), el backend reemplazaba los pagos sin referencia, cédula
+      // ni teléfono del pagador. También se pierde la marca de inicial.
+      bancoDestino   : _strONull(map['banco_destino']),
+      bancoOrigen    : _strONull(map['banco_origen']),
+      referencia     : _strONull(map['referencia']),
+      cedulaPagador  : _strONull(map['cedula_pagador']),
+      telefonoPagador: _strONull(map['telefono_pagador']),
+      telefonoDestino: _strONull(map['telefono_destino']),
+      fechaPago      : _strONull(map['fecha_pago']),
+      esInicial      : map['es_inicial'] == true || map['es_inicial'] == 1
+          || map['es_inicial']?.toString() == '1'
+          || map['es_inicial']?.toString().toLowerCase() == 'true',
     );
   }).toList();
 
@@ -14809,6 +15030,16 @@ class _VentasPrincipalState extends State<VentasPrincipal> {
                               fontSize: 11,
                               color: AppColors.textSecondary,
                               fontStyle: FontStyle.italic)),
+                        // ── Auditoría del pago móvil ──
+                        // Referencia, cédula y teléfono afiliado del
+                        // pagador + banco origen, tal como se cargaron
+                        // al cobrar.
+                        if (p is Map && datosPagoMovilTexto(p).isNotEmpty)
+                          SelectableText(datosPagoMovilTexto(p),
+                            style: const TextStyle(
+                              fontSize: 11,
+                              color: AppColors.textPrimary,
+                              fontWeight: FontWeight.w500)),
                       ])),
                       Text(formatMontoPorMetodo(monto, metodo),
                         style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16, color: color)),
@@ -20313,11 +20544,21 @@ class _DetalleCuentaCobrarState extends State<DetalleCuentaCobrar> {
     // Comprobante opcional del pago (JPG/PNG/PDF).
     Uint8List? comprobanteBytes;
     String comprobanteExt = '';
+    // Datos del pagador si el abono es por Pago Móvil (auditoría).
+    final refPMCtrl = TextEditingController();
+    final cedPMCtrl = TextEditingController();
+    final telPMCtrl = TextEditingController();
+    bool esPagoMovilAbono(String m) {
+      final l = m.trim().toLowerCase();
+      return l.contains('pago móvil') || l.contains('pago movil');
+    }
 
     showDialog(context: context, builder: (ctx) => StatefulBuilder(
       builder: (context, setS) {
-        bool requiereTasa = metodo == "Efectivo Bs" || metodo == "Pago móvil" ||
-            metodo == "Transferencia" || metodo == "Punto";
+        // Métodos en Bs según el helper común. Antes era comparación exacta
+        // y "Pago Móvil" / "Punto de venta" (los de la configuración) no
+        // pedían tasa: el monto en Bs se guardaba como si fueran $.
+        bool requiereTasa = esMetodoEnBolivares(metodo);
         return AlertDialog(
           title: const Row(children: [
             Icon(Icons.attach_money, color: AppColors.statusGreen),
@@ -20381,6 +20622,40 @@ class _DetalleCuentaCobrarState extends State<DetalleCuentaCobrar> {
                   },
                 ),
               ],
+              // ── Datos del pago móvil (obligatorios, auditoría) ──
+              if (esPagoMovilAbono(metodo)) ...[
+                const SizedBox(height: 10),
+                TextFormField(
+                  controller: refPMCtrl,
+                  keyboardType: TextInputType.number,
+                  decoration: const InputDecoration(
+                    labelText: "Referencia *",
+                    prefixIcon: Icon(Icons.confirmation_number_outlined)),
+                  validator: (v) => (v ?? '').trim().isEmpty
+                      ? "Ingrese la referencia" : null,
+                ),
+                const SizedBox(height: 10),
+                TextFormField(
+                  controller: cedPMCtrl,
+                  decoration: const InputDecoration(
+                    labelText: "Cédula del pagador *",
+                    hintText: "V12345678",
+                    prefixIcon: Icon(Icons.badge_outlined)),
+                  validator: (v) => (v ?? '').trim().isEmpty
+                      ? "Ingrese la cédula del pagador" : null,
+                ),
+                const SizedBox(height: 10),
+                TextFormField(
+                  controller: telPMCtrl,
+                  keyboardType: TextInputType.phone,
+                  decoration: const InputDecoration(
+                    labelText: "Teléfono afiliado del pagador *",
+                    hintText: "04141234567",
+                    prefixIcon: Icon(Icons.phone_android)),
+                  validator: (v) => (v ?? '').trim().length < 10
+                      ? "Ingrese el teléfono afiliado" : null,
+                ),
+              ],
               // ── Adjuntar comprobante (opcional) ────────────
               const SizedBox(height: 12),
               OutlinedButton.icon(
@@ -20424,10 +20699,21 @@ class _DetalleCuentaCobrarState extends State<DetalleCuentaCobrar> {
                 setS(() => guardando = true);
                 try {
                   if (widget.cuenta.id == null) throw Exception("Cuenta sin ID. Recargue la pantalla.");
+                  final esPM = esPagoMovilAbono(metodo);
                   final nuevoPago = {
                     'monto': montoFinal,
                     'fecha': obtenerFechaActual(),
                     'metodo': metodo,
+                    // Pago móvil: la referencia va a su columna y la
+                    // cédula/teléfono (sin columna en la BD) a `notas`
+                    // con la marca [[pm:...]], junto al monto en Bs.
+                    if (esPM) 'referencia': refPMCtrl.text.trim(),
+                    if (esPM) 'notas': marcaPagoMovilNotas(
+                      cedula: cedPMCtrl.text.trim(),
+                      telefono: telPMCtrl.text.trim(),
+                      montoBs: monto,
+                      tasa: double.tryParse(tasaController.text),
+                    ),
                   };
                   // ── Detectar SOBREPAGO ──
                   // Si el pago excede el saldo restante, el excedente
@@ -20796,7 +21082,9 @@ class _DetalleCuentaCobrarState extends State<DetalleCuentaCobrar> {
                             fontWeight: FontWeight.bold,
                             color: AppColors.statusGreen)),
                     subtitle: Text(
-                        "${pago['metodo']} · ${pago['fecha']}",
+                        "${pago['metodo']} · ${pago['fecha']}"
+                        // Datos del pago móvil (ref, cédula, teléfono).
+                        "${datosPagoMovilTexto(pago).isEmpty ? '' : '\n${datosPagoMovilTexto(pago)}'}",
                         style: const TextStyle(
                             fontSize: 12, color: AppColors.textSecondary)),
                     // Botón eliminar por abono (solo Admin/Dueño/Gerente)
@@ -21802,8 +22090,10 @@ class _DetalleCuentaPorPagarState extends State<DetalleCuentaPorPagar> {
       shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
       builder: (c) => StatefulBuilder(
         builder: (ctx, setLocal) {
-          final requiereTasa = metodo == "Efectivo Bs" || metodo == "Pago móvil" ||
-              metodo == "Transferencia" || metodo == "Punto";
+          // Métodos en Bs según el helper común. Antes era comparación exacta
+          // y "Pago Móvil" / "Punto de venta" (los de la configuración) no
+          // pedían tasa: el monto en Bs se guardaba como si fueran $.
+          final requiereTasa = esMetodoEnBolivares(metodo);
           return Padding(
             padding: EdgeInsets.only(
               bottom: MediaQuery.of(ctx).viewInsets.bottom,
@@ -22776,8 +23066,10 @@ class _DetalleCuentaProveedorState extends State<DetalleCuentaProveedor> {
 
     showDialog(context: context, builder: (ctx) => StatefulBuilder(
       builder: (context, setS) {
-        bool requiereTasa = metodo == "Efectivo Bs" || metodo == "Pago móvil" ||
-            metodo == "Transferencia" || metodo == "Punto";
+        // Métodos en Bs según el helper común. Antes era comparación exacta
+        // y "Pago Móvil" / "Punto de venta" (los de la configuración) no
+        // pedían tasa: el monto en Bs se guardaba como si fueran $.
+        bool requiereTasa = esMetodoEnBolivares(metodo);
         return AlertDialog(
           title: const Row(children: [
             Icon(Icons.attach_money, color: AppColors.statusGreen),
@@ -27900,9 +28192,15 @@ class _VentanaCierreState extends State<VentanaCierre> {
               const Text("TOTAL DEL CIERRE",
                 style: TextStyle(fontWeight: FontWeight.bold,
                   fontSize: 13, color: AppColors.statusGreen)),
-              Text(formatCurrency(cierre.montoTotal),
+              // Total por moneda real ("$X + Bs Y"). `montoTotal` de los
+              // cierres viejos suma Bs con $ y no sirve para mostrarse.
+              Flexible(child: Text(
+                cierre.metodosPago.isEmpty
+                    ? formatCurrency(cierre.montoTotal)
+                    : formatTotalesPorMetodos(cierre.metodosPago),
+                textAlign: TextAlign.right,
                 style: const TextStyle(fontWeight: FontWeight.bold,
-                  fontSize: 20, color: AppColors.statusGreen)),
+                  fontSize: 18, color: AppColors.statusGreen))),
             ]),
           ),
         ]),
@@ -28023,7 +28321,12 @@ class _VentanaCierreState extends State<VentanaCierre> {
                           fFact.year != fechaSel.year ||
                           fFact.month != fechaSel.month ||
                           fFact.day != fechaSel.day) continue;
-                      total += double.tryParse(v['total'].toString()) ?? 0;
+                      // Total en $ equivalentes: los pagos en Bs se
+                      // convierten con su tasa (antes se sumaban crudos).
+                      final pagosV = (v['pagos'] as List?) ?? [];
+                      total += pagosV.isEmpty
+                          ? (double.tryParse(v['total'].toString()) ?? 0)
+                          : totalesPagosPorMoneda(pagosV).equivUsd;
                       final pagos = v['pagos'] as List? ?? [];
                       if (pagos.isNotEmpty) {
                         for (final p in pagos) {
@@ -28090,10 +28393,20 @@ class _VentanaCierreState extends State<VentanaCierre> {
                   Row(children: [
                     const Expanded(child: Text("TOTAL",
                       style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13))),
-                    Text(formatCurrency(previewTotal),
+                    Flexible(child: Text(
+                      formatTotalesPorMetodos(previewMetodos!),
+                      textAlign: TextAlign.right,
                       style: const TextStyle(fontWeight: FontWeight.bold,
-                        fontSize: 15, color: AppColors.statusGreen)),
+                        fontSize: 15, color: AppColors.statusGreen))),
                   ]),
+                  // Equivalente en $ (Bs convertidos con la tasa de cada
+                  // pago). Es lo que se guarda como total del cierre.
+                  Align(
+                    alignment: Alignment.centerRight,
+                    child: Text("Equivale a ${formatCurrency(previewTotal)}",
+                      style: const TextStyle(fontSize: 11,
+                        color: AppColors.textSecondary,
+                        fontStyle: FontStyle.italic))),
                 ],
               ]),
             ),
@@ -28144,7 +28457,10 @@ class _VentanaCierreState extends State<VentanaCierre> {
                           fFact.year  != fechaSel.year ||
                           fFact.month != fechaSel.month ||
                           fFact.day   != fechaSel.day) continue;
-                      totalGeneral += double.tryParse(v['total'].toString()) ?? 0;
+                      final pagosV = (v['pagos'] as List?) ?? [];
+                      totalGeneral += pagosV.isEmpty
+                          ? (double.tryParse(v['total'].toString()) ?? 0)
+                          : totalesPagosPorMoneda(pagosV).equivUsd;
                       final pagos = v['pagos'] as List? ?? [];
                       if (pagos.isNotEmpty) {
                         for (final p in pagos) {
@@ -28183,7 +28499,7 @@ class _VentanaCierreState extends State<VentanaCierre> {
                 if (mounted) {
                   ScaffoldMessenger.of(this.context).showSnackBar(SnackBar(
                     content: Text(
-                      "✅ Cierre generado — Total: ${formatCurrency(totalGeneral)} "
+                      "✅ Cierre generado — Total: ${formatTotalesPorMetodos(resumenMetodos)} "
                       "· ${resumenMetodos.length} método(s)"),
                     backgroundColor: AppColors.statusGreen,
                     duration: const Duration(seconds: 5)));
@@ -28329,7 +28645,10 @@ class _VentanaCierreState extends State<VentanaCierre> {
                           ])),
                           Column(mainAxisAlignment: MainAxisAlignment.center,
                             crossAxisAlignment: CrossAxisAlignment.end, children: [
-                            Text(formatCurrency(c.montoTotal),
+                            Text(
+                              c.metodosPago.isEmpty
+                                  ? formatCurrency(c.montoTotal)
+                                  : formatTotalesPorMetodos(c.metodosPago),
                               style: const TextStyle(
                                 color: AppColors.statusGreen,
                                 fontWeight: FontWeight.bold, fontSize: 16)),
@@ -28654,12 +28973,9 @@ class _FormularioFacturaState extends State<FormularioFactura>
         'deudaFpb': _deudaFpb.text,
         'equiposImeis': _equipos.map((e) => e.imei).toList(),
         'itemsCodigos': _items.map((p) => p.codigo).toList(),
-        'pagos': _pagos.map((p) => {
-          'metodo': p.metodo,
-          'monto': p.monto,
-          'tipo': p.tipo,
-          'financiador': p.financiador,
-        }).toList(),
+        // Pago completo (incluye referencia, cédula y teléfono del
+        // pagador del pago móvil) para no perder datos de auditoría.
+        'pagos': _pagos.map((p) => p.toMap()).toList(),
         'tipoVentaItem': _tipoVentaItem.map(
             (k, v) => MapEntry(k.toString(), v)),
         'financiadorItem': _financiadorItem.map(
@@ -28734,13 +29050,9 @@ class _FormularioFacturaState extends State<FormularioFactura>
       // Reconstruir pagos
       final pagosRaw = ((data['pagos'] as List?) ?? []);
       _pagos = pagosRaw.map((p) {
-        final m = p as Map;
-        return PagoFactura(
-          metodo: (m['metodo'] ?? '').toString(),
-          monto: double.tryParse(m['monto'].toString()) ?? 0,
-          tipo: (m['tipo'] ?? 'Contado').toString(),
-          financiador: m['financiador']?.toString(),
-        );
+        final m = Map<String, dynamic>.from(p as Map);
+        if ((m['tipo'] ?? '').toString().isEmpty) m['tipo'] = 'Contado';
+        return PagoFactura.fromMap(m);
       }).toList();
 
       if (mounted && (_equipos.isNotEmpty || _items.isNotEmpty)) {
@@ -30135,7 +30447,9 @@ class _FormularioFacturaState extends State<FormularioFactura>
       return const Padding(padding: EdgeInsets.symmetric(vertical: 10),
         child: Text("No hay pagos registrados", style: TextStyle(fontSize: 12, color: Colors.grey, fontStyle: FontStyle.italic)));
     }
-    final totalPagado = _pagos.fold(0.0, (s, p) => s + p.monto);
+    // Total separado por moneda: los pagos en Bs no se suman con los $.
+    final totalesPagado =
+        totalesPagosPorMoneda(_pagos.map((p) => p.toMap()));
     return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
       Table(
         border: TableBorder(bottom: BorderSide(color: Colors.grey[200]!)),
@@ -30188,10 +30502,12 @@ class _FormularioFacturaState extends State<FormularioFactura>
                                 : Colors.orange.shade800)),
                       ]),
                     ),
-                  ] else if (p.referencia != null && p.referencia!.isNotEmpty) ...[
-                    // Pago móvil con referencia pero sin conciliación intentada
+                  ],
+                  // Datos del pago móvil (referencia, cédula y teléfono
+                  // del pagador) para que el cajero los verifique.
+                  if (datosPagoMovilTexto(p.toMap()).isNotEmpty) ...[
                     const SizedBox(height: 3),
-                    Text("Ref: ${p.referencia}",
+                    Text(datosPagoMovilTexto(p.toMap()),
                       style: const TextStyle(
                           fontSize: 10, color: AppColors.textSecondary)),
                   ],
@@ -30207,7 +30523,10 @@ class _FormularioFacturaState extends State<FormularioFactura>
       const SizedBox(height: 8),
       Row(mainAxisAlignment: MainAxisAlignment.end, children: [
         const Text("TOTAL PAGADO: ", style: TextStyle(fontSize: 13, fontWeight: FontWeight.bold)),
-        Text(formatCurrency(totalPagado, symbol: ''), style: const TextStyle(fontSize: 15, fontWeight: FontWeight.bold, color: AppColors.primaryBlue)),
+        Flexible(child: Text(
+          formatTotalesPorMoneda(totalesPagado.usd, totalesPagado.bs),
+          textAlign: TextAlign.right,
+          style: const TextStyle(fontSize: 15, fontWeight: FontWeight.bold, color: AppColors.primaryBlue))),
       ]),
     ]);
   }
@@ -30775,10 +31094,20 @@ class _FormularioFacturaState extends State<FormularioFactura>
         }
 
         if (esPagoMovil) {
-          // Para pago móvil exigimos al menos referencia para auditoría
+          // Para pago móvil exigimos referencia, cédula y teléfono
+          // afiliado del pagador: son los datos que auditoría necesita
+          // para ubicar el pago en el estado de cuenta del banco.
+          String? faltante;
           if (ctrlReferencia.text.trim().isEmpty) {
+            faltante = "Ingrese la referencia del pago móvil";
+          } else if (ctrlCedulaPagador.text.trim().isEmpty) {
+            faltante = "Ingrese la cédula del pagador del pago móvil";
+          } else if (ctrlTelefonoPagador.text.trim().length < 10) {
+            faltante = "Ingrese el teléfono afiliado al pago móvil (ej. 04141234567)";
+          }
+          if (faltante != null) {
             ScaffoldMessenger.of(context).showSnackBar(
-              const SnackBar(content: Text("Ingrese la referencia del pago móvil"),
+              SnackBar(content: Text(faltante),
                 backgroundColor: AppColors.statusOrange));
             return;
           }
@@ -31053,7 +31382,8 @@ class _FormularioFacturaState extends State<FormularioFactura>
                   Icon(Icons.info_outline, size: 16, color: AppColors.brandBlue),
                   SizedBox(width: 6),
                   Expanded(child: Text(
-                    "Datos del pagador (opcional, para auditoría).",
+                    "Datos del pagador (obligatorios, para auditoría): "
+                    "cédula y teléfono afiliado al pago móvil.",
                     style: TextStyle(fontSize: 11.5, height: 1.3),
                   )),
                 ]),
@@ -31083,7 +31413,7 @@ class _FormularioFacturaState extends State<FormularioFactura>
                   controller: ctrlCedulaPagador,
                   keyboardType: TextInputType.number,
                   decoration: const InputDecoration(
-                    labelText: "Cédula del pagador (opcional)",
+                    labelText: "Cédula del pagador *",
                     hintText: "12345678",
                     prefixIcon: Icon(Icons.badge_outlined)),
                 )),
@@ -31095,7 +31425,7 @@ class _FormularioFacturaState extends State<FormularioFactura>
                 controller: ctrlTelefonoPagador,
                 keyboardType: TextInputType.phone,
                 decoration: const InputDecoration(
-                  labelText: "Teléfono del pagador (opcional)",
+                  labelText: "Teléfono afiliado del pagador *",
                   hintText: "04127141363",
                   prefixIcon: Icon(Icons.phone_android)),
               ),
@@ -37966,11 +38296,68 @@ String _etiquetaRango(DateTime? d, DateTime? h) {
 //  cliente, número, productos (equipos por IMEI + items sin IMEI)
 //  y desglose de pagos.
 // ════════════════════════════════════════════════════════════
-Future<void> generarReporteVentas({DateTime? desde, DateTime? hasta}) async {
+/// true si la factura (por sus pagos) es una venta financiada
+/// (Cashea / Weppa / Krece). Mismo criterio que el Excel de ventas.
+bool _facturaEsFinanciadaPorPagos(List pagos) {
+  for (final p in pagos) {
+    if (p is! Map) continue;
+    final tipo = (p['tipo'] ?? '').toString().toLowerCase();
+    final fin = (p['financiadora'] ?? '').toString();
+    if (tipo == 'financiado' && fin.isNotEmpty) return true;
+    final met = (p['metodo'] ?? '').toString().toLowerCase();
+    if (['cashea', 'weppa', 'krece'].contains(met)) return true;
+  }
+  return false;
+}
+
+/// Calcula el monto cobrado de CADA renglón de una factura del reporte de
+/// ventas y lo deja en `monto_renglon_usd` (más `financiado`: bool).
+///
+/// La BD no guarda el precio ni el F/D de cada renglón, así que:
+///  · Si la venta es financiada, los equipos con IMEI son los financiados
+///    (llevan la inicial cobrada) y los items sin IMEI son de contado
+///    (llevan su precio). Si no hay equipos con IMEI, todos los items se
+///    consideran financiados.
+///  · Si es de contado, lo cobrado se reparte según el precio de cada uno.
+/// La suma de los renglones = total cobrado de la factura (sin duplicar).
+void _asignarMontoRenglones(
+    List<Map<String, dynamic>> productos, List pagos, double cobradoUsd) {
+  if (productos.isEmpty) return;
+  final esFin = _facturaEsFinanciadaPorPagos(pagos);
+  final hayImei = productos.any(
+      (p) => (p['imei'] ?? '').toString().trim().isNotEmpty);
+  final financiados = productos.map((p) {
+    if (!esFin) return false;
+    if (!hayImei) return true;
+    return (p['imei'] ?? '').toString().trim().isNotEmpty;
+  }).toList();
+  final precios = productos
+      .map((p) => double.tryParse(p['precio_venta']?.toString() ?? '') ?? 0.0)
+      .toList();
+  final montos = repartirCobroEntreRenglones(
+      precios: precios, financiados: financiados, cobradoUsd: cobradoUsd);
+  for (var i = 0; i < productos.length; i++) {
+    productos[i]['financiado'] = financiados[i];
+    productos[i]['monto_renglon_usd'] = montos[i];
+  }
+}
+
+Future<void> generarReporteVentas(
+    {DateTime? desde, DateTime? hasta, String? tienda}) async {
   final detalles = <Map<String, dynamic>>[];
   final filas = <List<dynamic>>[];
-  double granTotal = 0;
+  // Totales SEPARADOS por moneda: el `total` de la factura es la suma
+  // cruda de sus pagos y mezcla Bs con $ (salía "$100.000" en vez de
+  // "100.000 Bs"). Se lleva el total en Bs, en $ y el equivalente en $.
+  double granTotalUsdEquiv = 0, granTotalBs = 0, granTotalUsd = 0;
   final Map<String, double> totalPorMetodo = {};
+  // ── Filtro por tienda (igual que el cierre de caja) ──
+  // Dueño/Admin/Gerente eligen la tienda ('Todas' o null = todas); el
+  // resto queda forzado a SU tienda aunque se pase otra.
+  final String? tiendaEfectiva = puedeVerTodasLasTiendas()
+      ? ((tienda == null || tienda.isEmpty || tienda == 'Todas')
+          ? null : tienda)
+      : (tiendaUsuarioActual().isEmpty ? null : tiendaUsuarioActual());
 
   try {
     // Cargar facturas
@@ -38001,9 +38388,20 @@ Future<void> generarReporteVentas({DateTime? desde, DateTime? hasta}) async {
 
     for (var v in lista) {
       if (!_enRango(v['fecha'], desde, hasta)) continue;
+      if (tiendaEfectiva != null &&
+          (v['tienda'] ?? '').toString() != tiendaEfectiva) {
+        continue;
+      }
 
-      final total = double.tryParse(v['total']?.toString() ?? '0') ?? 0;
-      granTotal += total;
+      final totales = totalesPagosPorMoneda((v['pagos'] as List?) ?? []);
+      // Total de la factura en $ (pagos en Bs convertidos con la tasa
+      // histórica de cada pago). Si no hay pagos, se usa el total crudo.
+      final total = ((v['pagos'] as List?) ?? []).isEmpty
+          ? (double.tryParse(v['total']?.toString() ?? '0') ?? 0)
+          : redondearPrecio(totales.equivUsd);
+      granTotalUsdEquiv += total;
+      granTotalBs += totales.bs;
+      granTotalUsd += ((v['pagos'] as List?) ?? []).isEmpty ? total : totales.usd;
 
       // Construir lista de productos enriquecidos
       final productosDetalle = <Map<String, dynamic>>[];
@@ -38086,10 +38484,24 @@ Future<void> generarReporteVentas({DateTime? desde, DateTime? hasta}) async {
             'tasa_cambio':   p['tasa_cambio'],
             'nombre_lista': (p['nombre_lista'] ?? '').toString(),
             'es_inicial':    p['es_inicial'],
+            // ── Auditoría de pago móvil ──
+            'referencia':       (p['referencia'] ?? '').toString(),
+            'cedula_pagador':   (p['cedula_pagador'] ?? '').toString(),
+            'telefono_pagador': (p['telefono_pagador'] ?? '').toString(),
+            'banco_origen':     (p['banco_origen'] ?? '').toString(),
+            'banco_destino':    (p['banco_destino'] ?? '').toString(),
+            'fecha_pago':       (p['fecha_pago'] ?? '').toString(),
           });
           totalPorMetodo[met] = (totalPorMetodo[met] ?? 0) + monto;
         }
       }
+
+      // ── Monto de CADA renglón (producto) ──
+      // Antes cada renglón repetía el total de la factura (teléfono con
+      // inicial $50 + vidrio $4 → "$54" en los dos). Ahora se reparte lo
+      // cobrado: el accesorio lleva su precio y el equipo financiado la
+      // inicial que realmente se cobró.
+      _asignarMontoRenglones(productosDetalle, pagosDetalle, total);
 
       detalles.add({
         'nro_factura': (v['nro_factura'] ?? '').toString(),
@@ -38101,6 +38513,8 @@ Future<void> generarReporteVentas({DateTime? desde, DateTime? hasta}) async {
         'fecha':       (v['fecha'] ?? '').toString(),
         'tipo_venta':  (v['tipo_venta'] ?? '').toString(),
         'total': total,
+        'total_bs':  totales.bs,
+        'total_usd': ((v['pagos'] as List?) ?? []).isEmpty ? total : totales.usd,
         'productos': productosDetalle,
         'pagos': pagosDetalle,
       });
@@ -38114,6 +38528,8 @@ Future<void> generarReporteVentas({DateTime? desde, DateTime? hasta}) async {
         v['tienda']      ?? '',
         v['fecha']       ?? '',
         total,
+        totales.bs,
+        ((v['pagos'] as List?) ?? []).isEmpty ? total : totales.usd,
         v['tipo_venta']  ?? '',
       ]);
     }
@@ -38122,7 +38538,11 @@ Future<void> generarReporteVentas({DateTime? desde, DateTime? hasta}) async {
   }
 
   await _registrarReporte(HistorialReporteEntry(
-    nombreArchivo: _nombreReporte('Reporte de Ventas', desde, hasta),
+    nombreArchivo: _nombreReporte(
+        tiendaEfectiva == null
+            ? 'Reporte de Ventas'
+            : 'Reporte de Ventas ($tiendaEfectiva)',
+        desde, hasta),
     tipoReporte: 'ventas',
     categoria: 'Ventas',
     fecha: DateTime.now(),
@@ -38131,13 +38551,18 @@ Future<void> generarReporteVentas({DateTime? desde, DateTime? hasta}) async {
     hastaIso: hasta?.toIso8601String(),
     encabezados: const [
       'Nro Factura','Cliente','Cédula','Teléfono','Vendedor',
-      'Tienda','Fecha','Total','F/D'],
+      'Tienda','Fecha','Total equiv. USD','Cobrado Bs','Cobrado USD','F/D'],
     filas: filas,
     detalles: detalles,
     resumen: {
+      'tienda': tiendaEfectiva ?? 'Todas',
       'total_facturas': detalles.length,
-      'total_monto': granTotal,
-      'total_por_metodo': totalPorMetodo,
+      // Montos ya formateados con su moneda (el visor los muestra tal cual).
+      'total_equivalente_usd': formatCurrency(granTotalUsdEquiv),
+      'total_cobrado_en_bs': formatBolivares(granTotalBs),
+      'total_cobrado_en_divisas': formatCurrency(granTotalUsd),
+      'total_por_metodo': totalPorMetodo.map(
+          (k, val) => MapEntry(k, formatMontoPorMetodo(val, k))),
     },
   ));
 }
@@ -38586,15 +39011,30 @@ Future<void> generarReporteCierres({DateTime? desde, DateTime? hasta}) async {
   final filas = <List<dynamic>>[];
   final detalles = <Map<String, dynamic>>[];
   double granTotal = 0;
+  // Totales por moneda real (el monto_total de cierres viejos mezcla Bs y $).
+  final Map<String, double> granPorMetodo = {};
 
   try {
     final raw = await _Api.get('cierres');
-    for (var c in ((raw as List?) ?? [])) {
+    // Cada quien ve sólo los cierres de su tienda (Dueño/Admin: todas).
+    final cierresVisibles = filtrarPorTienda(
+        ((raw as List?) ?? []).whereType<Map>()
+            .map((m) => Map<String, dynamic>.from(m)).toList());
+    for (var c in cierresVisibles) {
       if (!_enRango(c['fecha_cierre'], desde, hasta)) continue;
       final total = double.tryParse(c['monto_total']?.toString() ?? '0') ?? 0;
       granTotal += total;
-      final metodos = (c['metodos'] as List? ?? [])
-          .map((m) => "${m['metodo']}: ${m['monto']}").join(' | ');
+      final porMetodo = <String, double>{};
+      for (final m in (c['metodos'] as List? ?? [])) {
+        final met = (m['metodo'] ?? '').toString();
+        final monto = double.tryParse(m['monto']?.toString() ?? '0') ?? 0;
+        porMetodo[met] = (porMetodo[met] ?? 0) + monto;
+        granPorMetodo[met] = (granPorMetodo[met] ?? 0) + monto;
+      }
+      // Cada método con su moneda: "Pago Móvil: Bs 1.000,00 | Zelle: $20.00"
+      final metodos = porMetodo.entries
+          .map((m) => "${m.key}: ${formatMontoPorMetodo(m.value, m.key)}")
+          .join(' | ');
       final metodosDetalle = (c['metodos'] as List? ?? [])
           .map((m) => {
             'metodo': (m['metodo'] ?? '').toString(),
@@ -38605,7 +39045,7 @@ Future<void> generarReporteCierres({DateTime? desde, DateTime? hasta}) async {
         c['uid'] ?? '',
         c['tienda'] ?? '',
         c['fecha_cierre'] ?? '',
-        total,
+        porMetodo.isEmpty ? total : formatTotalesPorMetodos(porMetodo),
         c['usuario_cierre'] ?? '',
         metodos,
       ]);
@@ -38636,7 +39076,9 @@ Future<void> generarReporteCierres({DateTime? desde, DateTime? hasta}) async {
     detalles: detalles,
     resumen: {
       'total_cierres': filas.length,
-      'monto_total': granTotal,
+      'monto_total': granPorMetodo.isEmpty
+          ? granTotal
+          : formatTotalesPorMetodos(granPorMetodo),
     },
   ));
 }
@@ -38821,6 +39263,9 @@ Future<Uint8List> exportarHistorialAExcel(HistorialReporteEntry e) async {
       'Generado por: ${e.generadoPor}',
     ]));
     s2.appendRow(_filaCeldas([
+      'Tienda: ${e.resumen['tienda'] ?? 'Todas'}',
+    ]));
+    s2.appendRow(_filaCeldas([
       'Fecha de generación: ${_formatoFechaCompleta(e.fecha)}',
     ]));
     s2.appendRow(<CellValue?>[]);
@@ -38868,8 +39313,13 @@ Future<Uint8List> exportarHistorialAExcel(HistorialReporteEntry e) async {
       'Equivale en USD',      // 24 (Pagado en Bs / tasa)
       'Pagado en USD',        // 25 (suma de pagos en métodos USD)
       'Tasa Bs/USD',          // 26 (tasa usada en el cálculo)
-      'Total Pagado',         // 27
+      'Monto Renglón USD',    // 27 (lo cobrado por ESTE producto)
+      'Pago Móvil (Ref / C.I. / Tel)', // 28 (auditoría)
     ]));
+    // NOTA: las columnas 22-26 y 28 son datos de la FACTURA (pagos); se
+    // escriben sólo en el PRIMER renglón de cada factura para que al
+    // sumar la columna no se dupliquen los montos. La columna 27 es el
+    // monto de cada producto (la suma de la factura = total cobrado).
 
     // Una fila por cada equipo vendido en cada factura
     for (final f in e.detalles) {
@@ -38928,7 +39378,6 @@ Future<Uint8List> exportarHistorialAExcel(HistorialReporteEntry e) async {
       // con la tasa histórica del pago si está guardada, si no la actual.
       final metodosSet = <String>{};
       double inicialPagada = 0;
-      double totalPagado = 0;
       double pagadoEnBs = 0;     // suma de pagos en métodos Bs
       double pagadoEnUsd = 0;    // suma de pagos en métodos USD
       final tasaActual = ConfigSistema.tasaCambio;
@@ -38940,7 +39389,6 @@ Future<Uint8List> exportarHistorialAExcel(HistorialReporteEntry e) async {
         final met = (p['metodo'] ?? '').toString();
         if (met.isNotEmpty) metodosSet.add(met);
         final monto = double.tryParse(p['monto']?.toString() ?? '0') ?? 0;
-        totalPagado += monto;
         // Clasificar pago como Bs o USD según el método
         final metLow = met.toLowerCase();
         final esEnBs = metLow.contains('pago móvil') ||
@@ -38971,6 +39419,15 @@ Future<Uint8List> exportarHistorialAExcel(HistorialReporteEntry e) async {
       final equivalenteUsd = (pagadoEnBs > 0 && tasaParaMostrar > 0)
           ? redondearPrecio(pagadoEnBs / tasaParaMostrar)
           : 0.0;
+      // Total cobrado en USD (Bs convertidos con la tasa de cada pago).
+      // (Antes se exportaba la suma cruda de pagos, que mezclaba Bs con $.)
+      final cobradoUsdFactura = redondearPrecio(inicialPagada);
+      // Datos de auditoría de los pagos móviles de la factura.
+      final datosPM = pagos
+          .whereType<Map>()
+          .map(datosPagoMovilTexto)
+          .where((t) => t.isNotEmpty)
+          .join(' | ');
       // Si la venta es Contado, no tiene sentido mostrar inicial pagada
       final inicialPagadaCelda = esFinanciada
           ? redondearPrecio(inicialPagada)
@@ -38999,13 +39456,25 @@ Future<Uint8List> exportarHistorialAExcel(HistorialReporteEntry e) async {
           equivalenteUsd == 0 ? '' : equivalenteUsd,
           pagadoEnUsd == 0 ? '' : pagadoEnUsd,
           pagadoEnBs > 0 ? tasaParaMostrar : '',
-          totalPagado,
+          cobradoUsdFactura,
+          datosPM,
         ]));
         continue;
       }
 
+      // Monto de cada renglón. Los reportes nuevos ya lo traen calculado;
+      // para los del historial viejo se calcula aquí con el mismo criterio.
+      final prodsMap = productos
+          .whereType<Map>()
+          .map((m) => Map<String, dynamic>.from(m))
+          .toList();
+      if (prodsMap.any((m) => m['monto_renglon_usd'] == null)) {
+        _asignarMontoRenglones(prodsMap, pagos, cobradoUsdFactura);
+      }
+
       // Una fila por equipo
-      for (final p in productos) {
+      var esPrimerRenglon = true;
+      for (final p in prodsMap) {
         // Los campos pueden venir como String o num desde el backend.
         // double.tryParse(value.toString()) maneja ambos casos sin error.
         final precioVentaBase = double.tryParse(p['precio_venta']?.toString() ?? '0') ?? 0;
@@ -39081,6 +39550,13 @@ Future<Uint8List> exportarHistorialAExcel(HistorialReporteEntry e) async {
             ? vendedorProducto
             : (f['vendedor'] ?? '').toString();
 
+        // Monto de ESTE renglón (no el total de la factura).
+        final montoRenglon =
+            double.tryParse(p['monto_renglon_usd']?.toString() ?? '') ?? 0.0;
+        final renglonFinanciado = p['financiado'] == true;
+        final primero = esPrimerRenglon;
+        esPrimerRenglon = false;
+
         s2.appendRow(_filaCeldas([
           (f['fecha'] ?? '').toString(),
           (f['nro_factura'] ?? '').toString(),
@@ -39100,15 +39576,18 @@ Future<Uint8List> exportarHistorialAExcel(HistorialReporteEntry e) async {
           precioCosto,
           ganancia,
           inicialLista == 0 ? '' : inicialLista,
-          inicialPagadaCelda ?? '',
+          // Inicial pagada: sólo en el renglón financiado y sólo la
+          // parte que le corresponde (sin el precio de los accesorios).
+          (esFinanciada && renglonFinanciado) ? montoRenglon : '',
           nCuotasFactura == 0 ? '' : nCuotasFactura,
           cuotaFactura == 0 ? '' : cuotaFactura,
-          metodos,
-          pagadoEnBs == 0 ? '' : pagadoEnBs,
-          equivalenteUsd == 0 ? '' : equivalenteUsd,
-          pagadoEnUsd == 0 ? '' : pagadoEnUsd,
-          pagadoEnBs > 0 ? tasaParaMostrar : '',
-          totalPagado,
+          primero ? metodos : '',
+          (primero && pagadoEnBs != 0) ? pagadoEnBs : '',
+          (primero && equivalenteUsd != 0) ? equivalenteUsd : '',
+          (primero && pagadoEnUsd != 0) ? pagadoEnUsd : '',
+          (primero && pagadoEnBs > 0) ? tasaParaMostrar : '',
+          montoRenglon,
+          primero ? datosPM : '',
         ]));
       }
     }
@@ -39322,10 +39801,18 @@ class _VentanaReportesState extends State<VentanaReportes>
   String _filtroCategoria = 'Todas';
   bool _cargandoHistorial = true;
 
+  /// Tienda del reporte de ventas. Dueño/Admin/Gerente eligen ('Todas'
+  /// o una tienda); el resto queda fijo en su tienda (igual que el
+  /// cierre de caja).
+  String _tiendaVentas = 'Todas';
+
   @override
   void initState() {
     super.initState();
     _tabController = TabController(length: 2, vsync: this);
+    if (!puedeVerTodasLasTiendas() && tiendaUsuarioActual().isNotEmpty) {
+      _tiendaVentas = tiendaUsuarioActual();
+    }
     _cargarHistorial();
   }
 
@@ -39469,10 +39956,14 @@ class _VentanaReportesState extends State<VentanaReportes>
         ),
 
         _seccion("VENTAS Y FACTURACIÓN"),
+        _selectorTiendaVentas(),
         _cardReporte(id: "ventas", titulo: "Ventas / Facturas",
           icono: Icons.receipt_long_outlined, color: const Color(0xFF1D6F42),
-          subtitulo: "Cada factura con cliente, productos, IMEIs y desglose de pagos",
-          fn: (d,h) => generarReporteVentas(desde: d, hasta: h)),
+          subtitulo: _tiendaVentas == 'Todas'
+              ? "Cada factura con cliente, productos, IMEIs y desglose de pagos"
+              : "Tienda: $_tiendaVentas — facturas, productos, IMEIs y pagos",
+          fn: (d,h) => generarReporteVentas(
+              desde: d, hasta: h, tienda: _tiendaVentas)),
 
         _seccion("INVENTARIO"),
         _cardReporte(id: "inv", titulo: "Inventario General",
@@ -39532,6 +40023,15 @@ class _VentanaReportesState extends State<VentanaReportes>
     // Filtrado
     var visibles = entradas.where((e) {
       if (_filtroCategoria != 'Todas' && e.categoria != _filtroCategoria) {
+        return false;
+      }
+      // Quien no puede ver todas las tiendas sólo ve los reportes de
+      // ventas de SU tienda (los generados con 'Todas' u otra tienda,
+      // p.ej. por el Dueño en este mismo equipo, quedan ocultos).
+      if (e.tipoReporte == 'ventas' && !puedeVerTodasLasTiendas() &&
+          tiendaUsuarioActual().isNotEmpty &&
+          (e.resumen['tienda'] ?? 'Todas').toString() !=
+              tiendaUsuarioActual()) {
         return false;
       }
       final q = _busquedaHistorial.text.trim().toLowerCase();
@@ -39841,6 +40341,54 @@ class _VentanaReportesState extends State<VentanaReportes>
             fontSize: 10.5, color: AppColors.textSecondary)),
     ],
   );
+
+  /// Selector de tienda del reporte de ventas (mismo estilo que el filtro
+  /// del cierre de caja). Para roles sin permiso muestra sólo su tienda.
+  Widget _selectorTiendaVentas() {
+    if (!puedeVerTodasLasTiendas()) {
+      if (tiendaUsuarioActual().isEmpty) return const SizedBox.shrink();
+      return Padding(
+        padding: const EdgeInsets.only(left: 4, bottom: 8),
+        child: Row(children: [
+          const Icon(Icons.store_outlined,
+              size: 14, color: AppColors.royalBlue),
+          const SizedBox(width: 6),
+          Text('Ventas de ${tiendaUsuarioActual()}',
+              style: const TextStyle(fontSize: 11,
+                  color: AppColors.royalBlue, fontWeight: FontWeight.w600)),
+        ]),
+      );
+    }
+    final opciones = ['Todas', ...ConfigSistema.tiendas];
+    if (!opciones.contains(_tiendaVentas)) _tiendaVentas = 'Todas';
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 8),
+      child: SizedBox(
+        height: 38,
+        child: ListView(
+          scrollDirection: Axis.horizontal,
+          children: opciones.map((t) {
+            final sel = _tiendaVentas == t;
+            return Padding(
+              padding: const EdgeInsets.only(right: 8),
+              child: ChoiceChip(
+                label: Text(t, style: TextStyle(
+                  fontSize: 12,
+                  color: sel ? Colors.white : AppColors.royalBlue,
+                  fontWeight: sel ? FontWeight.bold : FontWeight.normal)),
+                selected: sel,
+                selectedColor: AppColors.royalBlue,
+                backgroundColor: AppColors.royalBlue.withValues(alpha: 0.08),
+                side: BorderSide(
+                  color: sel ? AppColors.royalBlue
+                      : AppColors.royalBlue.withValues(alpha: 0.3)),
+                onSelected: (_) => setState(() => _tiendaVentas = t),
+              ));
+          }).toList(),
+        ),
+      ),
+    );
+  }
 
   Widget _seccion(String label) => Padding(
     padding: const EdgeInsets.only(left: 4, bottom: 8, top: 12),
@@ -40163,8 +40711,13 @@ class _VisorReporteScreenState extends State<VisorReporteScreen> {
               color: AppColors.textSecondary, letterSpacing: 0.8)),
         ));
         v.forEach((k2, v2) {
+          // Totales por método: cada uno con SU moneda (Bs o $).
+          // Los reportes viejos guardaban el número sin símbolo.
+          final num? n2 = v2 is num ? v2 : null;
           items.add(_chipResumen(_legibleClave(k2.toString()),
-              _formatearValorResumen(v2)));
+              (k == 'total_por_metodo' && n2 != null)
+                  ? formatMontoPorMetodo(n2.toDouble(), k2.toString())
+                  : _formatearValorResumen(v2)));
         });
       } else {
         items.add(_chipResumen(_legibleClave(k),
@@ -40247,10 +40800,18 @@ class _VisorReporteScreenState extends State<VisorReporteScreen> {
         final cedula = (d['cedula'] ?? '').toString().toLowerCase();
         final nro = (d['nro_factura'] ?? '').toString().toLowerCase();
         final vend = (d['vendedor'] ?? '').toString().toLowerCase();
+        // También por datos del pago móvil (referencia, cédula o
+        // teléfono del pagador) para auditoría.
+        final pm = ((d['pagos'] as List?) ?? [])
+            .whereType<Map>()
+            .map(datosPagoMovilTexto)
+            .join(' ')
+            .toLowerCase();
         return cliente.contains(f) ||
             cedula.contains(f) ||
             nro.contains(f) ||
-            vend.contains(f);
+            vend.contains(f) ||
+            pm.contains(f);
       }).toList();
     }
     return Column(
@@ -40259,7 +40820,7 @@ class _VisorReporteScreenState extends State<VisorReporteScreen> {
           padding: const EdgeInsets.all(10),
           child: TextField(
             decoration: InputDecoration(
-              hintText: 'Buscar por cliente, cédula, factura o vendedor',
+              hintText: 'Buscar por cliente, cédula, factura, vendedor o referencia',
               prefixIcon: const Icon(Icons.search, size: 18),
               isDense: true,
               filled: true,
@@ -40290,7 +40851,12 @@ class _VisorReporteScreenState extends State<VisorReporteScreen> {
         (f['productos'] as List?)?.cast<Map<String, dynamic>>() ?? [];
     final pagos =
         (f['pagos'] as List?)?.cast<Map<String, dynamic>>() ?? [];
-    final total = _aDouble(f['total']) ?? 0.0;
+    // Total con la moneda REAL de cada pago ("$50.00 + Bs 1.200,00").
+    // Antes se ponía "$" al total crudo, que suma Bs con $.
+    final totales = totalesPagosPorMoneda(pagos);
+    final totalTexto = pagos.isEmpty
+        ? _fmtMoneda(_aDouble(f['total']) ?? 0.0)
+        : formatTotalesPorMoneda(totales.usd, totales.bs);
     return Card(
       margin: const EdgeInsets.only(bottom: 8),
       shape: RoundedRectangleBorder(
@@ -40319,10 +40885,11 @@ class _VisorReporteScreenState extends State<VisorReporteScreen> {
                   fontSize: 13.5, fontWeight: FontWeight.bold,
                   color: AppColors.textPrimary)),
             ),
-            Text(_fmtMoneda(total),
+            Flexible(child: Text(totalTexto,
+              textAlign: TextAlign.right,
               style: const TextStyle(
                 fontSize: 14, fontWeight: FontWeight.bold,
-                color: AppColors.statusGreen)),
+                color: AppColors.statusGreen))),
           ],
         ),
         subtitle: Padding(
@@ -40396,8 +40963,14 @@ class _VisorReporteScreenState extends State<VisorReporteScreen> {
 
   Widget _filaProducto(Map<String, dynamic> p) {
     final tipo = p['tipo']?.toString() ?? '';
-    final esEquipo = tipo.toLowerCase() == 'equipo';
-    final precio = _aDouble(p['precio_venta']);
+    // El tipo se guarda como "Equipo (IMEI)"; antes se comparaba exacto
+    // con "equipo" y nunca coincidía.
+    final esEquipo = tipo.toLowerCase().startsWith('equipo') ||
+        (p['imei']?.toString().isNotEmpty ?? false);
+    // Monto cobrado por ESTE renglón (reportes nuevos). Si no existe
+    // (reporte viejo), se muestra el precio de lista del producto.
+    final montoRenglon = _aDouble(p['monto_renglon_usd']);
+    final precio = montoRenglon ?? _aDouble(p['precio_venta']);
     return Container(
       margin: const EdgeInsets.only(bottom: 6),
       padding: const EdgeInsets.all(8),
@@ -40448,10 +41021,18 @@ class _VisorReporteScreenState extends State<VisorReporteScreen> {
             ),
           ),
           if (precio != null)
-            Text(_fmtMoneda(precio),
-              style: const TextStyle(
-                fontSize: 12.5, fontWeight: FontWeight.bold,
-                color: AppColors.statusGreen)),
+            Column(
+              crossAxisAlignment: CrossAxisAlignment.end,
+              children: [
+                Text(_fmtMoneda(precio),
+                  style: const TextStyle(
+                    fontSize: 12.5, fontWeight: FontWeight.bold,
+                    color: AppColors.statusGreen)),
+                if (montoRenglon != null && p['financiado'] == true)
+                  const Text('Inicial',
+                    style: TextStyle(
+                      fontSize: 10, color: AppColors.textSecondary)),
+              ]),
         ],
       ),
     );
@@ -40462,6 +41043,8 @@ class _VisorReporteScreenState extends State<VisorReporteScreen> {
     final metodo = p['metodo']?.toString() ?? '—';
     final tipo = p['tipo']?.toString() ?? '';
     final fin = p['financiador']?.toString() ?? '';
+    // Referencia / cédula / teléfono del pagador (pago móvil).
+    final datosPM = datosPagoMovilTexto(p);
     return Container(
       margin: const EdgeInsets.only(bottom: 6),
       padding: const EdgeInsets.all(8),
@@ -40492,10 +41075,19 @@ class _VisorReporteScreenState extends State<VisorReporteScreen> {
                       style: const TextStyle(
                         fontSize: 11, color: AppColors.textSecondary)),
                   ),
+                if (datosPM.isNotEmpty)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 2),
+                    child: SelectableText(datosPM,
+                      style: const TextStyle(
+                        fontSize: 11, color: AppColors.textPrimary)),
+                  ),
               ],
             ),
           ),
-          Text(_fmtMoneda(monto),
+          // Monto con la moneda del método (Bs para pago móvil, punto,
+          // efectivo Bs y transferencia; $ para el resto).
+          Text(formatMontoPorMetodo(monto, metodo),
             style: const TextStyle(
               fontSize: 13, fontWeight: FontWeight.bold,
               color: AppColors.statusGreen)),
@@ -48613,7 +49205,9 @@ class _VentanaReporteVendedorState extends State<VentanaReporteVendedor>
       // porque el cobro lo recibe quien factura (caja). Si una factura no
       // tiene equipos pero sí pagos, igualmente queda el creador asociado.
       final vCreador = entradaVendedor(f.vendedor);
-      vCreador['total'] = (vCreador['total'] as double) + f.total;
+      // Total en $ equivalentes (Bs convertidos con la tasa del pago).
+      // `f.total` suma Bs con $ y daba montos como "$100.000".
+      vCreador['total'] = (vCreador['total'] as double) + _totalFacturaUsd(f);
       facturasPorVendedor
           .putIfAbsent(f.vendedor, () => {})
           .add(f.nroFactura);
@@ -48651,7 +49245,12 @@ class _VentanaReporteVendedorState extends State<VentanaReporteVendedor>
 
   /// Total general (todas las ventas filtradas).
   double get _totalGeneral =>
-      _facturasFiltradas.fold(0.0, (s, f) => s + f.total);
+      _facturasFiltradas.fold(0.0, (s, f) => s + _totalFacturaUsd(f));
+
+  /// Total cobrado de una factura en $ (pagos en Bs convertidos con la
+  /// tasa histórica de cada pago, o la actual si no la tienen).
+  double _totalFacturaUsd(FacturaModel f) =>
+      totalesPagosPorMoneda(f.pagos.map((p) => p.toMap())).equivUsd;
 
   /// Ganancia general usando el precio REAL al que se vendió cada
   /// producto (según financiadora si aplica). Refleja el dinero real
@@ -49153,7 +49752,7 @@ class _VentanaReporteVendedorState extends State<VentanaReporteVendedor>
         'N° Cuotas',          // 16
         'Cuota USD',          // 17
         'Métodos de Pago',    // 18
-        'Total Pagado',       // 19
+        'Monto Renglón USD',  // 19 (lo cobrado por este producto)
         'Costo USD',          // 20
         'Ganancia USD',       // 21
       ]));
@@ -49198,11 +49797,24 @@ class _VentanaReporteVendedorState extends State<VentanaReporteVendedor>
         // Inicial pagada = suma de pagos al contado (no financiados)
         // En facturas financiadas, la "inicial pagada" es lo que el
         // cliente entregó por adelantado.
-        final inicialPagada = f.pagos
-            .where((p) => p.financiadora == null ||
-                p.financiadora!.isEmpty)
-            .fold<double>(0, (s, p) => s + p.monto);
-        final totalPagado = f.total;
+        // CORRECCIÓN: antes cada renglón repetía la inicial y el total de
+        // TODA la factura (teléfono con inicial $50 + vidrio $4 → $54 en
+        // los dos renglones) y además sumaba Bs con $. Ahora lo cobrado
+        // (en $) se reparte entre los renglones: el accesorio lleva su
+        // precio y el equipo financiado la inicial que le corresponde.
+        final renglonesFin = <bool>[
+          for (final _ in f.equipos) esFinanciada,
+          for (final _ in f.itemsSinImei) esFinanciada && f.equipos.isEmpty,
+        ];
+        final montosRenglon = repartirCobroEntreRenglones(
+          precios: [
+            for (final eq in f.equipos) eq.producto.precioVenta,
+            for (final p in f.itemsSinImei) p.precioVenta,
+          ],
+          financiados: renglonesFin,
+          cobradoUsd: _totalFacturaUsd(f),
+        );
+        var idxRenglon = 0;
 
         // ── EQUIPOS CON IMEI ──
         for (final eq in f.equipos) {
@@ -49247,11 +49859,13 @@ class _VentanaReporteVendedorState extends State<VentanaReporteVendedor>
             financiadora ?? '',
             precioLista,
             inicialLista,
-            inicialPagada,
+            // Inicial de ESTE renglón (sólo si es el financiado).
+            renglonesFin[idxRenglon] ? montosRenglon[idxRenglon] : '',
             nCuotas == 0 ? '' : nCuotas,
             cuotaLista == 0 ? '' : cuotaLista,
             metodos,
-            totalPagado,
+            // Monto cobrado por ESTE renglón, no el total de la factura.
+            montosRenglon[idxRenglon++],
             p.precioCosto,
             ganancia,
           ]));
@@ -49298,11 +49912,13 @@ class _VentanaReporteVendedorState extends State<VentanaReporteVendedor>
             financiadora ?? '',
             precioLista,
             inicialLista,
-            inicialPagada,
+            // Inicial de ESTE renglón (sólo si es el financiado).
+            renglonesFin[idxRenglon] ? montosRenglon[idxRenglon] : '',
             nCuotas == 0 ? '' : nCuotas,
             cuotaLista == 0 ? '' : cuotaLista,
             metodos,
-            totalPagado,
+            // Monto cobrado por ESTE renglón, no el total de la factura.
+            montosRenglon[idxRenglon++],
             p.precioCosto,
             ganancia,
           ]));
