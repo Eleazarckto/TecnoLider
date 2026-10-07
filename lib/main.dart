@@ -9378,6 +9378,221 @@ String _resolverNombreVendedor(String guardado) {
   return valor;
 }
 
+// ────────────────────────────────────────────────────────────────
+// Helpers de MONEDA para la factura impresa que recibe el cliente.
+//
+// Problema: `formatMontoPorMetodo` solo reconoce como bolívares los
+// métodos que coinciden EXACTO con la lista `_metodosEnBolivares`.
+// Los métodos son editables desde Configuración, así que variantes
+// como "Punto", "Pago móvil BDV", "Transferencia Bs" o "Biopago" se
+// imprimían con "$" aunque el monto estaba en bolívares. Además el
+// bloque de pagos de la factura usaba un criterio distinto (contains)
+// para calcular el "Equivale a", con lo que un mismo pago salía con
+// "$" en el monto y con su equivalente en dólares debajo.
+//
+// Estos helpers unifican el criterio SOLO para la factura impresa
+// (los reportes tienen su propio formato).
+// ────────────────────────────────────────────────────────────────
+
+/// true si el método de pago está denominado en bolívares (criterio
+/// amplio usado por la factura impresa).
+bool _esMetodoBsFactura(String metodo) {
+  if (esMetodoEnBolivares(metodo)) return true;
+  final m = metodo.trim().toLowerCase();
+  // Métodos explícitamente en divisas → nunca Bs.
+  if (m.contains('\$') || m.contains('usd') || m.contains('divisa') ||
+      m.contains('zelle') || m.contains('dólar') || m.contains('dolar')) {
+    return false;
+  }
+  return RegExp(r'(^|[^a-z])bs\.?([^a-z]|$)').hasMatch(m) ||
+      m.contains('bolívar') || m.contains('bolivar') ||
+      m.contains('pago móvil') || m.contains('pago movil') ||
+      m.contains('pagomovil') || m.contains('punto') ||
+      m.contains('transferencia') || m.contains('biopago');
+}
+
+/// Formatea un monto en bolívares para la factura: "100.000,00 Bs."
+String _fmtBsFactura(double v) {
+  final neg = v < 0;
+  final parts = v.abs().toStringAsFixed(2).split('.');
+  final intPart = parts[0].replaceAllMapped(
+    RegExp(r'(\d{1,3})(?=(\d{3})+(?!\d))'), (m) => '${m[1]}.');
+  return '${neg ? '-' : ''}$intPart,${parts[1]} Bs.';
+}
+
+/// Formatea el monto de un pago con la moneda de su método:
+/// bolívares → "100.000,00 Bs." · divisas → "$1,234.56".
+String _fmtMontoFactura(double monto, String metodo) =>
+    _esMetodoBsFactura(metodo) ? _fmtBsFactura(monto) : formatCurrency(monto);
+
+// ────────────────────────────────────────────────────────────────
+// Resumen de INICIAL / FINANCIADO para la factura impresa.
+//
+// Cómo se modela una venta financiada (Cashea / Krece / Weppa / FPB
+// o cuotas manuales):
+//   · `factura.pagos` guarda SOLO lo que el cliente pagó en tienda.
+//     En una venta financiada esos pagos llevan tipo == 'Financiado'
+//     (y la financiadora si vino del F/D del producto).
+//   · El vendedor puede marcar uno o varios pagos como la inicial
+//     (`esInicial`). Si ninguno está marcado, se aplica el mismo
+//     criterio del Reporte por Financiadora: todos los pagos del
+//     cliente son la inicial.
+//   · Lo financiado (saldo que cubre la financiadora) no es un pago
+//     de la factura: se deduce de las cuotas (N° cuotas × monto de
+//     cuota, en USD) cuando ese dato existe.
+// ────────────────────────────────────────────────────────────────
+class _ResumenInicialFactura {
+  /// Pagos que conforman la inicial del cliente.
+  final List<PagoFactura> pagosInicial;
+  /// Inicial total en USD (pagos en Bs convertidos con su tasa histórica).
+  final double inicialUsd;
+  /// Si TODOS los pagos de la inicial fueron en Bs, el total en Bs.
+  final double? inicialBs;
+  /// Saldo financiado (N° cuotas × monto cuota, USD). null si no hay dato.
+  final double? financiadoUsd;
+  final int? numeroCuotas;
+  final double? montoCuota;
+  /// Financiadora (Cashea/Krece/Weppa...) o '' si no se conoce.
+  final String financiadora;
+
+  const _ResumenInicialFactura({
+    required this.pagosInicial,
+    required this.inicialUsd,
+    required this.inicialBs,
+    required this.financiadoUsd,
+    required this.numeroCuotas,
+    required this.montoCuota,
+    required this.financiadora,
+  });
+
+  /// % que representa la inicial sobre (inicial + financiado).
+  double? get porcentaje {
+    final fin = financiadoUsd;
+    if (fin == null || fin <= 0 || inicialUsd <= 0) return null;
+    return inicialUsd / (inicialUsd + fin) * 100;
+  }
+
+  /// "Inicial (40%)" o "Inicial" si no se puede calcular el %.
+  String get etiquetaInicial {
+    final pct = porcentaje;
+    if (pct == null) return 'Inicial';
+    final redondeado = (pct - pct.roundToDouble()).abs() < 0.05;
+    return 'Inicial (${pct.toStringAsFixed(redondeado ? 0 : 1)}%)';
+  }
+
+  /// "Financiado por Cashea" / "Saldo financiado".
+  String get etiquetaFinanciado => financiadora.isNotEmpty
+      ? 'Financiado por $financiadora'
+      : 'Saldo financiado';
+
+  bool esPagoInicial(PagoFactura p) =>
+      pagosInicial.any((x) => identical(x, p));
+}
+
+/// Devuelve el resumen de inicial de la factura, o null si la venta no
+/// es financiada (venta de contado normal → no hay "Inicial").
+_ResumenInicialFactura? _resumenInicialFactura(
+    FacturaModel factura, double tasaActual) {
+  final pagos = factura.pagos;
+  if (pagos.isEmpty) return null;
+  final esFinanciada = pagos.any((p) =>
+      p.tipo.trim().toLowerCase() == 'financiado' ||
+      (p.financiadora ?? '').trim().isNotEmpty ||
+      p.esInicial ||
+      (p.numeroCuotas != null && p.numeroCuotas! > 0));
+  if (!esFinanciada) return null;
+
+  final marcados = pagos.where((p) => p.esInicial).toList();
+  final pagosInicial = marcados.isNotEmpty ? marcados : List.of(pagos);
+
+  double inicialUsd = 0;
+  double inicialBs = 0;
+  bool todoEnBs = true;
+  for (final p in pagosInicial) {
+    if (_esMetodoBsFactura(p.metodo)) {
+      final t = (p.tasaCambio != null && p.tasaCambio! > 0)
+          ? p.tasaCambio!
+          : (tasaActual > 0 ? tasaActual : 1.0);
+      inicialUsd += p.monto / t;
+      inicialBs += p.monto;
+    } else {
+      inicialUsd += p.monto;
+      todoEnBs = false;
+    }
+  }
+
+  // Datos de cuotas: primer pago que los tenga (la app los guarda en
+  // el pago inicial aunque sea de tipo Contado).
+  PagoFactura? conCuotas;
+  for (final p in pagos) {
+    if (p.numeroCuotas != null && p.numeroCuotas! > 0 &&
+        p.montoCuota != null && p.montoCuota! > 0) {
+      conCuotas = p;
+      break;
+    }
+  }
+  String financiadora = '';
+  for (final p in [if (conCuotas != null) conCuotas, ...pagos]) {
+    final f = (p.financiadora ?? '').trim();
+    if (f.isNotEmpty) { financiadora = f; break; }
+  }
+
+  return _ResumenInicialFactura(
+    pagosInicial: pagosInicial,
+    inicialUsd: inicialUsd,
+    inicialBs: (todoEnBs && inicialBs > 0) ? inicialBs : null,
+    financiadoUsd: conCuotas == null
+        ? null
+        : conCuotas.numeroCuotas! * conCuotas.montoCuota!,
+    numeroCuotas: conCuotas?.numeroCuotas,
+    montoCuota: conCuotas?.montoCuota,
+    financiadora: financiadora,
+  );
+}
+
+/// Bloque PDF con el concepto "Inicial" de una venta financiada:
+///   Inicial (40%):            $50.00
+///   Financiado por Cashea:    $75.00   (solo si hay dato de cuotas)
+pw.Widget _bloqueInicialPdf(_ResumenInicialFactura r,
+    {required double fontSize}) {
+  pw.Widget fila(String etiqueta, String valor, {bool fuerte = false}) =>
+      pw.Padding(
+        padding: const pw.EdgeInsets.symmetric(vertical: 0.8),
+        child: pw.Row(
+          crossAxisAlignment: pw.CrossAxisAlignment.start,
+          children: [
+            pw.Expanded(child: pw.Text("$etiqueta:",
+              style: pw.TextStyle(
+                fontSize: fontSize,
+                fontWeight: fuerte ? pw.FontWeight.bold : pw.FontWeight.normal,
+                color: PdfColors.black))),
+            pw.SizedBox(width: 4),
+            pw.Text(valor,
+              style: pw.TextStyle(
+                fontSize: fontSize,
+                fontWeight: pw.FontWeight.bold,
+                color: PdfColors.black)),
+          ]),
+      );
+  return pw.Column(
+    crossAxisAlignment: pw.CrossAxisAlignment.stretch,
+    children: [
+      fila(r.etiquetaInicial, formatCurrency(r.inicialUsd), fuerte: true),
+      // Si la inicial se pagó completa en bolívares, su monto en Bs
+      // va en una línea aparte (cabe en térmica de 58mm).
+      if (r.inicialBs != null)
+        pw.Align(
+          alignment: pw.Alignment.centerRight,
+          child: pw.Text("(${_fmtBsFactura(r.inicialBs!)})",
+            style: pw.TextStyle(
+              fontSize: fontSize * 0.9,
+              fontWeight: pw.FontWeight.bold,
+              color: PdfColors.black))),
+      if (r.financiadoUsd != null && r.financiadoUsd! > 0)
+        fila(r.etiquetaFinanciado, formatCurrency(r.financiadoUsd!)),
+    ]);
+}
+
 pw.Widget _buildEncabezadoPDF(FacturaModel factura, {pw.ImageProvider? logo}) {
   return pw.Column(crossAxisAlignment: pw.CrossAxisAlignment.stretch, children: [
     // ═══════════════════════════════════════════════════════════
@@ -13043,7 +13258,14 @@ Future<File?> generarFacturaPDF(FacturaModel factura) async {
   if (kIsWeb) return null; // File no disponible en web
   final pdf = pw.Document();
   final tasa = ConfigSistema.tasaCambio;
-  final totalBs = factura.total * tasa;
+  // Total en Bs: los pagos en bolívares ya vienen en Bs (NO se
+  // multiplican por la tasa); solo los pagos en divisas se convierten.
+  // Antes se hacía `factura.total * tasa`, que multiplicaba también
+  // los montos que ya estaban en Bs.
+  final totalBs = factura.pagos.fold<double>(0.0, (s, p) =>
+      s + (_esMetodoBsFactura(p.metodo) ? p.monto : p.monto * tasa));
+  // Resumen de inicial (solo ventas financiadas).
+  final resumenIni = _resumenInicialFactura(factura, tasa);
 
   // Cargar logo de la sede si existe
   pw.ImageProvider? logo;
@@ -13078,7 +13300,11 @@ Future<File?> generarFacturaPDF(FacturaModel factura) async {
             pw.SizedBox(height: 3),
             pw.Row(children: [
               pw.Expanded(child: pw.Text("Teléfono: ${factura.telefono}", style: const pw.TextStyle(fontSize: 11))),
-              pw.Expanded(child: pw.Text("Vendedor: ${_resolverNombreVendedor(factura.vendedor)}", style: const pw.TextStyle(fontSize: 11))),
+              // El vendedor es dato interno: solo se imprime si el admin
+              // lo activó en Configuración → Facturación.
+              pw.Expanded(child: ConfigSistema.mostrarVendedorEnFactura
+                  ? pw.Text("Vendedor: ${_resolverNombreVendedor(factura.vendedor)}", style: const pw.TextStyle(fontSize: 11))
+                  : pw.SizedBox()),
             ]),
           ]),
         ),
@@ -13158,8 +13384,11 @@ Future<File?> generarFacturaPDF(FacturaModel factura) async {
                 crossAxisAlignment: pw.CrossAxisAlignment.stretch,
                 children: [
                   pw.Row(mainAxisAlignment: pw.MainAxisAlignment.spaceBetween, children: [
-                    pw.Text("• ${p.metodo}", style: const pw.TextStyle(fontSize: 11)),
-                    pw.Text(formatMontoPorMetodo(p.monto, p.metodo),
+                    pw.Text(
+                      (resumenIni?.esPagoInicial(p) ?? false)
+                          ? "• Inicial · ${p.metodo}" : "• ${p.metodo}",
+                      style: const pw.TextStyle(fontSize: 11)),
+                    pw.Text(_fmtMontoFactura(p.monto, p.metodo),
                       style: pw.TextStyle(fontSize: 11, fontWeight: pw.FontWeight.bold)),
                   ]),
                   if (tieneCuotas)
@@ -13179,6 +13408,11 @@ Future<File?> generarFacturaPDF(FacturaModel factura) async {
               ),
             );
           }),
+          // ── Inicial / financiado (solo ventas financiadas) ──
+          if (resumenIni != null) ...[
+            pw.SizedBox(height: 6),
+            _bloqueInicialPdf(resumenIni, fontSize: 11),
+          ],
           pw.SizedBox(height: 10),
         ],
 
@@ -13188,7 +13422,7 @@ Future<File?> generarFacturaPDF(FacturaModel factura) async {
         pw.Row(mainAxisAlignment: pw.MainAxisAlignment.spaceBetween, children: [
           pw.Text("TOTAL  (tasa ${tasa.toStringAsFixed(2)})",
             style: pw.TextStyle(fontSize: 13, fontWeight: pw.FontWeight.bold, color: PdfColors.grey700)),
-          pw.Text(formatBolivares(totalBs),
+          pw.Text(_fmtBsFactura(totalBs),
             style: pw.TextStyle(fontSize: 17, fontWeight: pw.FontWeight.bold, color: PdfColors.blue900)),
         ]),
         pw.SizedBox(height: 20),
@@ -13385,6 +13619,12 @@ FacturaModel construirFacturaModelDesdeJson(Map<String, dynamic> j) {
       tipo: (map['tipo'] ?? 'Contado').toString(),
       financiador: map['financiador']?.toString(),
       financiadora: map['financiadora']?.toString(),
+      // ── Marca de INICIAL ── antes no se leía al reconstruir la
+      // factura desde el historial, y la reimpresión perdía qué pago
+      // era la inicial del cliente.
+      esInicial: map['es_inicial'] == true || map['es_inicial'] == 1
+          || map['es_inicial']?.toString() == '1'
+          || map['es_inicial']?.toString().toLowerCase() == 'true',
       // ── Cuotas (si el backend las devolvió) ──
       numeroCuotas: map['numero_cuotas'] == null
           ? null
@@ -13445,9 +13685,17 @@ Future<void> imprimirFactura(FacturaModel factura, [BuildContext? context]) asyn
       break;
     }
   }
-  final financiadoraTexto = pagoFin == null
-      ? ''
-      : (pagoFin.financiadora ?? pagoFin.financiador ?? 'Financiadora');
+  // ── Resumen de INICIAL (solo ventas financiadas) ──
+  // Clasifica explícitamente lo que el cliente pagó como "Inicial" y,
+  // si hay datos de cuotas, lo que queda financiado.
+  final resumenIni = _resumenInicialFactura(factura, tasa);
+  // Nombre de la financiadora (Cashea/Krece/Weppa). Ya NO se cae al
+  // `financiador` (persona del personal que entrega el equipo): es un
+  // dato interno que no debe salir en la factura del cliente.
+  final financiadoraTexto = resumenIni?.financiadora ?? '';
+  final tituloFinanciamiento = financiadoraTexto.isNotEmpty
+      ? "EQUIPO FINANCIADO POR ${financiadoraTexto.toUpperCase()}"
+      : "VENTA FINANCIADA";
 
   // Cargar logo de la sede si existe
   pw.ImageProvider? logo;
@@ -13600,18 +13848,20 @@ Future<void> imprimirFactura(FacturaModel factura, [BuildContext? context]) asyn
         pw.SizedBox(height: 4),
 
         // ═══════════════════════════════════════════════════════
-        //  VENDEDOR (usuario que facturó) — sección propia para
-        //  que quede bien claro quién atendió la venta.
+        //  VENDEDOR (usuario que facturó) — dato INTERNO: por
+        //  defecto NO se imprime en el ticket del cliente. Solo sale
+        //  si el admin activa "Mostrar vendedor en factura".
         // ═══════════════════════════════════════════════════════
-        _seccionTermica("VENDEDOR", fs),
-        pw.Text(tr(_resolverNombreVendedor(factura.vendedor), ancho),
-          style: pw.TextStyle(
-            fontSize: fs(9.5),
-            fontWeight: pw.FontWeight.bold,
-            color: PdfColors.black),
-          maxLines: 1, overflow: pw.TextOverflow.clip),
-
-        pw.SizedBox(height: 4),
+        if (ConfigSistema.mostrarVendedorEnFactura) ...[
+          _seccionTermica("VENDEDOR", fs),
+          pw.Text(tr(_resolverNombreVendedor(factura.vendedor), ancho),
+            style: pw.TextStyle(
+              fontSize: fs(9.5),
+              fontWeight: pw.FontWeight.bold,
+              color: PdfColors.black),
+            maxLines: 1, overflow: pw.TextOverflow.clip),
+          pw.SizedBox(height: 4),
+        ],
         separadorFino(),
         pw.SizedBox(height: 3),
 
@@ -13723,12 +13973,10 @@ Future<void> imprimirFactura(FacturaModel factura, [BuildContext? context]) asyn
             // usando la tasa que estaba activa cuando se creó el pago
             // (NO la tasa actual). Si el pago no tiene tasa guardada
             // (pagos viejos), caer a la tasa actual del sistema.
-            final metLow = p.metodo.toLowerCase();
-            final esEnBs = metLow.contains('pago móvil') ||
-                metLow.contains('pago movil') ||
-                metLow.contains('punto') ||
-                metLow.contains('efectivo bs') ||
-                metLow.contains('transferencia');
+            // Mismo criterio de moneda que el monto impreso (antes eran
+            // dos criterios distintos y un pago en Bs podía salir con "$").
+            final esEnBs = _esMetodoBsFactura(p.metodo);
+            final esIni = resumenIni?.esPagoInicial(p) ?? false;
             final tasaPago = p.tasaCambio ?? tasa;
             final equivUsd = (esEnBs && tasaPago > 0)
                 ? p.monto / tasaPago
@@ -13742,14 +13990,13 @@ Future<void> imprimirFactura(FacturaModel factura, [BuildContext? context]) asyn
                     crossAxisAlignment: pw.CrossAxisAlignment.start,
                     children: [
                       pw.Expanded(child: pw.Text(
-                        // Si el pago está marcado como inicial, se anexa
-                        // "(Inicial)" al método. Solo aviso visual, no
-                        // afecta cálculos.
-                        p.esInicial ? "${p.metodo} (Inicial)" : p.metodo,
+                        // Si el pago forma parte de la inicial (venta
+                        // financiada), se anexa "(Inicial)" al método.
+                        esIni ? "${p.metodo} (Inicial)" : p.metodo,
                         style: pw.TextStyle(fontSize: fs(8.5)),
                         maxLines: 1, overflow: pw.TextOverflow.clip)),
                       pw.SizedBox(width: 4),
-                      pw.Text(formatMontoPorMetodo(p.monto, p.metodo),
+                      pw.Text(_fmtMontoFactura(p.monto, p.metodo),
                         style: pw.TextStyle(
                           fontSize: fs(9),
                           fontWeight: pw.FontWeight.bold)),
@@ -13758,7 +14005,7 @@ Future<void> imprimirFactura(FacturaModel factura, [BuildContext? context]) asyn
                     pw.Padding(
                       padding: const pw.EdgeInsets.only(left: 4, top: 1),
                       child: pw.Text(
-                        p.esInicial
+                        esIni
                             ? "Equivale a: \$${equivUsd.toStringAsFixed(2)} (Inicial)"
                             : "Equivale a: \$${equivUsd.toStringAsFixed(2)}",
                         style: pw.TextStyle(
@@ -13792,26 +14039,32 @@ Future<void> imprimirFactura(FacturaModel factura, [BuildContext? context]) asyn
         ],
 
         // ═══════════════════════════════════════════════════════
-        //  MENSAJE DE FINANCIAMIENTO (cuotas) — térmica
-        //  Si hay pago financiado con N° de cuotas y monto, mostrar
-        //  un cuadro con el detalle: financiadora + cuotas restantes.
+        //  MENSAJE DE FINANCIAMIENTO — térmica
+        //  En ventas financiadas muestra un cuadro con la financiadora,
+        //  el concepto "Inicial" (lo que pagó el cliente), lo
+        //  financiado y las cuotas restantes (si existen esos datos).
         // ═══════════════════════════════════════════════════════
-        if (pagoFin != null)
+        if (resumenIni != null)
           pw.Container(
+            width: double.infinity,
             margin: const pw.EdgeInsets.symmetric(vertical: 4),
             padding: const pw.EdgeInsets.all(4),
             decoration: pw.BoxDecoration(
               border: pw.Border.all(color: PdfColors.black, width: 0.5)),
             child: pw.Column(crossAxisAlignment: pw.CrossAxisAlignment.start, children: [
-              pw.Text("EQUIPO FINANCIADO POR ${financiadoraTexto.toUpperCase()}",
+              pw.Text(tituloFinanciamiento,
                 style: pw.TextStyle(
                   fontSize: fs(8.5),
                   fontWeight: pw.FontWeight.bold)),
               pw.SizedBox(height: 2),
-              pw.Text(
-                "Le quedan ${pagoFin.numeroCuotas} cuotas de "
-                "\$${pagoFin.montoCuota!.toStringAsFixed(2)} cada una.",
-                style: pw.TextStyle(fontSize: fs(8))),
+              _bloqueInicialPdf(resumenIni, fontSize: fs(8.5)),
+              if (pagoFin != null) ...[
+                pw.SizedBox(height: 2),
+                pw.Text(
+                  "Le quedan ${pagoFin.numeroCuotas} cuotas de "
+                  "\$${pagoFin.montoCuota!.toStringAsFixed(2)} cada una.",
+                  style: pw.TextStyle(fontSize: fs(8))),
+              ],
             ]),
           ),
 
@@ -13906,7 +14159,11 @@ Future<void> imprimirFactura(FacturaModel factura, [BuildContext? context]) asyn
                 pw.SizedBox(height: 5),
                 pw.Row(children: [
                   pw.Expanded(child: _pdfDato("Teléfono", factura.telefono)),
-                  pw.Expanded(child: _pdfDato("Vendedor", _resolverNombreVendedor(factura.vendedor))),
+                  // Vendedor: dato interno, oculto por defecto en la
+                  // factura del cliente (ver ConfigSistema).
+                  pw.Expanded(child: ConfigSistema.mostrarVendedorEnFactura
+                      ? _pdfDato("Vendedor", _resolverNombreVendedor(factura.vendedor))
+                      : pw.SizedBox()),
                 ]),
               ]),
           ),
@@ -14013,12 +14270,9 @@ Future<void> imprimirFactura(FacturaModel factura, [BuildContext? context]) asyn
                   pw.SizedBox(height: 6),
                   ...factura.pagos.map((p) {
                     // ── Equivalente USD con tasa HISTÓRICA del pago ──
-                    final metLow = p.metodo.toLowerCase();
-                    final esEnBs = metLow.contains('pago móvil') ||
-                        metLow.contains('pago movil') ||
-                        metLow.contains('punto') ||
-                        metLow.contains('efectivo bs') ||
-                        metLow.contains('transferencia');
+                    // Mismo criterio de moneda que el monto impreso.
+                    final esEnBs = _esMetodoBsFactura(p.metodo);
+                    final esIni = resumenIni?.esPagoInicial(p) ?? false;
                     final tasaPago = p.tasaCambio ?? tasa;
                     final equivUsd = (esEnBs && tasaPago > 0)
                         ? p.monto / tasaPago
@@ -14039,12 +14293,12 @@ Future<void> imprimirFactura(FacturaModel factura, [BuildContext? context]) asyn
                                     shape: pw.BoxShape.circle)),
                                 pw.SizedBox(width: 6),
                                 pw.Text(
-                                  // Anexar "(Inicial)" si el pago está marcado
-                                  // como inicial. Solo aviso visual.
-                                  p.esInicial ? "${p.metodo} (Inicial)" : p.metodo,
+                                  // Anexar "(Inicial)" si el pago forma parte
+                                  // de la inicial de una venta financiada.
+                                  esIni ? "${p.metodo} (Inicial)" : p.metodo,
                                   style: const pw.TextStyle(fontSize: 10)),
                               ]),
-                              pw.Text(formatMontoPorMetodo(p.monto, p.metodo),
+                              pw.Text(_fmtMontoFactura(p.monto, p.metodo),
                                 style: pw.TextStyle(
                                   fontSize: 10,
                                   fontWeight: pw.FontWeight.bold)),
@@ -14053,7 +14307,7 @@ Future<void> imprimirFactura(FacturaModel factura, [BuildContext? context]) asyn
                             pw.Padding(
                               padding: const pw.EdgeInsets.only(left: 10, top: 1),
                               child: pw.Text(
-                                p.esInicial
+                                esIni
                                     ? "Equivale a: \$${equivUsd.toStringAsFixed(2)} (Inicial)"
                                     : "Equivale a: \$${equivUsd.toStringAsFixed(2)}",
                                 style: pw.TextStyle(
@@ -14086,10 +14340,12 @@ Future<void> imprimirFactura(FacturaModel factura, [BuildContext? context]) asyn
           ],
 
           // ═══════════════════════════════════════════════════════
-          //  MENSAJE DE FINANCIAMIENTO (cuotas) — A4
+          //  MENSAJE DE FINANCIAMIENTO — A4
+          //  Financiadora + concepto "Inicial" + financiado + cuotas.
           // ═══════════════════════════════════════════════════════
-          if (pagoFin != null)
+          if (resumenIni != null)
             pw.Container(
+              width: double.infinity,
               margin: const pw.EdgeInsets.only(top: 14),
               padding: const pw.EdgeInsets.all(12),
               decoration: pw.BoxDecoration(
@@ -14097,16 +14353,20 @@ Future<void> imprimirFactura(FacturaModel factura, [BuildContext? context]) asyn
                 borderRadius: const pw.BorderRadius.all(pw.Radius.circular(4))),
               child: pw.Column(crossAxisAlignment: pw.CrossAxisAlignment.start, children: [
                 pw.Text(
-                  "EQUIPO FINANCIADO POR ${financiadoraTexto.toUpperCase()}",
+                  tituloFinanciamiento,
                   style: pw.TextStyle(
                     fontSize: 11,
                     fontWeight: pw.FontWeight.bold,
                     letterSpacing: 0.8)),
                 pw.SizedBox(height: 4),
-                pw.Text(
-                  "Le quedan ${pagoFin.numeroCuotas} cuotas de "
-                  "\$${pagoFin.montoCuota!.toStringAsFixed(2)} cada una.",
-                  style: const pw.TextStyle(fontSize: 10)),
+                _bloqueInicialPdf(resumenIni, fontSize: 10),
+                if (pagoFin != null) ...[
+                  pw.SizedBox(height: 4),
+                  pw.Text(
+                    "Le quedan ${pagoFin.numeroCuotas} cuotas de "
+                    "\$${pagoFin.montoCuota!.toStringAsFixed(2)} cada una.",
+                    style: const pw.TextStyle(fontSize: 10)),
+                ],
               ]),
             ),
 
@@ -41392,6 +41652,11 @@ class ConfigSistema {
   static bool requiereAprobacionDescuento = true;
   static double maxDescuentoPorcentaje = 10.0;
   static bool mostrarCostoEnFactura = false;
+  /// Si es true, la factura/garantía impresa que se entrega al CLIENTE
+  /// muestra el nombre del vendedor que generó la venta. Por defecto
+  /// APAGADO: el vendedor es un dato interno (se sigue viendo en el
+  /// detalle de la venta, historial y reportes, pero no en el papel).
+  static bool mostrarVendedorEnFactura = false;
   static List<String> tiendas = ["Tecno Líder Principal", "Tecno Líder Sucursal"];
   /// Mapa nombre_tienda → id_backend. Se llena al sincronizar con el
   /// endpoint `tiendas` y se usa para poder ELIMINAR una tienda del
@@ -41765,6 +42030,7 @@ class ConfigSistema {
       await prefs.setBool('cfg_aprobacion_descuento',
           requiereAprobacionDescuento);
       await prefs.setBool('cfg_mostrar_costo', mostrarCostoEnFactura);
+      await prefs.setBool('cfg_mostrar_vendedor', mostrarVendedorEnFactura);
       await prefs.setDouble(
           'cfg_comision_base', comisionBaseDefault);
       await prefs.setString(
@@ -41794,6 +42060,7 @@ class ConfigSistema {
         'cfg_permitir_sin_stock':      permitirVentaSinStock ? '1' : '0',
         'cfg_aprobacion_descuento':    requiereAprobacionDescuento ? '1' : '0',
         'cfg_mostrar_costo':           mostrarCostoEnFactura ? '1' : '0',
+        'cfg_mostrar_vendedor':        mostrarVendedorEnFactura ? '1' : '0',
         'cfg_comision_base':           comisionBaseDefault.toString(),
         'cfg_listas_consulta_rapida':  listasConsultaRapida.join('|'),
       });
@@ -41833,6 +42100,8 @@ class ConfigSistema {
           requiereAprobacionDescuento = raw['cfg_aprobacion_descuento'].toString() == '1';
         if (raw.containsKey('cfg_mostrar_costo'))
           mostrarCostoEnFactura = raw['cfg_mostrar_costo'].toString() == '1';
+        if (raw.containsKey('cfg_mostrar_vendedor'))
+          mostrarVendedorEnFactura = raw['cfg_mostrar_vendedor'].toString() == '1';
         if (raw.containsKey('cfg_comision_base'))
           comisionBaseDefault = double.tryParse(raw['cfg_comision_base'].toString()) ?? comisionBaseDefault;
         if (raw.containsKey('cfg_listas_consulta_rapida')) {
@@ -41883,6 +42152,8 @@ class ConfigSistema {
               requiereAprobacionDescuento;
       mostrarCostoEnFactura =
           prefs.getBool('cfg_mostrar_costo') ?? mostrarCostoEnFactura;
+      mostrarVendedorEnFactura =
+          prefs.getBool('cfg_mostrar_vendedor') ?? mostrarVendedorEnFactura;
       comisionBaseDefault =
           prefs.getDouble('cfg_comision_base') ?? comisionBaseDefault;
       listasConsultaRapida =
@@ -43670,6 +43941,7 @@ class _VentanaConfiguracionState extends State<VentanaConfiguracion>
             ConfigSistema.requiereAprobacionDescuento = true;
             ConfigSistema.maxDescuentoPorcentaje = 10.0;
             ConfigSistema.mostrarCostoEnFactura = false;
+            ConfigSistema.mostrarVendedorEnFactura = false;
             ConfigSistema.textoFacturaPie = "Gracias por su compra. No se aceptan devoluciones sin factura.";
             ConfigSistema.diasGarantia = 30;
             ConfigSistema.tiendas = ["Tecno Líder Principal", "Tecno Líder Sucursal"];
@@ -43898,6 +44170,11 @@ class _VentanaConfiguracionState extends State<VentanaConfiguracion>
             "Muestra el precio de costo en el PDF (solo para uso interno)",
             ConfigSistema.mostrarCostoEnFactura,
             (v) { setState(() => ConfigSistema.mostrarCostoEnFactura = v); _marcarCambio(); }),
+          _switchConf(
+            "Mostrar vendedor en factura",
+            "Imprime el nombre del vendedor en la factura del cliente (por defecto oculto; siempre visible en el sistema)",
+            ConfigSistema.mostrarVendedorEnFactura,
+            (v) { setState(() => ConfigSistema.mostrarVendedorEnFactura = v); _marcarCambio(); }),
           const Divider(),
           const SizedBox(height: 8),
           _campoTexto("Texto al pie de la factura", _ctrlPiePagina, Icons.text_snippet, maxLines: 3),
