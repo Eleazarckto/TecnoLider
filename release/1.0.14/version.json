@@ -1,0 +1,14 @@
+{
+  "android": {
+    "version": "1.0.14",
+    "url": "https://sistemasceccato.com/tecnolider/updates/tecnolider-1.0.14.apk",
+    "obligatoria": false,
+    "notas": "Existencias: los productos con serial (televisores, aires, linea blanca y cualquier categoria con IMEI) ahora muestran su existencia real en todos los equipos y vuelven a salir en ventas; antes aparecian en 0 en los dispositivos donde la categoria no tenia activado el IMEI. Las categorias y su configuracion de IMEI se comparten entre todos los equipos. IMEIs eliminados: ya se pueden volver a registrar sin el aviso de que ya existen."
+  },
+  "windows": {
+    "version": "1.0.14",
+    "url": "https://sistemasceccato.com/tecnolider/updates/tecnolider-windows-1.0.14.zip",
+    "obligatoria": false,
+    "notas": "Existencias: los productos con serial (televisores, aires, linea blanca y cualquier categoria con IMEI) ahora muestran su existencia real en todos los equipos y vuelven a salir en ventas; antes aparecian en 0 en los dispositivos donde la categoria no tenia activado el IMEI. Las categorias y su configuracion de IMEI se comparten entre todos los equipos. IMEIs eliminados: ya se pueden volver a registrar sin el aviso de que ya existen."
+  }
+}
