@@ -26,6 +26,7 @@ import 'package:pdf/widgets.dart' as pw;
 import 'package:printing/printing.dart';
 import 'package:share_plus/share_plus.dart';
 import 'descarga.dart';
+import 'cuenta_financiadora.dart';
 // ── Impresión térmica directa (sin drivers) ─────────
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 import 'package:usb_serial/usb_serial.dart';
@@ -15220,6 +15221,14 @@ class _VentasPrincipalState extends State<VentasPrincipal> {
             _itemDrawer(Icons.inventory_2_outlined, "Inventario", () =>
               Navigator.push(context, MaterialPageRoute(builder: (c) => const VentanaInventario()))
               .then((_) => setState((){}))),
+      // ── Billetera de comisiones del usuario logueado ──
+      _itemDrawer(Icons.account_balance_wallet_outlined, "Mi Billetera de Comisiones", () =>
+        Navigator.push(context, MaterialPageRoute(
+            builder: (c) => const VentanaBilleteraComisiones()))),
+      // ── Historial de clientes (buscar cliente y ver sus compras) ──
+      _itemDrawer(Icons.manage_search, "Historial de Clientes", () =>
+        Navigator.push(context, MaterialPageRoute(
+            builder: (c) => const VentanaHistorialClientes()))),
       _itemDrawer(Icons.check_circle_outline, "Stock Disponible", () =>
         Navigator.push(context, MaterialPageRoute(builder: (c) => const VentanaDisponible()))),
       // ── Traslados entre tiendas ────────────────────────────────
@@ -19070,6 +19079,12 @@ class _VentanaUsuariosState extends State<VentanaUsuarios> {
                     ]),
                   ]),
                   trailing: Row(mainAxisSize: MainAxisSize.min, children: [
+                    // Billetera de comisiones de este usuario (perfil)
+                    IconButton(
+                      icon: const Icon(Icons.account_balance_wallet_outlined, color: AppColors.statusGreen, size: 20),
+                      tooltip: "Billetera de comisiones",
+                      onPressed: () => Navigator.push(context, MaterialPageRoute(
+                          builder: (_) => VentanaBilleteraComisiones(usuario: u)))),
                     IconButton(
                       icon: const Icon(Icons.edit_outlined, color: AppColors.primaryBlue, size: 20),
                       tooltip: "Editar usuario",
@@ -37033,7 +37048,8 @@ class _VentanaComisionesState extends State<VentanaComisiones> {
     }
   }
 
-  Future<List<FacturaModel>> _cargarVentasApi() async {
+  // `static` para que la Billetera de comisiones reutilice la misma carga.
+  static Future<List<FacturaModel>> _cargarVentasApi() async {
     try {
       // Asegurar que tenemos el catálogo en memoria para poder
       // resolver los códigos de items a sus Productos.
@@ -37089,7 +37105,29 @@ class _VentanaComisionesState extends State<VentanaComisiones> {
   /// El resumen guarda un snapshot de las tarifas y nombres usados
   /// para que el historial muestre datos correctos aunque luego se
   /// modifique la configuración.
-  List<ResumenComision> generarComisiones(List<FacturaModel> ventas) {
+  List<ResumenComision> generarComisiones(List<FacturaModel> ventas) =>
+      calcularComisiones(ventas, fechaInicio: fechaInicio, fechaFin: fechaFin);
+
+  /// Filtra las ventas cuya fecha cae en [inicio, fin] (fin inclusive).
+  /// Mismo criterio que usa "Generar y guardar"; la Billetera de
+  /// comisiones lo reutiliza para que ambos números coincidan.
+  static List<FacturaModel> filtrarVentasPorRango(
+      List<FacturaModel> ventas, DateTime inicio, DateTime fin) {
+    return ventas.where((v) {
+      try {
+        final fv = parseFecha(v.fecha);
+        return !fv.isBefore(inicio) &&
+               !fv.isAfter(fin.add(const Duration(days: 1)));
+      } catch (_) { return false; }
+    }).toList();
+  }
+
+  /// Cálculo de comisiones independiente de la pantalla: lo usa esta
+  /// ventana y la Billetera de comisiones del vendedor (mismas reglas,
+  /// sin duplicarlas). [fechaInicio]/[fechaFin] filtran líneas y
+  /// servicios técnicos; las [ventas] ya deben venir filtradas.
+  static List<ResumenComision> calcularComisiones(List<FacturaModel> ventas,
+      {DateTime? fechaInicio, DateTime? fechaFin}) {
     final Map<String, ResumenComision> mapa = {};
 
     // Snapshot de las categorías al momento de generar — todas las
@@ -37339,9 +37377,9 @@ class _VentanaComisionesState extends State<VentanaComisiones> {
           fln = null;
         }
         if (fln == null) continue;
-        if (fechaInicio != null && fln.isBefore(fechaInicio!)) continue;
+        if (fechaInicio != null && fln.isBefore(fechaInicio)) continue;
         if (fechaFin != null &&
-            fln.isAfter(fechaFin!.add(const Duration(days: 1)))) continue;
+            fln.isAfter(fechaFin.add(const Duration(days: 1)))) continue;
 
         final rVend = obtenerResumen(vendedor);
         for (final cat in categorias) {
@@ -37361,9 +37399,9 @@ class _VentanaComisionesState extends State<VentanaComisiones> {
         final tecnico = st.tecnico.trim();
         if (tecnico.isEmpty) continue;
         // Filtrar por rango de fechas (usa `fecha` de recepción).
-        if (fechaInicio != null && st.fecha.isBefore(fechaInicio!)) continue;
+        if (fechaInicio != null && st.fecha.isBefore(fechaInicio)) continue;
         if (fechaFin != null &&
-            st.fecha.isAfter(fechaFin!.add(const Duration(days: 1)))) {
+            st.fecha.isAfter(fechaFin.add(const Duration(days: 1)))) {
           continue;
         }
         // Solo servicios efectivamente cobrados.
@@ -37425,13 +37463,8 @@ class _VentanaComisionesState extends State<VentanaComisiones> {
       }
 
       final todasVentas = await _cargarVentasApi();
-      final ventasFiltradas = todasVentas.where((v) {
-        try {
-          final fv = parseFecha(v.fecha);
-          return !fv.isBefore(fechaInicio!) &&
-                 !fv.isAfter(fechaFin!.add(const Duration(days: 1)));
-        } catch (_) { return false; }
-      }).toList();
+      final ventasFiltradas =
+          filtrarVentasPorRango(todasVentas, fechaInicio!, fechaFin!);
 
       if (ventasFiltradas.isEmpty) {
         if (mounted) ScaffoldMessenger.of(context).showSnackBar(
@@ -37777,6 +37810,686 @@ class _VentanaComisionesState extends State<VentanaComisiones> {
 //     dentro de cada factura del reporte de ventas)
 //   - resumen: Map<String,dynamic>  (totales, contadores, etc.)
 // ──────────────────────────────────────────────────────────────
+// ════════════════════════════════════════════════════════════════════
+//  BILLETERA DE COMISIONES (perfil del usuario)
+// ════════════════════════════════════════════════════════════════════
+//  Muestra al vendedor, en tiempo real, cuánto lleva vendido en el
+//  período (mes en curso por defecto, con selector) y el acumulado de
+//  sus comisiones. NO tiene reglas propias: usa
+//  `_VentanaComisionesState.calcularComisiones` y
+//  `filtrarVentasPorRango`, las mismas que usa la ventana Comisiones al
+//  generar el pago, así ambos números siempre coinciden.
+//
+//  Se abre desde el menú ("Mi billetera de comisiones") para el usuario
+//  logueado, o desde Usuarios (botón de billetera) para ver la de otro.
+// ════════════════════════════════════════════════════════════════════
+class VentanaBilleteraComisiones extends StatefulWidget {
+  /// Usuario cuya billetera se muestra. null = el usuario logueado.
+  final Usuario? usuario;
+  const VentanaBilleteraComisiones({super.key, this.usuario});
+  @override
+  State<VentanaBilleteraComisiones> createState() =>
+      _VentanaBilleteraComisionesState();
+}
+
+class _VentanaBilleteraComisionesState
+    extends State<VentanaBilleteraComisiones> {
+  bool _cargando = true;
+  String? _error;
+  List<FacturaModel> _ventas = [];
+  late DateTime _mes; // primer día del mes seleccionado
+  DateTime? _actualizado;
+
+  Usuario? get _usuario => widget.usuario ?? usuarioSesion;
+
+  @override
+  void initState() {
+    super.initState();
+    final now = DateTime.now();
+    _mes = DateTime(now.year, now.month, 1);
+    _cargar();
+  }
+
+  /// Recarga ventas, usuarios y servicios desde el backend (refresco al
+  /// abrir y con el botón de recargar).
+  Future<void> _cargar() async {
+    setState(() { _cargando = true; _error = null; });
+    try {
+      // Usuarios frescos: el cálculo necesita `ganaComisiones` y el
+      // sueldo base actualizados.
+      try {
+        final rawU = await _Api.get('usuarios');
+        final todos = ((rawU as List?) ?? [])
+            .map((m) => Usuario.fromMap(m)).toList();
+        if (todos.isNotEmpty) {
+          usuariosSistema = UsuarioMaestro.ocultar<Usuario>(
+              todos, (u) => u.correo);
+        }
+      } catch (e) {
+        debugPrint('[Billetera] No se pudo refrescar usuarios: $e');
+      }
+      // Servicios técnicos (categoría de comisión por servicio).
+      try {
+        final rawS = await _Api.get('servicios');
+        serviciosGlobal = ((rawS as List?) ?? [])
+            .map((m) => ServicioTecnico.fromMap(m)).toList();
+      } catch (e) {
+        debugPrint('[Billetera] No se pudo refrescar servicios: $e');
+      }
+      _ventas = await _VentanaComisionesState._cargarVentasApi();
+      _actualizado = DateTime.now();
+    } catch (e) {
+      _error = e.toString();
+    } finally {
+      if (mounted) setState(() => _cargando = false);
+    }
+  }
+
+  DateTime get _finMes {
+    final ultimo = DateTime(_mes.year, _mes.month + 1, 0);
+    final hoy = DateTime.now();
+    final hoySinHora = DateTime(hoy.year, hoy.month, hoy.day);
+    return ultimo.isAfter(hoySinHora) ? hoySinHora : ultimo;
+  }
+
+  bool _esDelUsuario(String nombre) =>
+      nombre.trim().toLowerCase() ==
+      (_usuario?.nombre ?? '').trim().toLowerCase();
+
+  /// Resumen de comisión del usuario en [inicio, fin] usando las MISMAS
+  /// reglas de la ventana Comisiones. null si no generó nada.
+  ResumenComision? _resumen(DateTime inicio, DateTime fin) {
+    final ventas = _VentanaComisionesState.filtrarVentasPorRango(
+        _ventas, inicio, fin);
+    final todos = _VentanaComisionesState.calcularComisiones(ventas,
+        fechaInicio: inicio, fechaFin: fin);
+    for (final r in todos) {
+      if (_esDelUsuario(r.vendedor)) return r;
+    }
+    return null;
+  }
+
+  /// Lo vendido por el usuario en el rango: productos cuyo vendedor
+  /// asignado es él (mismo criterio de atribución que las comisiones).
+  ({int unidades, double monto, int facturas}) _vendido(
+      DateTime inicio, DateTime fin) {
+    final ventas = _VentanaComisionesState.filtrarVentasPorRango(
+        _ventas, inicio, fin);
+    int unidades = 0, facturas = 0;
+    double monto = 0;
+    for (final v in ventas) {
+      bool participa = false;
+      for (final e in v.equipos) {
+        if (_esDelUsuario(v.vendedorDeEquipo(e.imei))) {
+          unidades++; monto += e.producto.precioVenta; participa = true;
+        }
+      }
+      for (final p in v.itemsSinImei) {
+        if (_esDelUsuario(v.vendedorDeItem(p.codigo))) {
+          unidades++; monto += p.precioVenta; participa = true;
+        }
+      }
+      if (participa) facturas++;
+    }
+    return (unidades: unidades, monto: monto, facturas: facturas);
+  }
+
+  static const _meses = ['Enero', 'Febrero', 'Marzo', 'Abril', 'Mayo',
+    'Junio', 'Julio', 'Agosto', 'Septiembre', 'Octubre', 'Noviembre',
+    'Diciembre'];
+
+  @override
+  Widget build(BuildContext context) {
+    final u = _usuario;
+    final hoy = DateTime.now();
+    final esMesActual = _mes.year == hoy.year && _mes.month == hoy.month;
+    return Scaffold(
+      appBar: AppBar(
+        title: Text(widget.usuario == null
+            ? 'Mi billetera de comisiones'
+            : 'Billetera — ${u?.nombre ?? ''}'),
+        actions: [
+          IconButton(
+            tooltip: 'Recargar',
+            icon: const Icon(Icons.refresh),
+            onPressed: _cargando ? null : _cargar),
+        ],
+      ),
+      body: u == null
+          ? const Center(child: Text('No hay un usuario en sesión.'))
+          : _cargando
+              ? const Center(child: CircularProgressIndicator())
+              : _error != null
+                  ? Center(child: Padding(
+                      padding: const EdgeInsets.all(24),
+                      child: Text('Error al cargar: $_error',
+                        style: const TextStyle(color: AppColors.statusRed))))
+                  : RefreshIndicator(
+                      onRefresh: _cargar,
+                      child: _contenido(u, esMesActual)),
+    );
+  }
+
+  Widget _contenido(Usuario u, bool esMesActual) {
+    final inicio = _mes;
+    final fin = _finMes;
+    final r = _resumen(inicio, fin);
+    final vendido = _vendido(inicio, fin);
+    final inicioAnio = DateTime(_mes.year, 1, 1);
+    final rAnio = _resumen(inicioAnio, fin);
+    final tasa = ConfigSistema.tasaCambio;
+
+    return ListView(padding: const EdgeInsets.all(14), children: [
+      // ── Selector de mes ──
+      Row(children: [
+        IconButton(
+          tooltip: 'Mes anterior',
+          icon: const Icon(Icons.chevron_left),
+          onPressed: () => setState(() =>
+              _mes = DateTime(_mes.year, _mes.month - 1, 1))),
+        Expanded(child: Text(
+          '${_meses[_mes.month - 1]} ${_mes.year}'
+          '${esMesActual ? ' (en curso)' : ''}',
+          textAlign: TextAlign.center,
+          style: const TextStyle(fontWeight: FontWeight.w800, fontSize: 16))),
+        IconButton(
+          tooltip: 'Mes siguiente',
+          icon: const Icon(Icons.chevron_right),
+          onPressed: esMesActual ? null : () => setState(() =>
+              _mes = DateTime(_mes.year, _mes.month + 1, 1))),
+      ]),
+      if (!u.ganaComisiones)
+        Container(
+          margin: const EdgeInsets.only(bottom: 10),
+          padding: const EdgeInsets.all(10),
+          decoration: BoxDecoration(
+            color: AppColors.statusOrange.withValues(alpha: 0.12),
+            borderRadius: BorderRadius.circular(8)),
+          child: const Text(
+            'Este usuario está configurado para NO generar comisiones.',
+            style: TextStyle(color: AppColors.statusOrange,
+              fontWeight: FontWeight.w600)),
+        ),
+      // ── Tarjeta principal: comisión acumulada del período ──
+      Container(
+        padding: const EdgeInsets.all(18),
+        decoration: BoxDecoration(
+          gradient: const LinearGradient(
+            colors: [AppColors.brandBlue, AppColors.brandBlueDark]),
+          borderRadius: BorderRadius.circular(16),
+        ),
+        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Row(children: [
+            const Icon(Icons.account_balance_wallet, color: Colors.white),
+            const SizedBox(width: 8),
+            Expanded(child: Text(u.nombre,
+              style: const TextStyle(color: Colors.white,
+                fontWeight: FontWeight.w800, fontSize: 15))),
+          ]),
+          const SizedBox(height: 12),
+          const Text('Comisiones acumuladas del mes',
+            style: TextStyle(color: Colors.white70, fontSize: 12)),
+          Text(formatCurrency(r?.totalComision ?? 0),
+            style: const TextStyle(color: AppColors.brandYellow,
+              fontWeight: FontWeight.w900, fontSize: 30)),
+          if (tasa > 0)
+            Text('≈ ${formatCurrency((r?.totalComision ?? 0) * tasa, symbol: 'Bs ')}',
+              style: const TextStyle(color: Colors.white70, fontSize: 12)),
+          const SizedBox(height: 10),
+          Text('Base ${formatCurrency(r?.base ?? 0)}  ·  '
+               'Total estimado a cobrar ${formatCurrency(r?.totalPagar() ?? 0)}',
+            style: const TextStyle(color: Colors.white, fontSize: 12)),
+        ]),
+      ),
+      const SizedBox(height: 12),
+      // ── Vendido en el período ──
+      Row(children: [
+        Expanded(child: _kpi('Vendido (precio lista)',
+            formatCurrency(vendido.monto), Icons.shopping_bag_outlined,
+            AppColors.brandBlue)),
+        const SizedBox(width: 8),
+        Expanded(child: _kpi('Productos',
+            '${vendido.unidades}', Icons.phone_android, AppColors.statusGreen)),
+        const SizedBox(width: 8),
+        Expanded(child: _kpi('Facturas',
+            '${vendido.facturas}', Icons.receipt_long, AppColors.statusOrange)),
+      ]),
+      const SizedBox(height: 12),
+      // ── Desglose por categoría ──
+      Card(child: Padding(
+        padding: const EdgeInsets.all(12),
+        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          const Text('Desglose de comisiones del mes',
+            style: TextStyle(fontWeight: FontWeight.w800)),
+          const Divider(),
+          if (r == null || r.totalComision.abs() < 0.005)
+            const Padding(
+              padding: EdgeInsets.symmetric(vertical: 8),
+              child: Text('Aún no hay comisiones en este período.',
+                style: TextStyle(color: AppColors.textSecondary)))
+          else ...[
+            ...r.conteos.entries.where((e) => e.value > 0).map((e) {
+              final tarifa = r.tarifasUsadas[e.key] ?? 0;
+              return ListTile(
+                dense: true,
+                contentPadding: EdgeInsets.zero,
+                title: Text(r.nombresCategorias[e.key] ?? e.key),
+                subtitle: Text('${e.value} × ${formatCurrency(tarifa)}'),
+                trailing: Text(formatCurrency(e.value * tarifa),
+                  style: const TextStyle(fontWeight: FontWeight.w700)),
+              );
+            }),
+            if (r.comisionWeppa.abs() > 0.005)
+              ListTile(
+                dense: true,
+                contentPadding: EdgeInsets.zero,
+                title: const Text('Comisión Weppa (%)'),
+                trailing: Text(formatCurrency(r.comisionWeppa),
+                  style: const TextStyle(fontWeight: FontWeight.w700)),
+              ),
+            if (r.ajusteComisionUSD.abs() > 0.005)
+              ListTile(
+                dense: true,
+                contentPadding: EdgeInsets.zero,
+                title: const Text('Ajustes'),
+                trailing: Text(formatCurrency(r.ajusteComisionUSD),
+                  style: const TextStyle(fontWeight: FontWeight.w700)),
+              ),
+          ],
+        ]),
+      )),
+      const SizedBox(height: 8),
+      // ── Acumulado del año ──
+      Card(child: ListTile(
+        leading: const Icon(Icons.calendar_month, color: AppColors.brandBlue),
+        title: Text('Acumulado ${_mes.year} (hasta ${_meses[_mes.month - 1]})'),
+        subtitle: const Text('Comisiones sin incluir la base'),
+        trailing: Text(formatCurrency(rAnio?.totalComision ?? 0),
+          style: const TextStyle(fontWeight: FontWeight.w900, fontSize: 16,
+            color: AppColors.brandBlueDark)),
+      )),
+      const SizedBox(height: 8),
+      Text(
+        'Montos estimados con las reglas vigentes de Comisiones. '
+        'El pago final lo genera Administración.'
+        '${_actualizado != null ? '\nActualizado: ${_actualizado!.hour.toString().padLeft(2, '0')}:${_actualizado!.minute.toString().padLeft(2, '0')}' : ''}',
+        textAlign: TextAlign.center,
+        style: const TextStyle(color: AppColors.textSecondary, fontSize: 11)),
+    ]);
+  }
+
+  Widget _kpi(String label, String valor, IconData icon, Color color) {
+    return Container(
+      padding: const EdgeInsets.all(10),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: AppColors.surfaceGrey),
+      ),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Icon(icon, color: color, size: 20),
+        const SizedBox(height: 4),
+        FittedBox(fit: BoxFit.scaleDown, child: Text(valor,
+          style: TextStyle(fontWeight: FontWeight.w900, color: color,
+            fontSize: 16))),
+        Text(label, style: const TextStyle(
+          color: AppColors.textSecondary, fontSize: 11)),
+      ]),
+    );
+  }
+}
+
+// ════════════════════════════════════════════════════════════════════
+//  HISTORIAL DE CLIENTES
+// ════════════════════════════════════════════════════════════════════
+//  Busca un cliente por nombre, cédula o teléfono y muestra TODAS sus
+//  compras (fecha, productos, montos, método de pago, tienda y si fue
+//  financiada) y, si el rol lo permite, sus cuentas por cobrar.
+//  Los clientes se arman desde las facturas (no hay tabla propia),
+//  igual que `reconstruirClientesDesdeFacturas`.
+// ════════════════════════════════════════════════════════════════════
+class VentanaHistorialClientes extends StatefulWidget {
+  const VentanaHistorialClientes({super.key});
+  @override
+  State<VentanaHistorialClientes> createState() =>
+      _VentanaHistorialClientesState();
+}
+
+class _VentanaHistorialClientesState extends State<VentanaHistorialClientes> {
+  bool _cargando = true;
+  String? _error;
+  List<FacturaModel> _facturas = [];
+  /// JSON crudo por id/nro de factura (para leer `total` si viene).
+  final Map<String, Map<String, dynamic>> _rawPorNro = {};
+  List<CuentaPorCobrar> _cxc = [];
+  String _query = '';
+  /// Cédula normalizada (o nombre si no hay cédula) del cliente elegido.
+  String? _clienteSel;
+
+  bool get _puedeVerCxc =>
+      ['Gerente', 'Administrador', 'Dueño', 'Maestro']
+          .contains(usuarioSesion?.rol);
+
+  @override
+  void initState() { super.initState(); _cargar(); }
+
+  Future<void> _cargar() async {
+    setState(() { _cargando = true; _error = null; });
+    try {
+      // Catálogo e IMEIs para resolver los productos de cada factura.
+      if (catalogoGlobal.isEmpty || stockImeiGlobal.isEmpty) {
+        try {
+          final r = await Future.wait([
+            _Api.get('productos'), _Api.get('stock_imei')]);
+          catalogoGlobal = ((r[0] as List?) ?? [])
+              .map((m) => Producto.fromMap(m as Map<String, dynamic>)).toList();
+          stockImeiGlobal = ((r[1] as List?) ?? [])
+              .map((m) => ImeiRegistro.fromMap(m as Map<String, dynamic>)).toList();
+        } catch (_) {}
+      }
+      final raw = await _Api.get('facturas');
+      _rawPorNro.clear();
+      _facturas = ((raw as List?) ?? []).map((m) {
+        final mp = Map<String, dynamic>.from(m as Map);
+        final f = construirFacturaModelDesdeJson(mp);
+        _rawPorNro[f.nroFactura] = mp;
+        return f;
+      }).toList()
+        ..sort((a, b) => (parseFechaFlexible(b.fecha) ?? DateTime(1900))
+            .compareTo(parseFechaFlexible(a.fecha) ?? DateTime(1900)));
+      if (_puedeVerCxc) {
+        try {
+          final rc = await _Api.get('cuentas_cobrar');
+          _cxc = ((rc as List?) ?? [])
+              .map((m) => CuentaPorCobrar.fromMap(m as Map<String, dynamic>))
+              .toList();
+        } catch (e) {
+          debugPrint('[HistorialClientes] CxC: $e');
+        }
+      }
+    } catch (e) {
+      _error = e.toString();
+    } finally {
+      if (mounted) setState(() => _cargando = false);
+    }
+  }
+
+  static String _soloDigitos(String s) => s.replaceAll(RegExp(r'\D'), '');
+
+  /// Clave del cliente: cédula normalizada, o el nombre si no tiene.
+  String _claveDe(FacturaModel f) {
+    final c = _normalizarCedula(f.cedula);
+    return c.isNotEmpty ? c : 'n:${f.cliente.trim().toLowerCase()}';
+  }
+
+  /// Clientes únicos (datos de su compra más reciente) que coinciden
+  /// con la búsqueda.
+  List<({String clave, String nombre, String cedula, String telefono,
+      int compras, String ultima})> get _clientes {
+    final q = _query.trim().toLowerCase();
+    final qDig = _soloDigitos(q);
+    final mapa = <String, ({String clave, String nombre, String cedula,
+        String telefono, int compras, String ultima})>{};
+    for (final f in _facturas) {
+      final clave = _claveDe(f);
+      final previo = mapa[clave];
+      // _facturas está ordenada de más reciente a más vieja: el primero
+      // que aparece trae los datos más actuales.
+      mapa[clave] = previo == null
+          ? (clave: clave, nombre: f.cliente, cedula: f.cedula,
+              telefono: f.telefono, compras: 1, ultima: f.fecha)
+          : (clave: clave, nombre: previo.nombre, cedula: previo.cedula,
+              telefono: previo.telefono.isNotEmpty ? previo.telefono : f.telefono,
+              compras: previo.compras + 1, ultima: previo.ultima);
+    }
+    final lista = mapa.values.where((c) {
+      if (q.isEmpty) return true;
+      if (c.nombre.toLowerCase().contains(q)) return true;
+      if (c.cedula.toLowerCase().contains(q)) return true;
+      if (qDig.length >= 3 &&
+          (_soloDigitos(c.cedula).contains(qDig) ||
+           _soloDigitos(c.telefono).contains(qDig))) {
+        return true;
+      }
+      return false;
+    }).toList()
+      ..sort((a, b) => a.nombre.toLowerCase().compareTo(b.nombre.toLowerCase()));
+    return lista;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return PopScope(
+      canPop: _clienteSel == null,
+      onPopInvokedWithResult: (didPop, _) {
+        if (!didPop && _clienteSel != null) setState(() => _clienteSel = null);
+      },
+      child: Scaffold(
+        appBar: AppBar(
+          title: const Text('Historial de clientes'),
+          actions: [
+            IconButton(
+              tooltip: 'Recargar',
+              icon: const Icon(Icons.refresh),
+              onPressed: _cargando ? null : _cargar),
+          ],
+        ),
+        body: _cargando
+            ? const Center(child: CircularProgressIndicator())
+            : _error != null
+                ? Center(child: Padding(
+                    padding: const EdgeInsets.all(24),
+                    child: Text('Error al cargar: $_error',
+                      style: const TextStyle(color: AppColors.statusRed))))
+                : (_clienteSel == null ? _buscador() : _detalle(_clienteSel!)),
+      ),
+    );
+  }
+
+  Widget _buscador() {
+    final clientes = _clientes;
+    return Column(children: [
+      Padding(
+        padding: const EdgeInsets.all(12),
+        child: TextField(
+          autofocus: true,
+          decoration: const InputDecoration(
+            hintText: 'Buscar por nombre, cédula o teléfono',
+            prefixIcon: Icon(Icons.search),
+            border: OutlineInputBorder(),
+          ),
+          onChanged: (v) => setState(() => _query = v),
+        ),
+      ),
+      Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 14),
+        child: Align(alignment: Alignment.centerLeft, child: Text(
+          '${clientes.length} cliente(s)',
+          style: const TextStyle(color: AppColors.textSecondary, fontSize: 12))),
+      ),
+      Expanded(child: clientes.isEmpty
+          ? const Center(child: Text('Sin resultados',
+              style: TextStyle(color: AppColors.textSecondary)))
+          : ListView.builder(
+              itemCount: clientes.length,
+              itemBuilder: (ctx, i) {
+                final c = clientes[i];
+                return ListTile(
+                  leading: const CircleAvatar(child: Icon(Icons.person)),
+                  title: Text(c.nombre.isEmpty ? '(sin nombre)' : c.nombre,
+                    style: const TextStyle(fontWeight: FontWeight.w700)),
+                  subtitle: Text(
+                    '${c.cedula.isNotEmpty ? 'C.I. ${c.cedula}' : 'Sin cédula'}'
+                    '${c.telefono.isNotEmpty ? ' · Tel. ${c.telefono}' : ''}\n'
+                    '${c.compras} compra(s) · última: ${c.ultima}',
+                    style: const TextStyle(fontSize: 12)),
+                  isThreeLine: true,
+                  trailing: const Icon(Icons.chevron_right),
+                  onTap: () => setState(() => _clienteSel = c.clave),
+                );
+              })),
+    ]);
+  }
+
+  /// Total de la factura en USD: usa el `total` del backend si viene;
+  /// si no, suma los pagos convirtiendo Bs → USD con la tasa del pago.
+  double _totalUsd(FacturaModel f) {
+    double total = 0;
+    final tasaSis = ConfigSistema.tasaCambio > 0 ? ConfigSistema.tasaCambio : 1.0;
+    for (final p in f.pagos) {
+      if (esMetodoEnBolivares(p.metodo)) {
+        final t = (p.tasaCambio != null && p.tasaCambio! > 0)
+            ? p.tasaCambio! : tasaSis;
+        total += p.monto / t;
+      } else {
+        total += p.monto;
+      }
+    }
+    if (f.pagos.isEmpty) {
+      total = double.tryParse(
+          _rawPorNro[f.nroFactura]?['total']?.toString() ?? '') ?? 0;
+    }
+    return total;
+  }
+
+  bool _esFinanciada(FacturaModel f) => f.pagos.any((p) =>
+      p.tipo == 'Financiado' || (p.financiadora ?? '').trim().isNotEmpty);
+
+  Widget _detalle(String clave) {
+    final compras = _facturas.where((f) => _claveDe(f) == clave).toList();
+    if (compras.isEmpty) return const Center(child: Text('Sin compras'));
+    final ref = compras.first;
+    final totalGastado = compras.fold<double>(0, (s, f) => s + _totalUsd(f));
+    final financiadas = compras.where(_esFinanciada).length;
+    final ced = _normalizarCedula(ref.cedula);
+    final cuentas = ced.isEmpty ? <CuentaPorCobrar>[] : _cxc
+        .where((c) => _normalizarCedula(c.cedula) == ced).toList();
+
+    return ListView(padding: const EdgeInsets.all(12), children: [
+      Row(children: [
+        IconButton(
+          tooltip: 'Volver a la búsqueda',
+          icon: const Icon(Icons.arrow_back),
+          onPressed: () => setState(() => _clienteSel = null)),
+        Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+          Text(ref.cliente, style: const TextStyle(
+            fontWeight: FontWeight.w900, fontSize: 17)),
+          Text('${ref.cedula.isNotEmpty ? 'C.I. ${ref.cedula}' : 'Sin cédula'}'
+               '${ref.telefono.isNotEmpty ? ' · Tel. ${ref.telefono}' : ''}',
+            style: const TextStyle(color: AppColors.textSecondary)),
+        ])),
+      ]),
+      const SizedBox(height: 8),
+      Wrap(spacing: 8, runSpacing: 8, children: [
+        _chip('Compras', '${compras.length}', AppColors.brandBlue),
+        _chip('Total (USD aprox.)', formatCurrency(totalGastado),
+            AppColors.statusGreen),
+        _chip('Financiadas', '$financiadas', AppColors.statusOrange),
+      ]),
+      if (_puedeVerCxc) ...[
+        const SizedBox(height: 12),
+        const Text('Cuentas por cobrar',
+          style: TextStyle(fontWeight: FontWeight.w800)),
+        if (cuentas.isEmpty)
+          const Padding(
+            padding: EdgeInsets.symmetric(vertical: 6),
+            child: Text('Sin cuentas por cobrar.',
+              style: TextStyle(color: AppColors.textSecondary)))
+        else
+          ...cuentas.map((c) => Card(child: ListTile(
+            leading: Icon(Icons.money_off,
+              color: c.saldoRestante > 0.009
+                  ? AppColors.statusOrange : AppColors.statusGreen),
+            title: Text('Deuda ${formatCurrency(c.montoTotal)}'
+                '${c.financiadora.isNotEmpty ? ' · ${c.financiadora}' : ''}'),
+            subtitle: Text('Pagado ${formatCurrency(c.totalPagado + c.totalCuotasPagadas)}'
+                '${c.notas.isNotEmpty ? '\n${c.notas}' : ''}'),
+            trailing: Text('Saldo\n${formatCurrency(c.saldoRestante)}',
+              textAlign: TextAlign.right,
+              style: const TextStyle(fontWeight: FontWeight.w800)),
+            onTap: () => Navigator.push(context, MaterialPageRoute(
+                builder: (_) => DetalleCuentaCobrar(cuenta: c)))
+                .then((_) => _cargar()),
+          ))),
+      ],
+      const SizedBox(height: 12),
+      const Text('Historial de compras',
+        style: TextStyle(fontWeight: FontWeight.w800)),
+      ...compras.map(_tarjetaFactura),
+    ]);
+  }
+
+  Widget _chip(String label, String valor, Color color) => Container(
+    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+    decoration: BoxDecoration(
+      color: color.withValues(alpha: 0.10),
+      borderRadius: BorderRadius.circular(10)),
+    child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+      Text(valor, style: TextStyle(
+        fontWeight: FontWeight.w900, color: color, fontSize: 15)),
+      Text(label, style: const TextStyle(
+        fontSize: 11, color: AppColors.textSecondary)),
+    ]),
+  );
+
+  Widget _tarjetaFactura(FacturaModel f) {
+    final financiada = _esFinanciada(f);
+    final financiadora = f.pagos
+        .map((p) => (p.financiadora ?? '').trim())
+        .firstWhere((s) => s.isNotEmpty, orElse: () => '');
+    final productos = <String>[
+      for (final e in f.equipos)
+        '${'${e.producto.marca} ${e.producto.modelo}'.trim().isNotEmpty ? '${e.producto.marca} ${e.producto.modelo}'.trim() : e.producto.nombre}'
+        ' · IMEI ${e.imei} · ${formatCurrency(e.producto.precioVenta)}',
+      for (final p in f.itemsSinImei)
+        '${p.nombre.isNotEmpty ? p.nombre : p.codigo} · ${formatCurrency(p.precioVenta)}',
+    ];
+    return Card(
+      margin: const EdgeInsets.symmetric(vertical: 5),
+      child: ExpansionTile(
+        leading: Icon(financiada ? Icons.credit_score : Icons.receipt_long,
+          color: financiada ? AppColors.statusOrange : AppColors.brandBlue),
+        title: Text('Factura ${f.nroFactura} · ${f.fecha}',
+          style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 14)),
+        subtitle: Text(
+          '${formatCurrency(_totalUsd(f))} · '
+          '${f.tienda.isNotEmpty ? f.tienda : 'Sin tienda'} · '
+          '${financiada ? 'Financiada${financiadora.isNotEmpty ? ' ($financiadora)' : ''}' : 'Contado'}',
+          style: const TextStyle(fontSize: 12)),
+        childrenPadding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
+        expandedCrossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Text('Productos',
+            style: TextStyle(fontWeight: FontWeight.w700, fontSize: 12)),
+          if (productos.isEmpty)
+            const Text('—', style: TextStyle(fontSize: 12))
+          else
+            ...productos.map((t) => Text('• $t',
+              style: const TextStyle(fontSize: 12))),
+          const SizedBox(height: 6),
+          const Text('Pagos',
+            style: TextStyle(fontWeight: FontWeight.w700, fontSize: 12)),
+          if (f.pagos.isEmpty)
+            const Text('—', style: TextStyle(fontSize: 12))
+          else
+            ...f.pagos.map((p) => Text(
+              '• ${p.metodo} · '
+              '${esMetodoEnBolivares(p.metodo) ? formatCurrency(p.monto, symbol: 'Bs ') : formatCurrency(p.monto)}'
+              '${p.tipo.isNotEmpty ? ' · ${p.tipo}' : ''}'
+              '${(p.financiadora ?? '').isNotEmpty ? ' · ${p.financiadora}' : ''}'
+              '${p.esInicial ? ' · inicial' : ''}',
+              style: const TextStyle(fontSize: 12))),
+          const SizedBox(height: 6),
+          Text('Vendedor: ${f.vendedor.isNotEmpty ? f.vendedor : '—'}',
+            style: const TextStyle(fontSize: 12,
+              color: AppColors.textSecondary)),
+        ],
+      ),
+    );
+  }
+}
+
 class HistorialReporteEntry {
   final String nombreArchivo;       // nombre amigable del reporte
   final String tipoReporte;         // ventas, inventario, cuentas_cobrar, etc.
@@ -50563,25 +51276,35 @@ class _VentanaReporteFinanciadoraState extends State<VentanaReporteFinanciadora>
   ///                       (tabla pagos_financiadora) dentro del rango
   ///   · "pendiente"     = deuda_financ − pagos_recib
   Map<String, Map<String, dynamic>> get _porFinanciadora {
+    // ── CORRECCIÓN "no lleva bien la cuenta" ───────────────────────
+    // Antes la deuda se armaba con las ventas cuya FECHA DE VENTA caía
+    // en el rango, pero los pagos de la financiadora se restaban según
+    // la FECHA DEL PAGO. Un equipo vendido en septiembre y pagado en
+    // octubre quedaba "pendiente" en septiembre y su pago se restaba en
+    // octubre de equipos que no le correspondían (o salía como
+    // sobrepago). Además los pagos se ataban solo a la factura y la
+    // inicial/comisión se calculaba sobre el total.
+    //
+    // Ahora la cuenta se lleva POR EQUIPO (ver lib/cuenta_financiadora.dart):
+    //   · cada equipo tiene base, su parte de la inicial, comisión y deuda;
+    //   · cada pago vinculado (factura / IMEI) se aplica a SU equipo sin
+    //     importar la fecha del pago;
+    //   · solo los pagos viejos sin vínculo siguen filtrándose por fecha.
     final r = <String, Map<String, dynamic>>{};
+    final todos = <EquipoFinanciado>[];
 
     for (final f in _facturasFiltradas) {
       // Identificar la financiadora de la factura. La primera con
-      // valor no vacío gana. Una factura solo debería tener UNA
-      // financiadora — si hay varias, se atribuye a la primera.
-      //
-      // El nombre que viene del pago se NORMALIZA a una de las tres
-      // financiadoras oficiales (Cashea / Weppa / Krece). Si no
-      // coincide con ninguna, la factura se descarta del reporte
-      // (no aparecerá en ninguna columna).
+      // valor no vacío gana. El nombre se NORMALIZA a una de las tres
+      // oficiales (Cashea / Weppa / Krece); si no coincide, la factura
+      // se descarta del reporte.
       String? financiadora;
       String? nombreListaUsada;
       for (final p in f.pagos) {
         final norm = _normalizarFinanciadora(p.financiadora);
         if (norm != null) {
           financiadora = norm;
-          // Capturar también el nombre de la lista que se aplicó.
-          // Este dato es el que distingue lista normal vs promoción.
+          // Nombre de la lista aplicada (distingue normal vs promoción).
           nombreListaUsada = p.nombreLista;
           break;
         }
@@ -50590,90 +51313,59 @@ class _VentanaReporteFinanciadoraState extends State<VentanaReporteFinanciadora>
 
       final entry = r.putIfAbsent(financiadora, () => {
         'precio_lista' : 0.0,   // ∑ Base: precio según lista de la financiadora
-        'inicial'      : 0.0,   // ∑ pagos "Contado" (la inicial del cliente)
-        'comision'     : 0.0,   // 3.5% de (Base − Inicial)
-        'deuda_financ' : 0.0,   // (Base − Inicial) − 3.5%
-        'pagos_recib'  : 0.0,   // ∑ pagos_financiadora en el rango
+        'inicial'      : 0.0,   // ∑ inicial del cliente (USD)
+        'comision'     : 0.0,   // ∑ comisión de la financiadora
+        'deuda_financ' : 0.0,   // ∑ deuda por equipo (neto − comisión)
+        'pagos_recib'  : 0.0,   // ∑ pagos aplicados a estos equipos + sin vincular
+        'pagos_sin_vincular': 0.0, // pagos viejos sin factura (por fecha)
         'pendiente'    : 0.0,   // deuda_financ − pagos_recib
         'facturas'     : <String>{},
         'equipos'      : <Map<String, dynamic>>[],
+        'cuentas'      : <EquipoFinanciado>[],
       });
-
       (entry['facturas'] as Set<String>).add(f.nroFactura);
 
-      // ── 1. Calcular precio según lista de la financiadora ──────
-      // Por cada equipo o ítem de la factura, sumamos el precio de la
-      // lista de precios. Si no hay precio en la lista, usamos el de venta.
+      // ── 1. Un renglón por equipo / ítem con su precio de lista ──
+      // Si no hay precio en la lista de la financiadora, se usa el de venta.
+      final deFactura = <EquipoFinanciado>[];
       for (final eq in f.equipos) {
         final prod = eq.producto;
         final precioFin = _precioPorFinanciadora(financiadora, prod.codigo,
                               nombreListaPreferida: nombreListaUsada)
                           ?? prod.precioVenta;
-        entry['precio_lista'] = (entry['precio_lista'] as double) + precioFin;
-        (entry['equipos'] as List).add({
-          'imei'      : eq.imei,
-          'marca'     : prod.marca,
-          'modelo'    : prod.modelo,
-          'nombre'    : prod.nombre,
-          'codigo'    : prod.codigo,
-          'precio_fin': precioFin,
-          'precio_venta': prod.precioVenta,
-          'nro_factura': f.nroFactura,
-          'fecha'     : f.fecha,
-          'cliente'   : f.cliente,
-          'lista_usada': nombreListaUsada ?? '',
-        });
+        deFactura.add(EquipoFinanciado(
+          financiadora: financiadora, nroFactura: f.nroFactura,
+          base: precioFin, imei: eq.imei, codigo: prod.codigo,
+          marca: prod.marca, modelo: prod.modelo, nombre: prod.nombre,
+          cliente: f.cliente, fecha: f.fecha,
+          listaUsada: nombreListaUsada ?? '', precioVenta: prod.precioVenta));
       }
       for (final it in f.itemsSinImei) {
         final precioFin = _precioPorFinanciadora(financiadora, it.codigo,
                               nombreListaPreferida: nombreListaUsada)
                           ?? it.precioVenta;
-        entry['precio_lista'] = (entry['precio_lista'] as double) + precioFin;
-        (entry['equipos'] as List).add({
-          'imei'      : '',
-          'marca'     : it.marca,
-          'modelo'    : it.modelo,
-          'nombre'    : it.nombre,
-          'codigo'    : it.codigo,
-          'precio_fin': precioFin,
-          'precio_venta': it.precioVenta,
-          'nro_factura': f.nroFactura,
-          'fecha'     : f.fecha,
-          'cliente'   : f.cliente,
-          'lista_usada': nombreListaUsada ?? '',
-        });
+        deFactura.add(EquipoFinanciado(
+          financiadora: financiadora, nroFactura: f.nroFactura,
+          base: precioFin, codigo: it.codigo,
+          marca: it.marca, modelo: it.modelo, nombre: it.nombre,
+          cliente: f.cliente, fecha: f.fecha,
+          listaUsada: nombreListaUsada ?? '', precioVenta: it.precioVenta));
       }
 
-      // ── 2. Calcular la inicial pagada por el cliente ──────────
-      // Prioridad 1: si HAY pagos marcados explícitamente como inicial
-      //              (esInicial == true), se suman SOLO esos. El
-      //              vendedor decidió exactamente qué es la inicial.
-      // Prioridad 2: si NINGÚN pago está marcado, caemos al criterio
-      //              automático: TODOS los pagos en la factura son
-      //              inicial del cliente. ¿Por qué?
-      //              · La tabla `factura_pagos` guarda solo lo que el
-      //                CLIENTE pagó (en POS, pago móvil, efectivo, etc).
-      //                Aunque la venta sea financiada, esos pagos NO
-      //                son dinero que la financiadora te giró —son la
-      //                inicial.
-      //              · Lo que la financiadora te paga directamente vive
-      //                en la tabla aparte `pagos_financiadora`.
-      //              Antes filtrábamos por `financiadora != null` y
-      //              eso descartaba pagos en POS marcados con tipo
-      //              "Financiado", inflando artificialmente la deuda.
+      // ── 2. Inicial pagada por el cliente (en USD) ──────────────
+      // Prioridad 1: si HAY pagos marcados como inicial (esInicial),
+      //              se suman SOLO esos.
+      // Prioridad 2: si ninguno está marcado, TODOS los pagos de la
+      //              factura son inicial: `factura_pagos` guarda solo
+      //              lo que pagó el CLIENTE; lo que la financiadora le
+      //              gira a la tienda vive en `pagos_financiadora`.
       //
-      // CONVERSIÓN Bs → $: las financiadoras (Cashea, Weppa, Krece)
-      // trabajan en dólares. Cuando el cliente paga la inicial en
-      // Pago Móvil / Punto de venta / Efectivo Bs / Transferencia,
-      // el monto está en bolívares. Para que las cuentas cuadren con
-      // la financiadora, dividimos esos montos por la tasa BCV del día
-      // y los convertimos a divisas ANTES de sumarlos a la inicial.
+      // CONVERSIÓN Bs → $: las financiadoras trabajan en dólares. Los
+      // pagos en bolívares se dividen por la tasa HISTÓRICA del pago
+      // (o la tasa actual del sistema si no tiene).
       final tasaBcv = ConfigSistema.tasaCambio > 0
           ? ConfigSistema.tasaCambio
           : 1.0;
-      // Convertir a USD usando la TASA HISTÓRICA del pago si está
-      // guardada (tasa del día de la venta) y solo si no tiene tasa
-      // histórica, caer a la tasa actual del sistema.
       double convertir(PagoFactura p) {
         if (esMetodoEnBolivares(p.metodo)) {
           final tasaPago = (p.tasaCambio != null && p.tasaCambio! > 0)
@@ -50683,118 +51375,52 @@ class _VentanaReporteFinanciadoraState extends State<VentanaReporteFinanciadora>
         }
         return p.monto;
       }
-
       final hayMarcados = f.pagos.any((p) => p.esInicial);
-      if (hayMarcados) {
-        for (final p in f.pagos) {
-          if (p.esInicial) {
-            entry['inicial'] = (entry['inicial'] as double) + convertir(p);
-          }
-        }
-      } else {
-        // Criterio automático: TODOS los pagos de factura_pagos cuentan
-        // como inicial del cliente, sin importar el tipo o financiadora.
-        // Los pagos de la financiadora hacia la tienda viven en una
-        // tabla separada (pagos_financiadora) y se restan después.
-        for (final p in f.pagos) {
-          entry['inicial'] = (entry['inicial'] as double) + convertir(p);
-        }
-      }
-    }
-
-    // ── 3. Calcular deuda real de la financiadora ──────────────
-    //
-    // Cada financiadora cobra una comisión distinta — antes aplicábamos
-    // 3.5% a TODAS, lo que distorsionaba los reportes de Krece y
-    // Cashea. Las fórmulas correctas según información del dueño:
-    //
-    //   · KRECE:  0% — no cobra comisión a la tienda.
-    //             Comisión = 0
-    //             Deuda    = (Base − Inicial)
-    //
-    //   · WEPPA:  3.5% del monto FINANCIADO (Base − Inicial).
-    //             Comisión = (Base − Inicial) × 3.5%
-    //             Deuda    = (Base − Inicial) − Comisión
-    //
-    //   · CASHEA: aplica DOS comisiones acumulativas:
-    //             COMISIÓN 1 — sobre la BASE:
-    //               Comisión 1 base = Base × 4%
-    //               IVA              = Comisión 1 base × 16%
-    //               Comisión 1 total = Comisión 1 base + IVA = Base × 4.64%
-    //             COMISIÓN 2 — sobre el MONTO FINANCIADO:
-    //               Comisión 2 = (Base − Inicial) × 4%
-    //             COMISIÓN TOTAL = Comisión 1 + Comisión 2
-    //             Ejemplo: Base $800, Inicial $200
-    //               Comisión 1 = $37.12, Comisión 2 = $24.00, Total = $61.12
-    //             Deuda = (Base − Inicial) − Comisión total
-    //
-    // Si llega cualquier otra financiadora desconocida, mantenemos
-    // el 3.5% sobre el neto como criterio conservador (era el viejo
-    // comportamiento por defecto).
-    for (final entry in r.entries) {
-      final financiadora = entry.key.toLowerCase();
-      final datos = entry.value;
-      final base    = datos['precio_lista'] as double;
-      final inicial = datos['inicial']      as double;
-      final neto    = (base - inicial).clamp(0.0, double.infinity);
-
-      double comision;
-      double porcentajeAplicado;
-      String formula;
-      if (financiadora.contains('krece')) {
-        comision = 0.0;
-        porcentajeAplicado = 0.0;
-        formula = 'Sin comisión';
-      } else if (financiadora.contains('weppa')) {
-        comision = neto * 0.035;
-        porcentajeAplicado = 3.5;
-        formula = '3.5% del monto financiado';
-      } else if (financiadora.contains('cashea')) {
-        // Fórmula oficial de Cashea (confirmada por el dueño).
-        // Cashea aplica DOS comisiones acumulativas:
-        //
-        //   COMISIÓN 1 — sobre la BASE (precio del equipo):
-        //     1) Comisión 1 base = Base × 4%
-        //     2) IVA sobre comisión = Comisión 1 base × 16%
-        //     3) Comisión 1 total = Comisión 1 base + IVA
-        //                        = Base × 4% × 1.16 = Base × 4.64%
-        //
-        //   COMISIÓN 2 — sobre el MONTO FINANCIADO (Base − Inicial):
-        //     · Comisión 2 = (Base − Inicial) × 4%
-        //
-        //   COMISIÓN TOTAL = Comisión 1 + Comisión 2
-        //
-        // Ejemplo: Base $800, Inicial $200
-        //   Comisión 1 = 800 × 4% × 1.16 = $37.12
-        //   Comisión 2 = (800 − 200) × 4% = $24.00
-        //   Comisión total = $61.12
-        //   Deuda = (800 − 200) − 61.12 = $538.88
-        final comision1Base = base * 0.04;
-        final iva1          = comision1Base * 0.16;
-        final comision1     = comision1Base + iva1;
-        final comision2     = neto * 0.04;
-        comision = comision1 + comision2;
-        porcentajeAplicado = base > 0 ? (comision / base) * 100 : 0;
-        formula = '4% base + IVA + 4% del financiado';
-      } else {
-        // Financiadora desconocida — comportamiento conservador
-        comision = neto * 0.035;
-        porcentajeAplicado = 3.5;
-        formula = '3.5% (default)';
+      double inicialFactura = 0;
+      for (final p in f.pagos) {
+        if (!hayMarcados || p.esInicial) inicialFactura += convertir(p);
       }
 
-      datos['comision']           = comision;
-      datos['comision_pct']       = porcentajeAplicado;
-      datos['comision_formula']   = formula;
-      datos['deuda_financ']       = (neto - comision)
-          .clamp(0.0, double.infinity);
+      // ── 3. Deuda POR EQUIPO ─────────────────────────────────────
+      // La inicial se reparte entre los equipos de la factura según su
+      // base y la comisión de cada financiadora se calcula por equipo:
+      //   · KRECE:  sin comisión.
+      //   · WEPPA:  3.5% del monto financiado (Base − Inicial).
+      //   · CASHEA: Base × 4% + IVA 16% + 4% del financiado.
+      // (fórmulas en `calcularComisionFinanciadora`).
+      calcularDeudaFactura(deFactura, redondearCentavos(inicialFactura));
+      (entry['cuentas'] as List<EquipoFinanciado>).addAll(deFactura);
+      todos.addAll(deFactura);
     }
 
-    // ── 4. Restar pagos de la financiadora ya recibidos ───────
+    // ── 4. Aplicar los pagos de la financiadora ─────────────────
+    // Los pagos vinculados a una factura/equipo del reporte se aplican
+    // a ESE equipo, aunque se hayan hecho fuera del rango de fechas.
+    // Los vinculados a facturas fuera del rango pertenecen a otro
+    // período y se ignoran. Los viejos sin vínculo se cuentan por fecha
+    // (comportamiento anterior) como "sin vincular".
+    final pagos = <PagoFinanciadora>[];
     for (final pago in _pagosFinanc) {
       final financiadora = _normalizarFinanciadora(pago['financiadora']?.toString());
       if (financiadora == null) continue;
-      final fechaPg = parseFechaFlexible(pago['fecha']?.toString());
+      final marca = leerMarcaEquipoPago((pago['notas'] ?? '').toString());
+      final nro = (marca?.nroFactura.isNotEmpty == true)
+          ? marca!.nroFactura
+          : (pago['nro_factura'] ?? '').toString().trim().isNotEmpty
+              ? pago['nro_factura'].toString().trim()
+              : _nroFacturaPorId(pago['factura_id']);
+      pagos.add(PagoFinanciadora(
+        financiadora: financiadora,
+        monto: double.tryParse(pago['monto']?.toString() ?? '0') ?? 0,
+        fecha: parseFechaFlexible(pago['fecha']?.toString()),
+        nroFactura: nro,
+        imei: marca?.imei ?? (pago['imei'] ?? '').toString().trim(),
+      ));
+    }
+    final sinAplicar = aplicarPagosAEquipos(todos, pagos);
+    for (final p in sinAplicar) {
+      if (p.vinculado) continue; // factura de otro período
+      final fechaPg = p.fecha;
       if (fechaPg == null) continue;
       if (_desde != null && fechaPg.isBefore(
           DateTime(_desde!.year, _desde!.month, _desde!.day))) continue;
@@ -50802,21 +51428,50 @@ class _VentanaReporteFinanciadoraState extends State<VentanaReporteFinanciadora>
         final fin = DateTime(_hasta!.year, _hasta!.month, _hasta!.day, 23, 59, 59);
         if (fechaPg.isAfter(fin)) continue;
       }
-      final entry = r[financiadora];
+      final entry = r[p.financiadora];
       if (entry == null) continue;
-      final monto = double.tryParse(pago['monto']?.toString() ?? '0') ?? 0;
-      entry['pagos_recib'] = (entry['pagos_recib'] as double) + monto;
+      entry['pagos_sin_vincular'] =
+          (entry['pagos_sin_vincular'] as double) + p.monto;
     }
 
-    // ── 5. Calcular pendiente final ──────────────────────────
-    // Pendiente = Deuda − Pagos recibidos.
-    // IMPORTANTE: NO se aplica clamp a 0. Si la financiadora pagó MÁS
-    // de lo que debía (sobrepago), el pendiente debe quedar NEGATIVO
-    // para que el reporte refleje la realidad. Si se forzara a 0 se
-    // ocultaría el sobrepago y daría una falsa sensación de "todo OK".
-    for (final entry in r.values) {
-      entry['pendiente'] = (entry['deuda_financ'] as double)
-                          - (entry['pagos_recib'] as double);
+    // ── 5. Totales y pendiente final ────────────────────────────
+    // Pendiente = Deuda − Pagos recibidos. SIN clamp a 0: si la
+    // financiadora pagó de más, el pendiente queda NEGATIVO (sobrepago).
+    for (final entry in r.entries) {
+      final datos = entry.value;
+      final cuentas = datos['cuentas'] as List<EquipoFinanciado>;
+      double base = 0, ini = 0, com = 0, deuda = 0, abon = 0;
+      for (final e in cuentas) {
+        base += e.base; ini += e.inicial; com += e.comision;
+        deuda += e.deuda; abon += e.abonado;
+        (datos['equipos'] as List).add({
+          'imei'      : e.imei,
+          'marca'     : e.marca,
+          'modelo'    : e.modelo,
+          'nombre'    : e.nombre,
+          'codigo'    : e.codigo,
+          'precio_fin': e.base,
+          'precio_venta': e.precioVenta,
+          'nro_factura': e.nroFactura,
+          'fecha'     : e.fecha,
+          'cliente'   : e.cliente,
+          'lista_usada': e.listaUsada,
+          'inicial'   : e.inicial,
+          'deuda'     : e.deuda,
+          'abonado'   : e.abonado,
+          'saldo'     : e.saldo,
+        });
+      }
+      final recib = abon + (datos['pagos_sin_vincular'] as double);
+      final comision = calcularComisionFinanciadora(entry.key, base, ini);
+      datos['precio_lista']     = redondearCentavos(base);
+      datos['inicial']          = redondearCentavos(ini);
+      datos['comision']         = redondearCentavos(com);
+      datos['comision_pct']     = base > 0 ? com / base * 100 : comision.porcentaje;
+      datos['comision_formula'] = comision.formula;
+      datos['deuda_financ']     = redondearCentavos(deuda);
+      datos['pagos_recib']      = redondearCentavos(recib);
+      datos['pendiente']        = redondearCentavos(deuda - recib);
     }
 
     // Filtrar si hay financiadora específica seleccionada
@@ -50826,41 +51481,50 @@ class _VentanaReporteFinanciadoraState extends State<VentanaReporteFinanciadora>
     return r;
   }
 
+  /// Número de factura a partir del `factura_id` de un pago (si el
+  /// backend lo devuelve). Vacío si no se encuentra.
+  String _nroFacturaPorId(dynamic id) {
+    final n = int.tryParse(id?.toString() ?? '');
+    if (n == null) return '';
+    for (final f in ventasGlobal) {
+      if (f.id == n) return f.nroFactura;
+    }
+    return '';
+  }
+
   // ─────────────────────────────────────────────────────────────
   //  ACCIONES
   // ─────────────────────────────────────────────────────────────
 
-  /// Diálogo para registrar un pago de la financiadora.
+  /// Diálogo para registrar un pago (abono) de la financiadora a UN
+  /// equipo financiado.
+  ///
+  /// Antes se elegía solo la factura y la lista mostraba la cantidad /
+  /// nombres de los teléfonos; el abono quedaba atado a la factura y no
+  /// se sabía a qué equipo correspondía. Ahora se elige el EQUIPO y se
+  /// muestra su detalle (marca/modelo, IMEI, cliente, fecha de venta,
+  /// monto, abonado y saldo). El vínculo se guarda en `nro_factura`,
+  /// `factura_id`, `imei` y además en `notas` con la marca
+  /// `[[fin_eq:NRO|IMEI]]` por si el backend no persiste esos campos.
   Future<void> _registrarPago(String financiadora) async {
-    // ── Buscar facturas de esta financiadora con deuda pendiente ──
-    // Solo permitimos registrar pagos contra facturas que existen y
-    // tienen saldo por cobrar. Esto evita pagos huérfanos que inflan
-    // los reportes (ej: $774.70 sin factura asociada).
-    final facturasDeFin = <Map<String, dynamic>>[];
     final datosFin = _porFinanciadora[financiadora];
-    if (datosFin != null) {
-      final equipos = (datosFin['equipos'] as List).cast<Map<String, dynamic>>();
-      // Agrupar por nro_factura
-      final porFactura = <String, Map<String, dynamic>>{};
-      for (final eq in equipos) {
-        final nro = eq['nro_factura']?.toString() ?? '';
-        if (nro.isEmpty) continue;
-        porFactura.putIfAbsent(nro, () => {
-          'nro_factura': nro,
-          'fecha': eq['fecha'],
-          'cliente': eq['cliente'],
-          'equipos': <String>[],
-        });
-        (porFactura[nro]!['equipos'] as List).add(
-            '${eq['marca']} ${eq['modelo']}');
-      }
-      facturasDeFin.addAll(porFactura.values);
-    }
+    final cuentas = datosFin == null
+        ? <EquipoFinanciado>[]
+        : List<EquipoFinanciado>.from(
+            datosFin['cuentas'] as List<EquipoFinanciado>);
+    // Solo equipos con saldo pendiente; los más viejos primero.
+    final conSaldo = cuentas.where((e) => e.saldo > 0.009).toList()
+      ..sort((a, b) {
+        final fa = parseFechaFlexible(a.fecha);
+        final fb = parseFechaFlexible(b.fecha);
+        if (fa == null || fb == null) return 0;
+        return fa.compareTo(fb);
+      });
 
-    if (facturasDeFin.isEmpty) {
+    if (conSaldo.isEmpty) {
       if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-        content: Text('No hay facturas de $financiadora pendientes en este rango. '
-                      'Ajusta el rango de fechas para ver las facturas.'),
+        content: Text('No hay equipos de $financiadora con saldo pendiente '
+                      'en este rango. Ajusta el rango de fechas.'),
         backgroundColor: AppColors.statusOrange));
       return;
     }
@@ -50869,49 +51533,160 @@ class _VentanaReporteFinanciadoraState extends State<VentanaReporteFinanciadora>
     final refCtrl   = TextEditingController();
     final notasCtrl = TextEditingController();
     DateTime fecha  = DateTime.now();
-    String? facturaSeleccionada;
+    EquipoFinanciado? sel = conSaldo.length == 1 ? conSaldo.first : null;
+    String filtro = '';
+
+    Widget fila(String label, String valor, {Color? color, bool bold = false}) =>
+        Padding(
+          padding: const EdgeInsets.symmetric(vertical: 1.5),
+          child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            SizedBox(width: 110, child: Text(label,
+              style: const TextStyle(
+                color: AppColors.textSecondary, fontSize: 12))),
+            Expanded(child: Text(valor,
+              style: TextStyle(
+                fontSize: 13,
+                color: color ?? AppColors.textPrimary,
+                fontWeight: bold ? FontWeight.w800 : FontWeight.w600))),
+          ]),
+        );
 
     final ok = await showDialog<bool>(
       context: context,
       builder: (ctx) {
         return StatefulBuilder(builder: (ctx, setS) {
+          final q = filtro.toLowerCase().trim();
+          final visibles = q.isEmpty ? conSaldo : conSaldo.where((e) =>
+              e.descripcion.toLowerCase().contains(q) ||
+              e.imei.toLowerCase().contains(q) ||
+              e.codigo.toLowerCase().contains(q) ||
+              e.cliente.toLowerCase().contains(q) ||
+              e.nroFactura.toLowerCase().contains(q)).toList();
+          final monto = double.tryParse(montoCtrl.text.trim().replaceAll(',', '.')) ?? 0;
+          final saldoTras = sel == null ? 0.0 : redondearCentavos(sel!.saldo - monto);
           return AlertDialog(
             title: Text('Pago recibido — $financiadora',
               style: const TextStyle(fontWeight: FontWeight.w800)),
-            content: SingleChildScrollView(
-              child: Column(mainAxisSize: MainAxisSize.min, children: [
-                // ── Selector OBLIGATORIO de factura ──
-                DropdownButtonFormField<String>(
-                  value: facturaSeleccionada,
-                  isExpanded: true,
-                  decoration: const InputDecoration(
-                    labelText: 'Factura a la que aplica este pago *',
-                    prefixIcon: Icon(Icons.receipt_long),
-                    border: OutlineInputBorder(),
+            content: SizedBox(
+              width: 520,
+              child: SingleChildScrollView(
+              child: Column(mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+                if (sel == null) ...[
+                  const Text('Equipo al que aplica este pago *',
+                    style: TextStyle(fontWeight: FontWeight.w700)),
+                  const SizedBox(height: 6),
+                  TextField(
+                    decoration: const InputDecoration(
+                      isDense: true,
+                      hintText: 'Buscar por modelo, IMEI, cliente o factura',
+                      prefixIcon: Icon(Icons.search),
+                      border: OutlineInputBorder(),
+                    ),
+                    onChanged: (v) => setS(() => filtro = v),
                   ),
-                  items: facturasDeFin.map((f) {
-                    final nro = f['nro_factura']?.toString() ?? '';
-                    final cli = f['cliente']?.toString() ?? '';
-                    final equipos = (f['equipos'] as List).join(', ');
-                    final label = '$nro — $cli ($equipos)';
-                    return DropdownMenuItem(
-                      value: nro,
-                      child: Text(label,
-                        overflow: TextOverflow.ellipsis,
-                        style: const TextStyle(fontSize: 13)),
-                    );
-                  }).toList(),
-                  onChanged: (v) => setS(() => facturaSeleccionada = v),
-                ),
+                  const SizedBox(height: 6),
+                  ConstrainedBox(
+                    constraints: const BoxConstraints(maxHeight: 300),
+                    child: visibles.isEmpty
+                        ? const Padding(
+                            padding: EdgeInsets.all(16),
+                            child: Text('Sin coincidencias',
+                              textAlign: TextAlign.center,
+                              style: TextStyle(color: AppColors.textSecondary)))
+                        : ListView(shrinkWrap: true, children: visibles.map((e) =>
+                            ListTile(
+                              dense: true,
+                              leading: const Icon(Icons.phone_android,
+                                color: AppColors.brandBlue),
+                              title: Text(e.descripcion,
+                                style: const TextStyle(fontWeight: FontWeight.w700)),
+                              subtitle: Text(
+                                '${e.imei.isNotEmpty ? 'IMEI ${e.imei}' : 'Cód. ${e.codigo}'}\n'
+                                '${e.cliente} · Fact. ${e.nroFactura} · ${e.fecha}',
+                                style: const TextStyle(fontSize: 11)),
+                              isThreeLine: true,
+                              trailing: Column(
+                                mainAxisAlignment: MainAxisAlignment.center,
+                                crossAxisAlignment: CrossAxisAlignment.end,
+                                children: [
+                                  const Text('Saldo',
+                                    style: TextStyle(fontSize: 10,
+                                      color: AppColors.textSecondary)),
+                                  Text(formatCurrency(e.saldo),
+                                    style: const TextStyle(
+                                      fontWeight: FontWeight.w800,
+                                      color: AppColors.statusOrange)),
+                                ]),
+                              onTap: () => setS(() => sel = e),
+                            )).toList()),
+                  ),
+                ] else ...[
+                  // ── Detalle del equipo elegido ──
+                  Container(
+                    padding: const EdgeInsets.all(12),
+                    decoration: BoxDecoration(
+                      color: AppColors.surfaceTintBlue,
+                      borderRadius: BorderRadius.circular(10),
+                      border: Border.all(
+                        color: AppColors.brandBlue.withValues(alpha: 0.30)),
+                    ),
+                    child: Column(crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                      Row(children: [
+                        const Icon(Icons.phone_android, color: AppColors.brandBlue),
+                        const SizedBox(width: 8),
+                        Expanded(child: Text(sel!.descripcion,
+                          style: const TextStyle(
+                            fontWeight: FontWeight.w800, fontSize: 15))),
+                        if (conSaldo.length > 1)
+                          TextButton(
+                            onPressed: () => setS(() => sel = null),
+                            child: const Text('Cambiar')),
+                      ]),
+                      const Divider(height: 12),
+                      fila('IMEI', sel!.imei.isNotEmpty ? sel!.imei : '— (cód. ${sel!.codigo})'),
+                      fila('Cliente', sel!.cliente),
+                      fila('Factura', sel!.nroFactura),
+                      fila('Fecha de venta', sel!.fecha),
+                      fila('Base lista', formatCurrency(sel!.base)),
+                      fila('Inicial cliente', formatCurrency(sel!.inicial)),
+                      fila('Comisión', formatCurrency(sel!.comision)),
+                      const Divider(height: 12),
+                      fila('Monto adeudado', formatCurrency(sel!.deuda), bold: true),
+                      fila('Abonado', formatCurrency(sel!.abonado),
+                        color: AppColors.statusGreen, bold: true),
+                      fila('Saldo', formatCurrency(sel!.saldo),
+                        color: AppColors.statusOrange, bold: true),
+                    ]),
+                  ),
+                ],
                 const SizedBox(height: 12),
                 TextField(
                   controller: montoCtrl,
-                  decoration: const InputDecoration(
+                  decoration: InputDecoration(
                     labelText: 'Monto del pago (USD) *',
-                    prefixIcon: Icon(Icons.attach_money),
-                    border: OutlineInputBorder(),
+                    prefixIcon: const Icon(Icons.attach_money),
+                    border: const OutlineInputBorder(),
+                    suffixIcon: sel == null ? null : TextButton(
+                      onPressed: () => setS(() =>
+                          montoCtrl.text = sel!.saldo.toStringAsFixed(2)),
+                      child: const Text('Saldo completo')),
                   ),
                   keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                  onChanged: (_) => setS(() {}),
+                ),
+                if (sel != null && monto > 0) Padding(
+                  padding: const EdgeInsets.only(top: 6),
+                  child: Text(
+                    saldoTras < -0.009
+                        ? 'Ojo: el pago supera el saldo del equipo por '
+                          '${formatCurrency(saldoTras.abs())} (quedará como sobrepago).'
+                        : 'Saldo del equipo después del pago: ${formatCurrency(saldoTras)}',
+                    style: TextStyle(fontSize: 12,
+                      color: saldoTras < -0.009
+                          ? AppColors.statusRed : AppColors.textSecondary,
+                      fontWeight: FontWeight.w600)),
                 ),
                 const SizedBox(height: 12),
                 InkWell(
@@ -50957,14 +51732,14 @@ class _VentanaReporteFinanciadoraState extends State<VentanaReporteFinanciadora>
                   maxLines: 2,
                 ),
               ]),
-            ),
+            )),
             actions: [
               TextButton(
                 onPressed: () => Navigator.pop(ctx, false),
                 child: const Text('Cancelar')),
               ElevatedButton.icon(
-                onPressed: facturaSeleccionada == null
-                    ? null  // Botón deshabilitado si no hay factura elegida
+                onPressed: sel == null || monto <= 0
+                    ? null  // Deshabilitado sin equipo elegido o sin monto
                     : () => Navigator.pop(ctx, true),
                 icon: const Icon(Icons.check),
                 label: const Text('Registrar pago'),
@@ -50979,13 +51754,15 @@ class _VentanaReporteFinanciadoraState extends State<VentanaReporteFinanciadora>
     );
 
     if (ok != true) return;
-    if (facturaSeleccionada == null) {
+    final equipo = sel;
+    if (equipo == null) {
       if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-        content: Text('Debes seleccionar una factura'),
+        content: Text('Debes seleccionar un equipo'),
         backgroundColor: AppColors.statusRed));
       return;
     }
-    final monto = double.tryParse(montoCtrl.text.trim()) ?? 0;
+    final monto = redondearCentavos(
+        double.tryParse(montoCtrl.text.trim().replaceAll(',', '.')) ?? 0);
     if (monto <= 0) {
       if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
         content: Text('Monto inválido'),
@@ -50995,11 +51772,12 @@ class _VentanaReporteFinanciadoraState extends State<VentanaReporteFinanciadora>
     // Resolver el id de la factura para guardarlo en factura_id
     int? facturaId;
     for (final f in ventasGlobal) {
-      if (f.nroFactura == facturaSeleccionada) {
+      if (f.nroFactura == equipo.nroFactura) {
         facturaId = f.id;
         break;
       }
     }
+    final idEquipo = equipo.imei.isNotEmpty ? equipo.imei : equipo.codigo;
     try {
       await _Api.post('pagos_financiadora', {
         'financiadora': financiadora,
@@ -51008,16 +51786,18 @@ class _VentanaReporteFinanciadoraState extends State<VentanaReporteFinanciadora>
                         "${fecha.month.toString().padLeft(2,'0')}/"
                         "${fecha.year}",
         'referencia'  : refCtrl.text.trim(),
-        'notas'       : notasCtrl.text.trim(),
-        // ── Atar el pago a la factura ──
-        // Imprescindible para que los reportes calculen bien y no
-        // queden pagos huérfanos que inflan los totales.
+        // La marca [[fin_eq:NRO|IMEI]] ata el pago al equipo aunque el
+        // backend no guarde nro_factura / imei.
+        'notas'       : escribirMarcaEquipoPago(
+                            notasCtrl.text.trim(), equipo.nroFactura, idEquipo),
+        // ── Atar el pago a la factura y al equipo ──
         if (facturaId != null) 'factura_id': facturaId,
-        'nro_factura': facturaSeleccionada,
+        'nro_factura': equipo.nroFactura,
+        'imei'       : idEquipo,
       });
       if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(
         content: Text('Pago registrado: $financiadora — ${formatCurrency(monto)} '
-                      '(Factura $facturaSeleccionada)'),
+                      '(${equipo.descripcion} · Fact. ${equipo.nroFactura})'),
         backgroundColor: AppColors.statusGreen));
       await _cargar();
     } catch (e) {
@@ -51118,13 +51898,30 @@ class _VentanaReporteFinanciadoraState extends State<VentanaReporteFinanciadora>
                         ? 'IMEI: ${u['imei']}'
                         : 'Cód: ${u['codigo']}',
                       style: const TextStyle(fontSize: 13)),
+                    // Cuenta del equipo: lo que debe la financiadora por
+                    // él, lo abonado y el saldo (antes solo el precio).
                     subtitle: Text(
-                      'Factura ${u['nro_factura']} · ${u['cliente']} · ${u['fecha']}',
+                      'Factura ${u['nro_factura']} · ${u['cliente']} · ${u['fecha']}\n'
+                      'Debe ${formatCurrency(((u['deuda'] as num?) ?? 0).toDouble())}'
+                      ' · Abonado ${formatCurrency(((u['abonado'] as num?) ?? 0).toDouble())}',
                       style: const TextStyle(fontSize: 11)),
-                    trailing: Text(formatCurrency(u['precio_fin'] as double),
-                      style: const TextStyle(
-                        fontWeight: FontWeight.w700,
-                        color: AppColors.brandBlue)),
+                    isThreeLine: true,
+                    trailing: Column(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      crossAxisAlignment: CrossAxisAlignment.end,
+                      children: [
+                        Text(formatCurrency(u['precio_fin'] as double),
+                          style: const TextStyle(
+                            fontWeight: FontWeight.w700,
+                            color: AppColors.brandBlue)),
+                        Text('Saldo ${formatCurrency(((u['saldo'] as num?) ?? 0).toDouble())}',
+                          style: TextStyle(
+                            fontSize: 11,
+                            fontWeight: FontWeight.w700,
+                            color: (((u['saldo'] as num?) ?? 0) > 0.009)
+                                ? AppColors.statusOrange
+                                : AppColors.statusGreen)),
+                      ]),
                   )).toList(),
                 ),
               );
@@ -51228,6 +52025,7 @@ class _VentanaReporteFinanciadoraState extends State<VentanaReporteFinanciadora>
         'Factura', 'Fecha', 'Cliente',
         'Marca', 'Modelo', 'IMEI / Código',
         'Precio Financiadora', 'Precio Venta',
+        'Deuda financiadora', 'Abonado', 'Saldo',
       ]));
       double totalFinanc = 0;
       double totalVenta = 0;
@@ -51245,6 +52043,9 @@ class _VentanaReporteFinanciadoraState extends State<VentanaReporteFinanciadora>
           e['imei']?.toString().isNotEmpty == true ? e['imei'] : e['codigo'],
           pf,
           pv,
+          ((e['deuda'] as num?) ?? 0).toDouble(),
+          ((e['abonado'] as num?) ?? 0).toDouble(),
+          ((e['saldo'] as num?) ?? 0).toDouble(),
         ]));
       }
       // Fila de totales
@@ -51594,7 +52395,8 @@ class _VentanaReporteFinanciadoraState extends State<VentanaReporteFinanciadora>
                       fontSize: 16,
                       fontWeight: FontWeight.w800,
                       color: AppColors.textPrimary)),
-                  Text('$facturas factura(s) · ${equipos.length} equipo(s)',
+                  Text('$facturas factura(s) · ${equipos.length} equipo(s)'
+                      ' · ${equipos.where((e) => (((e['saldo'] as num?) ?? 0) > 0.009)).length} con saldo',
                     style: const TextStyle(
                       color: AppColors.textSecondary, fontSize: 12)),
                 ])),
@@ -51623,6 +52425,12 @@ class _VentanaReporteFinanciadoraState extends State<VentanaReporteFinanciadora>
                     color: AppColors.brandBlueDark, bold: true),
                 _lineaCalculo('− Pagos recibidos', pagosRecib,
                     color: AppColors.statusGreen, prefix: '-'),
+                // Pagos viejos registrados sin factura: se cuentan por
+                // fecha y no se pueden asignar a un equipo.
+                if (((data['pagos_sin_vincular'] as num?) ?? 0) > 0.009)
+                  _lineaCalculo('   (incluye sin vincular a equipo)',
+                      ((data['pagos_sin_vincular'] as num?) ?? 0).toDouble(),
+                      color: AppColors.textSecondary),
                 const Divider(height: 14),
                 _lineaCalculo(etiquetaPendiente, pendiente,
                     color: colorPendiente,
