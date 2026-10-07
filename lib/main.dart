@@ -7204,6 +7204,346 @@ Producto? buscarProductoPorCodigo(String codigo) {
 }
 
 // ════════════════════════════════════════════════════════════
+//  STOCK POR TIENDA — helpers reutilizables
+// ════════════════════════════════════════════════════════════
+//  La tabla `productos` tiene UNIQUE (codigo, tienda): el mismo
+//  código puede tener una fila de stock por tienda ('' = sin
+//  asignar / inventario general). Además:
+//   · Productos CON IMEI → el stock son los IMEIs no vendidos y la
+//     tienda la manda `stock_imei.ubicacion` (no `productos.tienda`).
+//   · Productos SIN IMEI → el stock es `stock_manual` de cada fila.
+//   · Subproductos (variantes) → su stock suma al del padre.
+//
+//  Antes cada pantalla hacía su propia cuenta y casi todas sumaban
+//  mal las filas repetidas (un forro con 3 filas salía 3 veces, o un
+//  teléfono con filas en 2 tiendas contaba sus IMEIs dos veces).
+//  Estos helpers son el único lugar donde se resuelve "cuántos hay y
+//  dónde".
+// ════════════════════════════════════════════════════════════
+
+/// Etiqueta para el stock que no tiene tienda asignada.
+const String kTiendaSinAsignar = 'Sin asignar';
+
+/// Nombre legible de una tienda ('' → "Sin asignar").
+String nombreTiendaStock(String tienda) =>
+    tienda.trim().isEmpty ? kTiendaSinAsignar : tienda.trim();
+
+/// Índice de stock por código y tienda, calculado en UNA pasada sobre
+/// productos e IMEIs. Las variantes ya vienen sumadas a su padre.
+/// Pensado para listados (inventario, disponible, reportes), donde
+/// recalcular producto por producto sería muy lento.
+class IndiceStockTiendas {
+  /// codigo → (tienda → unidades). La tienda es el valor crudo
+  /// ('' = sin asignar). Incluye el stock de las variantes del código.
+  final Map<String, Map<String, int>> _porCodigo;
+  /// Códigos cuyo stock se cuenta por IMEI.
+  final Set<String> _codigosConImei;
+
+  IndiceStockTiendas._(this._porCodigo, this._codigosConImei);
+
+  /// [sumarVariantes] = false deja a cada código sólo con su propio
+  /// stock (útil para reportes que listan padre y variantes por separado).
+  factory IndiceStockTiendas.desde(
+      List<Producto> productos, List<ImeiRegistro> imeis,
+      {bool sumarVariantes = true}) {
+    final porCodigo = <String, Map<String, int>>{};
+    final conImei = <String>{};
+    final padreDe = <String, String>{};
+    final cacheCategoria = <String, bool>{};
+    bool usaImei(String cat) =>
+        cacheCategoria.putIfAbsent(cat, () => CategoriasProductos.usaIMEI(cat));
+
+    // Primera pasada: qué códigos van por IMEI y quién es su padre.
+    for (final p in productos) {
+      if (usaImei(p.categoria)) conImei.add(p.codigo);
+      if (sumarVariantes && p.productoPadreCodigo.isNotEmpty) {
+        padreDe[p.codigo] = p.productoPadreCodigo;
+      }
+    }
+
+    void sumar(String codigo, String tienda, int unidades) {
+      if (unidades <= 0) return;
+      final t = tienda.trim();
+      final m = porCodigo.putIfAbsent(codigo, () => <String, int>{});
+      m[t] = (m[t] ?? 0) + unidades;
+      // El stock de una variante también cuenta para su padre.
+      final padre = padreDe[codigo];
+      if (padre != null && padre.isNotEmpty && padre != codigo) {
+        final mp = porCodigo.putIfAbsent(padre, () => <String, int>{});
+        mp[t] = (mp[t] ?? 0) + unidades;
+      }
+    }
+
+    // Sin IMEI: cada fila (codigo, tienda) aporta su stock manual.
+    for (final p in productos) {
+      if (conImei.contains(p.codigo)) continue;
+      sumar(p.codigo, p.tienda, p.stockManual);
+    }
+    // Con IMEI: cada equipo no vendido cuenta 1 en su ubicación.
+    for (final i in imeis) {
+      if (i.vendido) continue;
+      if (!conImei.contains(i.producto.codigo)) continue;
+      sumar(i.producto.codigo, i.ubicacion, 1);
+    }
+    return IndiceStockTiendas._(porCodigo, conImei);
+  }
+
+  /// Índice sobre las listas globales en memoria.
+  factory IndiceStockTiendas.global() =>
+      IndiceStockTiendas.desde(catalogoGlobal, stockImeiGlobal);
+
+  /// true si el stock de ese código se cuenta por IMEI.
+  bool usaImei(String codigo) => _codigosConImei.contains(codigo);
+
+  /// Unidades por tienda (sólo las tiendas con stock > 0), ordenado de
+  /// mayor a menor.
+  Map<String, int> porTienda(String codigo) {
+    final m = _porCodigo[codigo];
+    if (m == null) return const <String, int>{};
+    final entradas = m.entries.where((e) => e.value > 0).toList()
+      ..sort((a, b) => b.value.compareTo(a.value));
+    return Map<String, int>.fromEntries(entradas);
+  }
+
+  /// Total en todas las tiendas (incluye "sin asignar").
+  int global(String codigo) =>
+      (_porCodigo[codigo]?.values ?? const <int>[])
+          .fold<int>(0, (s, v) => s + v);
+
+  /// Unidades en UNA tienda exacta. [tienda] vacía = total global.
+  int enTienda(String codigo, String tienda) {
+    final t = tienda.trim();
+    if (t.isEmpty) return global(codigo);
+    return _porCodigo[codigo]?[t] ?? 0;
+  }
+}
+
+/// Unidades por tienda de un código (con sus variantes), usando las
+/// listas globales en memoria. Para un solo producto; en listados usar
+/// [IndiceStockTiendas] para no recorrer todo por cada fila.
+Map<String, int> stockPorTienda(String codigo,
+        {List<Producto>? productos, List<ImeiRegistro>? imeis}) =>
+    IndiceStockTiendas.desde(
+            productos ?? catalogoGlobal, imeis ?? stockImeiGlobal)
+        .porTienda(codigo);
+
+/// Total del código en TODAS las tiendas (con sus variantes).
+int stockGlobal(String codigo,
+        {List<Producto>? productos, List<ImeiRegistro>? imeis}) =>
+    stockPorTienda(codigo, productos: productos, imeis: imeis)
+        .values
+        .fold<int>(0, (s, v) => s + v);
+
+/// De las filas repetidas de un código (una por tienda), la que
+/// corresponde a [tienda]: primero la de esa tienda exacta, después la
+/// de inventario general (''), y si no hay ninguna, null. Es la fila
+/// sobre la que deben operar las acciones (vender, ajustar, editar).
+Producto? filaProductoParaTienda(String codigo, String tienda,
+    {List<Producto>? productos}) {
+  final filas = (productos ?? catalogoGlobal)
+      .where((p) => p.codigo == codigo)
+      .toList();
+  if (filas.isEmpty) return null;
+  final t = tienda.trim();
+  if (t.isEmpty) return filas.first;
+  return filas.where((p) => p.tienda.trim() == t).firstOrNull ??
+      filas.where((p) => p.tienda.trim().isEmpty).firstOrNull;
+}
+
+/// Texto corto "Aquí: X · Total: Y" para listados. Si no hay tienda
+/// actual (vista "Todas") sólo se muestra el total.
+String textoStockAquiTotal(int aqui, int total, {String tienda = ''}) =>
+    tienda.trim().isEmpty ? 'Total: $total' : 'Aquí: $aqui · Total: $total';
+
+/// Diálogo con el desglose de unidades por tienda de [producto]
+/// (incluye variantes). Es informativo: se ve aunque el usuario no
+/// pueda vender stock de otras tiendas.
+///
+/// [tiendaActual] resalta la fila de la tienda del usuario.
+/// [onEditarFila], si se pasa, agrega un botón para editar el stock
+/// de cada fila (sólo productos SIN IMEI); recibe la fila exacta
+/// (codigo, tienda) a modificar.
+Future<void> mostrarDesgloseStock(
+  BuildContext context,
+  Producto producto, {
+  String tiendaActual = '',
+  List<Producto>? productos,
+  List<ImeiRegistro>? imeis,
+  Future<void> Function(Producto fila)? onEditarFila,
+}) async {
+  final prods = productos ?? catalogoGlobal;
+  final indice = IndiceStockTiendas.desde(prods, imeis ?? stockImeiGlobal);
+  final porTienda = indice.porTienda(producto.codigo);
+  final total = indice.global(producto.codigo);
+  final conImei = indice.usaImei(producto.codigo);
+  final actual = tiendaActual.trim();
+  // Filas propias del código (para el botón de editar por tienda).
+  final filasPropias = prods
+      .where((p) => p.codigo == producto.codigo && !p.esSubproducto)
+      .toList();
+  final tieneVariantes =
+      prods.any((p) => p.productoPadreCodigo == producto.codigo);
+
+  await showDialog<void>(
+    context: context,
+    builder: (ctx) => AlertDialog(
+      title: Row(children: [
+        const Icon(Icons.store_mall_directory_outlined,
+            color: AppColors.primaryBlue),
+        const SizedBox(width: 8),
+        Expanded(child: Text(producto.nombre,
+            style: const TextStyle(fontSize: 16),
+            overflow: TextOverflow.ellipsis)),
+      ]),
+      content: SizedBox(
+        width: 360,
+        child: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                  "${producto.codigo} · ${producto.categoria}"
+                  "${tieneVariantes ? ' · incluye variantes' : ''}",
+                  style: const TextStyle(
+                      fontSize: 12, color: AppColors.textSecondary)),
+              const SizedBox(height: 10),
+              Container(
+                width: double.infinity,
+                padding: const EdgeInsets.all(10),
+                decoration: BoxDecoration(
+                  color: AppColors.primaryBlue.withValues(alpha: 0.08),
+                  borderRadius: BorderRadius.circular(10),
+                ),
+                child: Text(
+                  "$total ${total == 1 ? 'unidad' : 'unidades'} en total"
+                  "${actual.isEmpty ? '' : ' · Aquí ($actual): ${porTienda[actual] ?? 0}'}",
+                  style: const TextStyle(
+                      fontWeight: FontWeight.bold,
+                      color: AppColors.primaryBlue)),
+              ),
+              const SizedBox(height: 8),
+              if (porTienda.isEmpty)
+                const Padding(
+                  padding: EdgeInsets.symmetric(vertical: 12),
+                  child: Text("No hay unidades en ninguna tienda.",
+                      style: TextStyle(color: AppColors.textSecondary)),
+                ),
+              ...porTienda.entries.map((e) {
+                final esActual = actual.isNotEmpty && e.key == actual;
+                final fila = filasPropias
+                    .where((p) => p.tienda.trim() == e.key)
+                    .firstOrNull;
+                return ListTile(
+                  dense: true,
+                  contentPadding: EdgeInsets.zero,
+                  leading: Icon(
+                      esActual ? Icons.location_on : Icons.location_on_outlined,
+                      color: esActual
+                          ? AppColors.statusGreen
+                          : AppColors.primaryBlue),
+                  title: Text(
+                      nombreTiendaStock(e.key) + (esActual ? ' (aquí)' : ''),
+                      style: TextStyle(
+                          fontWeight:
+                              esActual ? FontWeight.bold : FontWeight.w600)),
+                  trailing: Row(mainAxisSize: MainAxisSize.min, children: [
+                    Container(
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 10, vertical: 4),
+                      decoration: BoxDecoration(
+                          color: AppColors.primaryBlue.withValues(alpha: 0.1),
+                          borderRadius: BorderRadius.circular(12)),
+                      child: Text("${e.value} uds",
+                          style: const TextStyle(
+                              color: AppColors.primaryBlue,
+                              fontWeight: FontWeight.bold)),
+                    ),
+                    if (onEditarFila != null && !conImei && fila != null)
+                      IconButton(
+                        icon: const Icon(Icons.edit_outlined, size: 18),
+                        tooltip: 'Editar stock de ${nombreTiendaStock(e.key)}',
+                        onPressed: () async {
+                          Navigator.pop(ctx);
+                          await onEditarFila(fila);
+                        },
+                      ),
+                  ]),
+                );
+              }),
+              if (conImei)
+                const Padding(
+                  padding: EdgeInsets.only(top: 6),
+                  child: Text(
+                      "Equipos con IMEI: se cuentan por la ubicación de "
+                      "cada serial. Sólo se puede vender lo que está en "
+                      "tu tienda; para traer un equipo usá Traslados.",
+                      style: TextStyle(
+                          fontSize: 11, color: AppColors.textSecondary)),
+                ),
+            ],
+          ),
+        ),
+      ),
+      actions: [
+        TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text("Cerrar")),
+      ],
+    ),
+  );
+}
+
+/// Chip compacto "Aquí: X · Total: Y" (o "Total: Y" sin tienda).
+/// Tocarlo abre el desglose por tienda. Se resalta en naranja cuando
+/// aquí no hay pero sí en otra tienda, para que el vendedor no crea
+/// que el producto está agotado en todas partes.
+class ChipStockTiendas extends StatelessWidget {
+  final int aqui;
+  final int total;
+  final String tienda;
+  final VoidCallback? onTap;
+  const ChipStockTiendas({
+    super.key,
+    required this.aqui,
+    required this.total,
+    this.tienda = '',
+    this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final soloEnOtras = tienda.trim().isNotEmpty && aqui <= 0 && total > 0;
+    final color = soloEnOtras ? AppColors.statusOrange : AppColors.primaryBlue;
+    return InkWell(
+      borderRadius: BorderRadius.circular(10),
+      onTap: onTap,
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+        decoration: BoxDecoration(
+          color: color.withValues(alpha: 0.1),
+          borderRadius: BorderRadius.circular(10),
+          border: Border.all(color: color.withValues(alpha: 0.35)),
+        ),
+        child: Row(mainAxisSize: MainAxisSize.min, children: [
+          Icon(Icons.store_mall_directory_outlined, size: 12, color: color),
+          const SizedBox(width: 4),
+          Flexible(child: Text(
+              textoStockAquiTotal(aqui, total, tienda: tienda),
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(
+                  fontSize: 11, fontWeight: FontWeight.w700, color: color))),
+          if (onTap != null) ...[
+            const SizedBox(width: 2),
+            Icon(Icons.expand_more, size: 14, color: color),
+          ],
+        ]),
+      ),
+    );
+  }
+}
+
+// ════════════════════════════════════════════════════════════
 //  INGRESO RÁPIDO DE STOCK (productos SIN IMEI)
 // ════════════════════════════════════════════════════════════
 //  Los accesorios, forros, cargadores, etc. no llevan IMEI: su
@@ -15461,6 +15801,12 @@ class VentanaDisponible extends StatefulWidget {
 class _VentanaDisponibleState extends State<VentanaDisponible> {
   List<Producto> _productos = [];
   List<ImeiRegistro> _imeis = [];
+  /// Stock por código y tienda (variantes sumadas al padre).
+  IndiceStockTiendas _indice =
+      IndiceStockTiendas.desde(const <Producto>[], const <ImeiRegistro>[]);
+  /// UNA fila por código (la de la tienda activa, o general, o la
+  /// primera si sólo existe en otras tiendas). `stockTotal` = aquí.
+  List<Producto> _lineas = [];
   bool _cargando = true;
   String _query = '';
   String _filtroCategoria = 'Todos';
@@ -15509,38 +15855,48 @@ class _VentanaDisponibleState extends State<VentanaDisponible> {
           .toList();
       stockImeiGlobal = _imeis;
 
-      // Calcular stockTotal por producto, filtrado por tienda activa
+      // ── Stock por tienda + UNA línea por código ──────────────
+      // Antes cada fila de `productos` era una línea: un forro con
+      // fila en 3 tiendas salía 3 veces (en "Todas") y los padres
+      // sumaban las variantes de todas las tiendas.
+      //  · Con IMEI → IMEIs no vendidos en la tienda activa.
+      //  · Sin IMEI → fila de la tienda activa (o la general '').
+      //  · "Todas"  → total global.
+      _indice = IndiceStockTiendas.desde(_productos, _imeis);
+      final t = _tiendaFiltro.trim();
+      final filas = <String, List<Producto>>{};
       for (final p in _productos) {
-        if (CategoriasProductos.usaIMEI(p.categoria)) {
-          p.stockTotal = _imeis.where((i) =>
-              i.producto.codigo == p.codigo
-              && !i.vendido
-              && (_tiendaFiltro.isEmpty
-                  || i.ubicacion == _tiendaFiltro)
-          ).length;
+        if (p.productoPadreCodigo.isNotEmpty) continue;
+        filas.putIfAbsent(p.codigo, () => []).add(p);
+      }
+      final lineas = <Producto>[];
+      filas.forEach((codigo, lista) {
+        final propia = t.isEmpty
+            ? (lista.where((p) => p.tienda.trim().isEmpty).firstOrNull ??
+                lista.first)
+            : filaProductoParaTienda(codigo, t, productos: lista);
+        final rep = propia ?? lista.first;
+        if (t.isEmpty) {
+          rep.stockTotal = _indice.global(codigo);
+        } else if (_indice.usaImei(codigo)) {
+          rep.stockTotal = _indice.enTienda(codigo, t);
         } else {
-          p.stockTotal = p.stockManual;
+          // Sin fila aquí → 0 (sólo hay en otras tiendas).
+          rep.stockTotal = propia == null
+              ? 0
+              : (_indice.porTienda(codigo)[propia.tienda.trim()] ?? 0);
         }
-      }
+        lineas.add(rep);
+      });
 
-      // Sumar el stock de los SUBPRODUCTOS al padre — el padre es lo
-      // que se muestra; el stock debe reflejar el total agregado.
-      final hijosPorPadre = <String, List<Producto>>{};
-      for (final p in _productos) {
-        if (p.productoPadreCodigo.isNotEmpty) {
-          hijosPorPadre.putIfAbsent(p.productoPadreCodigo, () => [])
-              .add(p);
-        }
-      }
-      for (final padre in _productos.where((p) => p.productoPadreCodigo.isEmpty)) {
-        final hijos = hijosPorPadre[padre.codigo] ?? const <Producto>[];
-        for (final h in hijos) {
-          padre.stockTotal += h.stockTotal;
-        }
-      }
-
-      // Ordenar: más stock primero
-      _productos.sort((a, b) => b.stockTotal.compareTo(a.stockTotal));
+      // Ordenar: más stock aquí primero; a igualdad, más total.
+      lineas.sort((a, b) {
+        final c = b.stockTotal.compareTo(a.stockTotal);
+        return c != 0
+            ? c
+            : _indice.global(b.codigo).compareTo(_indice.global(a.codigo));
+      });
+      _lineas = lineas;
     } catch (e) {
       debugPrint('[VentanaDisponible._cargar] Error: $e');
       if (mounted) ScaffoldMessenger.of(context).showSnackBar(
@@ -15553,33 +15909,27 @@ class _VentanaDisponibleState extends State<VentanaDisponible> {
   }
 
   List<Producto> get _productosFiltrados {
-    return _productos.where((p) {
-      // EXCLUIR subproductos — solo padres en el listado.
-      if (p.productoPadreCodigo.isNotEmpty) return false;
-
+    final q = _query.toLowerCase();
+    return _lineas.where((p) {
       // ── FILTRO POR TIENDA ──────────────────────────────────
-      // Esta pantalla mostraba los productos SIN IMEI (accesorios,
-      // forros, cargadores...) de TODAS las tiendas a cualquier
-      // usuario: para ellos se hacía `stockTotal = stockManual`, que
-      // es un valor global, y acá no se filtraba nada. Un vendedor de
-      // la sucursal veía como disponible el stock de la principal.
-      //
-      // Se aplica la misma regla que ya usa VentanaInventario:
-      //  · CON IMEI  → cuenta los IMEIs físicamente en esa tienda.
-      //  · SIN IMEI  → el producto pertenece a la tienda del campo
-      //                `productos.tienda`; si está vacío es
-      //                inventario general y se ve desde cualquiera.
-      if (_tiendaFiltro.isNotEmpty &&
-          !CategoriasProductos.usaIMEI(p.categoria)) {
-        if (p.tienda.isNotEmpty && p.tienda != _tiendaFiltro) return false;
-      }
+      // `_lineas` ya trae una línea por código con el stock de la
+      // tienda activa (`stockTotal`):
+      //  · CON IMEI  → IMEIs físicamente en esa tienda.
+      //  · SIN IMEI  → la fila de `productos.tienda` de esa tienda (o
+      //                la general ''); 0 si sólo existe en otras.
+      // Sin búsqueda se listan sólo los que hay aquí. Al BUSCAR se
+      // agregan los que hay en otras tiendas ("Aquí: 0 · Total: N")
+      // para que el vendedor sepa que existen y dónde (informativo,
+      // no se puede vender stock de otra tienda).
+      final hayAqui = p.stockTotal > 0;
+      final hayEnOtra = q.isNotEmpty && _indice.global(p.codigo) > 0;
 
-      final matchQuery = _query.isEmpty ||
-          p.nombre.toLowerCase().contains(_query.toLowerCase()) ||
-          p.codigo.toLowerCase().contains(_query.toLowerCase()) ||
-          p.marca.toLowerCase().contains(_query.toLowerCase());
+      final matchQuery = q.isEmpty ||
+          p.nombre.toLowerCase().contains(q) ||
+          p.codigo.toLowerCase().contains(q) ||
+          p.marca.toLowerCase().contains(q);
       final matchCat = _filtroCategoria == 'Todos' || p.categoria == _filtroCategoria;
-      return matchQuery && matchCat && p.stockTotal > 0;
+      return matchQuery && matchCat && (hayAqui || hayEnOtra);
     }).toList();
   }
 
@@ -15672,6 +16022,19 @@ class _VentanaDisponibleState extends State<VentanaDisponible> {
                       style: const TextStyle(fontWeight: FontWeight.w600, color: AppColors.textPrimary)),
                     subtitle: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
                       Text("${p.codigo} · ${p.marca}", style: const TextStyle(fontSize: 12, color: AppColors.textSecondary)),
+                      // Aquí + total en todas las tiendas, sin clic.
+                      Padding(
+                        padding: const EdgeInsets.only(top: 3),
+                        child: Align(
+                          alignment: Alignment.centerLeft,
+                          child: ChipStockTiendas(
+                            aqui: p.stockTotal,
+                            total: _indice.global(p.codigo),
+                            tienda: _tiendaFiltro,
+                            onTap: () => _mostrarUbicaciones(p),
+                          ),
+                        ),
+                      ),
                       if (p.categoria == "iPhone" && p.porcentajeBateria != null)
                         Row(children: [
                           const Icon(Icons.battery_charging_full, size: 13, color: AppColors.statusGreen),
@@ -15695,35 +16058,11 @@ class _VentanaDisponibleState extends State<VentanaDisponible> {
     );
   }
 
+  /// Desglose por tienda. Antes sólo miraba IMEIs, así que en los
+  /// accesorios (sin IMEI) salía vacío; ahora usa el helper común.
   void _mostrarUbicaciones(Producto p) {
-    final imeis = _imeis.where((i) => i.producto.codigo == p.codigo && !i.vendido).toList();
-    Map<String,List<ImeiRegistro>> porUbicacion = {};
-    for (var i in imeis) {
-      porUbicacion.putIfAbsent(i.ubicacion, () => []).add(i);
-    }
-    showModalBottomSheet(
-      context: context,
-      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
-      builder: (c) => Padding(
-        padding: const EdgeInsets.all(24),
-        child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
-          Text(p.nombre, style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
-          Text("${p.codigo} · ${imeis.length} unidades", style: const TextStyle(color: AppColors.textSecondary)),
-          const Divider(height: 24),
-          ...porUbicacion.entries.map((e) => ListTile(
-            contentPadding: EdgeInsets.zero,
-            leading: const Icon(Icons.location_on_outlined, color: AppColors.primaryBlue),
-            title: Text(e.key, style: const TextStyle(fontWeight: FontWeight.w600)),
-            trailing: Container(
-              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-              decoration: BoxDecoration(color: AppColors.primaryBlue.withValues(alpha: 0.1), borderRadius: BorderRadius.circular(12)),
-              child: Text("${e.value.length} uds", style: const TextStyle(color: AppColors.primaryBlue, fontWeight: FontWeight.bold)),
-            ),
-          )),
-          const SizedBox(height: 8),
-        ]),
-      ),
-    );
+    mostrarDesgloseStock(context, p,
+        tiendaActual: _tiendaFiltro, productos: _productos, imeis: _imeis);
   }
 }
 
@@ -23229,6 +23568,24 @@ class _VentanaInventarioState extends State<VentanaInventario> {
   String _query = '';
   String _filtroCategoria = 'Todos';
 
+  /// Stock por código y tienda (incluye variantes). Se rehace en
+  /// `_recalcularStock()` cada vez que cambian productos o IMEIs.
+  IndiceStockTiendas _indice =
+      IndiceStockTiendas.desde(const <Producto>[], const <ImeiRegistro>[]);
+
+  /// UNA fila por código (el producto puede tener una fila por tienda).
+  /// Es la fila sobre la que operan editar / ajustar stock: la de la
+  /// tienda activa, o la de inventario general ('') si no hay.
+  Map<String, Producto> _repPorCodigo = {};
+
+  /// Códigos SIN IMEI que no tienen fila en la tienda activa (ni
+  /// general): sólo existen en otras tiendas. Se muestran al buscar,
+  /// pero no se les puede tocar el stock desde aquí.
+  Set<String> _codigosAjenos = {};
+
+  /// Cuántas filas (tiendas) tiene cada código.
+  Map<String, int> _filasPorCodigo = {};
+
   /// Lista de tiendas conocidas (cargada de la tabla `tiendas`).
   List<String> _todasTiendas = [];
 
@@ -23283,6 +23640,10 @@ class _VentanaInventarioState extends State<VentanaInventario> {
             Text("Código: ${p.codigo}",
                 style: const TextStyle(fontSize: 12,
                     color: AppColors.textSecondary)),
+            // Se borra la fila de esta tienda (hay una por tienda).
+            Text("Tienda: ${nombreTiendaStock(p.tienda)}",
+                style: const TextStyle(fontSize: 12,
+                    color: AppColors.textSecondary)),
             if (stockActual > 0) ...[
               const SizedBox(height: 10),
               Container(
@@ -23326,15 +23687,25 @@ class _VentanaInventarioState extends State<VentanaInventario> {
     if (ok != true) return;
 
     try {
-      final raw = await _Api.get('productos');
-      final fila = (raw as List).cast<Map<String, dynamic>>().firstWhere(
-          (m) => m['codigo'] == p.codigo,
-          orElse: () => <String, dynamic>{});
-      if (fila['id'] != null) {
-        await _Api.delete('productos', fila['id'].toString());
+      // Hay una fila por (codigo, tienda): se borra la fila EXACTA que
+      // se está viendo (por id, o por código + tienda). Antes se tomaba
+      // la primera fila con ese código, que podía ser de otra tienda.
+      String? idBorrar = p.id?.toString();
+      if (idBorrar == null) {
+        final raw = await _Api.get('productos');
+        final fila = (raw as List).cast<Map<String, dynamic>>().firstWhere(
+            (m) => m['codigo'] == p.codigo &&
+                (m['tienda'] ?? '').toString().trim() == p.tienda.trim(),
+            orElse: () => <String, dynamic>{});
+        idBorrar = fila['id']?.toString();
       }
-      catalogoGlobal.removeWhere((x) =>
-          x.codigo == p.codigo || x.productoPadreCodigo == p.codigo);
+      if (idBorrar != null) {
+        await _Api.delete('productos', idBorrar);
+      }
+      final quedanOtrasFilas = catalogoGlobal
+          .any((x) => x.codigo == p.codigo && !identical(x, p));
+      catalogoGlobal.removeWhere((x) => identical(x, p) ||
+          (!quedanOtrasFilas && x.productoPadreCodigo == p.codigo));
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(
           content: Text("\"${p.nombre}\" eliminado"),
@@ -23386,47 +23757,11 @@ class _VentanaInventarioState extends State<VentanaInventario> {
       stockImeiGlobal = imeis;
       _imeis = imeis;
 
-      // ── PASO 3: calcular stockTotal de cada producto ────────────
-      // Teléfonos  → contar IMEIs no vendidos del producto que estén
-      //              en la tienda activa (`_tiendaFiltro`). Si la
-      //              tienda activa es '' (Todas), cuenta todos.
-      // Otros      → `stock_manual` global. NOTA: los productos no
-      //              teléfono actualmente NO tienen división por
-      //              tienda en BD (un único stock_manual). Mientras
-      //              no se haga esa migración, se muestra el global
-      //              en todas las vistas.
-      for (final p in _productos) {
-        if (CategoriasProductos.usaIMEI(p.categoria)) {
-          p.stockTotal = imeis.where((i) =>
-              i.producto.codigo == p.codigo
-              && !i.vendido
-              && (_tiendaFiltro.isEmpty
-                  || i.ubicacion == _tiendaFiltro)
-          ).length;
-        } else {
-          p.stockTotal = p.stockManual;
-        }
-      }
-
-      // ── PASO 4: sumar el stock de los SUBPRODUCTOS al padre ─────
-      // Los subproductos NO se muestran en el listado del inventario
-      // (solo el padre). Pero el stock total mostrado en el padre
-      // debe reflejar también el stock de sus variantes — si no, el
-      // dueño vería un Redmi A5 con 0 unidades cuando en realidad
-      // tiene 5 blancos + 3 negros + 2 azules.
-      final hijosPorPadre = <String, List<Producto>>{};
-      for (final p in _productos) {
-        if (p.productoPadreCodigo.isNotEmpty) {
-          hijosPorPadre.putIfAbsent(p.productoPadreCodigo, () => [])
-              .add(p);
-        }
-      }
-      for (final padre in _productos.where((p) => p.productoPadreCodigo.isEmpty)) {
-        final hijos = hijosPorPadre[padre.codigo] ?? const <Producto>[];
-        for (final h in hijos) {
-          padre.stockTotal += h.stockTotal;
-        }
-      }
+      // ── PASO 3: stock por tienda + una fila por código ─────────
+      // Ver `_recalcularStock()`: arma el índice de stock por tienda
+      // (con variantes sumadas al padre) y elige la fila de cada
+      // código que corresponde a la tienda activa.
+      _recalcularStock();
 
     } catch (e) {
       debugPrint('[VentanaInventario._cargar] Error: $e');
@@ -23439,6 +23774,98 @@ class _VentanaInventarioState extends State<VentanaInventario> {
       if (mounted) setState(() => _cargando = false);
     }
   }
+
+  /// Recalcula el índice de stock por tienda, la fila representativa
+  /// de cada código y el `stockTotal` que se muestra.
+  ///
+  /// `stockTotal` de la fila representativa = lo que hay "aquí":
+  ///  · Vista "Todas" (`_tiendaFiltro` vacío) → total global.
+  ///  · Con IMEI → IMEIs no vendidos ubicados en la tienda activa.
+  ///  · Sin IMEI → stock de la fila de la tienda activa (o de la fila
+  ///    general si la tienda no tiene fila propia); 0 si el producto
+  ///    sólo existe en otras tiendas.
+  /// Antes los accesorios mostraban una línea por cada fila/tienda y
+  /// los padres sumaban las variantes de TODAS las tiendas.
+  void _recalcularStock() {
+    _indice = IndiceStockTiendas.desde(_productos, _imeis);
+    final t = _tiendaFiltro.trim();
+
+    // Stock propio de cada fila (lo usan pantallas que miran filas
+    // sueltas, p.ej. variantes en el formulario).
+    for (final p in _productos) {
+      p.stockTotal = _indice.usaImei(p.codigo)
+          ? (t.isEmpty
+              ? _indice.global(p.codigo)
+              : _indice.enTienda(p.codigo, t))
+          : p.stockManual;
+    }
+
+    // Agrupar por código (sólo padres / productos principales).
+    final filas = <String, List<Producto>>{};
+    for (final p in _productos) {
+      if (p.productoPadreCodigo.isNotEmpty) continue;
+      filas.putIfAbsent(p.codigo, () => []).add(p);
+    }
+    final rep = <String, Producto>{};
+    final ajenos = <String>{};
+    final nFilas = <String, int>{};
+    filas.forEach((codigo, lista) {
+      nFilas[codigo] = lista.length;
+      final conImei = _indice.usaImei(codigo);
+      Producto? elegido = t.isEmpty
+          // En "Todas": la fila general si existe, si no la primera.
+          ? (lista.where((p) => p.tienda.trim().isEmpty).firstOrNull ??
+              lista.first)
+          : filaProductoParaTienda(codigo, t, productos: lista);
+      if (elegido == null) {
+        // Sin fila en esta tienda: para los IMEI da igual (la tienda la
+        // manda cada serial); para los demás es un producto "ajeno".
+        if (!conImei) ajenos.add(codigo);
+        elegido = lista.first;
+      }
+      if (t.isEmpty) {
+        elegido.stockTotal = _indice.global(codigo);
+      } else if (conImei) {
+        elegido.stockTotal = _indice.enTienda(codigo, t);
+      } else if (ajenos.contains(codigo)) {
+        elegido.stockTotal = 0;
+      } else {
+        // Fila de la tienda (o la general '') + variantes de esa misma
+        // tienda. Ojo: no usar `enTienda('')`, que devuelve el global.
+        elegido.stockTotal =
+            _indice.porTienda(codigo)[elegido.tienda.trim()] ?? 0;
+      }
+      rep[codigo] = elegido;
+    });
+    _repPorCodigo = rep;
+    _codigosAjenos = ajenos;
+    _filasPorCodigo = nFilas;
+  }
+
+  /// true si desde esta vista se puede tocar el stock de la fila [p]
+  /// directamente (+/−, tocar el número). No se puede cuando la fila
+  /// es de otra tienda, ni en "Todas" cuando el código tiene varias
+  /// filas (no se sabría cuál tocar: se hace desde el desglose).
+  bool _stockEditableEnLista(Producto p) {
+    if (CategoriasProductos.usaIMEI(p.categoria) || p.esSubproducto) {
+      return false;
+    }
+    if (_codigosAjenos.contains(p.codigo)) return false;
+    if (_tiendaFiltro.trim().isEmpty && (_filasPorCodigo[p.codigo] ?? 1) > 1) {
+      return false;
+    }
+    return true;
+  }
+
+  /// Abre el desglose de unidades por tienda. El Dueño además puede
+  /// editar desde ahí el stock de cada fila/tienda.
+  Future<void> _verDesgloseStock(Producto p) => mostrarDesgloseStock(
+        context, p,
+        tiendaActual: _tiendaFiltro,
+        productos: _productos,
+        imeis: _imeis,
+        onEditarFila: _puedeVerTodas ? _editarStockDirecto : null,
+      );
 
   /// Abre un diálogo donde el admin puede activar/desactivar el uso
   /// de IMEI por cada categoría de producto. Cuando una categoría
@@ -23583,8 +24010,10 @@ class _VentanaInventarioState extends State<VentanaInventario> {
     final res = await ajustarStockManual(p, delta);
     if (!mounted) return;
     setState(() {
-      // Sincronizar con lo que realmente quedó guardado.
-      p.stockTotal = res.stockFinal;
+      // Sincronizar con lo que realmente quedó guardado. Se recalcula
+      // todo el índice: `res.stockFinal` es el stock de ESTA fila y el
+      // número mostrado puede incluir variantes / el total global.
+      _recalcularStock();
     });
     if (!res.ok) {
       messenger.showSnackBar(SnackBar(
@@ -23610,7 +24039,8 @@ class _VentanaInventarioState extends State<VentanaInventario> {
               overflow: TextOverflow.ellipsis)),
         ]),
         content: Column(mainAxisSize: MainAxisSize.min, children: [
-          Text("${p.codigo} · ${p.categoria}",
+          // La tienda deja claro QUÉ fila se edita (hay una por tienda).
+          Text("${p.codigo} · ${p.categoria} · ${nombreTiendaStock(p.tienda)}",
               style: const TextStyle(
                   fontSize: 12, color: AppColors.textSecondary)),
           const SizedBox(height: 14),
@@ -23646,7 +24076,9 @@ class _VentanaInventarioState extends State<VentanaInventario> {
     final messenger = ScaffoldMessenger.of(context);
     final res = await establecerStockManual(p, nuevo);
     if (!mounted) return;
-    setState(() => p.stockTotal = res.stockFinal);
+    // Recalcular índice y filas: [p] puede ser la fila de otra tienda
+    // (editada desde el desglose), no necesariamente la que se ve.
+    setState(_recalcularStock);
     messenger.showSnackBar(SnackBar(
       content: Text(res.ok
           ? "Stock actualizado — ${res.mensaje}"
@@ -23758,8 +24190,8 @@ class _VentanaInventarioState extends State<VentanaInventario> {
 
     try {
       // Calcular productos a exportar según la tienda elegida.
-      // Para teléfonos, contamos IMEIs de esa tienda; para los demás
-      // se reporta el stock_manual global (con una nota).
+      // Con IMEI: IMEIs ubicados en esa tienda. Sin IMEI: la fila de
+      // `productos` de esa tienda (ver más abajo).
       final excel = Excel.createExcel();
       excel.delete('Sheet1');
       // Excel no acepta nombres de hoja de más de 31 caracteres ni
@@ -23783,35 +24215,28 @@ class _VentanaInventarioState extends State<VentanaInventario> {
       double totalValor = 0;
       // Recalcular stock por la tienda elegida (no por la del filtro)
       // y dejar sólo la categoría pedida.
-      for (final p in _productos.where((p) =>
+      //
+      // ANTES: para los productos SIN IMEI (accesorios) se recorrían
+      // TODAS las filas de `productos` y se tomaba su `stock_manual`
+      // sin mirar `productos.tienda`. Como hay una fila por tienda, el
+      // Excel de "Sucursal X · Accesorios" traía el inventario de todas
+      // las tiendas (y el mismo código repetido una vez por tienda).
+      // AHORA: una línea por código, con el stock de ESA tienda
+      // exacta (IMEIs por ubicación, accesorios por `productos.tienda`,
+      // variantes sumadas). "Todas" = total global.
+      final indice = IndiceStockTiendas.desde(_productos, _imeis);
+      final yaExportados = <String>{};
+      for (final fila in _productos.where((p) =>
           p.productoPadreCodigo.isEmpty &&
           (categoriaExport.isEmpty || p.categoria == categoriaExport))) {
-        int stock;
-        if (CategoriasProductos.usaIMEI(p.categoria)) {
-          stock = _imeis.where((i) =>
-              i.producto.codigo == p.codigo
-              && !i.vendido
-              && (tiendaExport.isEmpty
-                  || i.ubicacion == tiendaExport)
-          ).length;
-        } else {
-          // No-teléfonos: stock global (sin división por tienda)
-          stock = p.stockManual;
-        }
-        // Sumar también stock de variantes
-        for (final h in _productos.where(
-            (h) => h.productoPadreCodigo == p.codigo)) {
-          if (CategoriasProductos.usaIMEI(h.categoria)) {
-            stock += _imeis.where((i) =>
-                i.producto.codigo == h.codigo
-                && !i.vendido
-                && (tiendaExport.isEmpty
-                    || i.ubicacion == tiendaExport)
-            ).length;
-          } else {
-            stock += h.stockManual;
-          }
-        }
+        if (!yaExportados.add(fila.codigo)) continue; // una línea por código
+        // Datos (nombre, precios) de la fila de esa tienda si existe.
+        final p = (tiendaExport.isEmpty
+                ? null
+                : filaProductoParaTienda(fila.codigo, tiendaExport,
+                    productos: _productos)) ??
+            fila;
+        final int stock = indice.enTienda(p.codigo, tiendaExport);
         if (stock == 0) continue;
         final valor = stock * p.precioCosto;
         totalValor += valor;
@@ -23878,54 +24303,52 @@ class _VentanaInventarioState extends State<VentanaInventario> {
 
   /// Cantidad de subproductos (variantes) que tiene un padre.
   int _cantidadVariantes(String codigoPadre) {
+    // Por código distinto: una variante puede tener una fila por tienda.
     return _productos
         .where((p) => p.productoPadreCodigo == codigoPadre)
+        .map((p) => p.codigo)
+        .toSet()
         .length;
   }
 
-  List<Producto> get _filtrados => _productos.where((p) {
-    // EXCLUIR subproductos del listado — solo se muestran los padres.
-    if (p.productoPadreCodigo.isNotEmpty) return false;
+  /// UNA línea por código (ver `_recalcularStock`): la fila de la
+  /// tienda activa. Antes un accesorio con fila en 3 tiendas salía 3
+  /// veces en "Todas".
+  List<Producto> get _filtrados {
+    final q = _query.toLowerCase();
+    return _repPorCodigo.values.where((p) {
+      // (Los subproductos ya no están: `_repPorCodigo` sólo tiene padres.)
 
-    // ── FILTRO POR TIENDA ──
-    // La lógica difiere según el tipo de producto:
-    //
-    // TELÉFONOS: el campo productos.tienda NO importa. Lo que importa
-    // es DÓNDE están físicamente sus IMEIs. Un teléfono aparece en una
-    // tienda si tiene al menos 1 IMEI con ubicacion = esa tienda.
-    // Si filtras por "Todas", siempre aparece.
-    //
-    // NO-TELÉFONOS: el stock_manual sigue al campo productos.tienda.
-    // Un producto aparece en una tienda específica si:
-    //   · tiene tienda asignada == filtro, O
-    //   · tiene tienda vacía (inventario general/sin asignar).
-    if (_tiendaFiltro.isNotEmpty) {
-      if (CategoriasProductos.usaIMEI(p.categoria)) {
-        // ¿Tiene al menos 1 IMEI no-vendido en esta tienda?
-        final tieneImeiAqui = _imeis.any((i) =>
-            i.producto.codigo == p.codigo
-            && !i.vendido
-            && i.ubicacion == _tiendaFiltro);
-        if (!tieneImeiAqui) return false;
-      } else {
-        // No-teléfono: filtrar por campo tienda
-        if (p.tienda != _tiendaFiltro && p.tienda.isNotEmpty) {
-          return false;
-        }
-        // Si stockManual = 0, no mostrar (es residuo de un traslado total)
-        if (p.stockManual <= 0 && p.tienda.isNotEmpty) {
+      // ── FILTRO POR TIENDA ──
+      // TELÉFONOS (con IMEI): el campo productos.tienda NO importa;
+      // aparece si tiene al menos 1 IMEI no vendido en esta tienda.
+      //
+      // NO-TELÉFONOS: el stock sigue al campo productos.tienda. Aparece
+      // si tiene fila de esta tienda o fila general (''). Una fila de
+      // la tienda con 0 es residuo de un traslado total: no se muestra.
+      //
+      // Al BUSCAR, además se muestran los que no hay aquí pero sí en
+      // otra tienda (con "Aquí: 0 · Total: N"), para que el vendedor
+      // no crea que no existe en ninguna parte.
+      if (_tiendaFiltro.isNotEmpty) {
+        final hayEnOtra = q.isNotEmpty && _indice.global(p.codigo) > 0;
+        if (CategoriasProductos.usaIMEI(p.categoria)) {
+          if (p.stockTotal <= 0 && !hayEnOtra) return false;
+        } else if (_codigosAjenos.contains(p.codigo)) {
+          if (!hayEnOtra) return false;
+        } else if (p.tienda.isNotEmpty && p.stockTotal <= 0 && !hayEnOtra) {
           return false;
         }
       }
-    }
 
-    final matchQuery = _query.isEmpty ||
-        p.nombre.toLowerCase().contains(_query.toLowerCase()) ||
-        p.codigo.toLowerCase().contains(_query.toLowerCase()) ||
-        p.marca.toLowerCase().contains(_query.toLowerCase());
-    final matchCat = _filtroCategoria == 'Todos' || p.categoria == _filtroCategoria;
-    return matchQuery && matchCat;
-  }).toList();
+      final matchQuery = q.isEmpty ||
+          p.nombre.toLowerCase().contains(q) ||
+          p.codigo.toLowerCase().contains(q) ||
+          p.marca.toLowerCase().contains(q);
+      final matchCat = _filtroCategoria == 'Todos' || p.categoria == _filtroCategoria;
+      return matchQuery && matchCat;
+    }).toList();
+  }
 
   Widget _buildTotalInfo(String label, String value, Color valueColor) => Column(children: [
     Text(label, style: const TextStyle(color: Colors.white70, fontSize: 10)),
@@ -24128,20 +24551,15 @@ class _VentanaInventarioState extends State<VentanaInventario> {
                     Builder(builder: (_) {
                       // Contar productos por tienda (no-teléfonos por p.tienda,
                       // teléfonos por ubicaciones de sus IMEIs)
+                      // Se usa el índice (una vez por código) para no
+                      // contar dos veces los IMEIs de un código que tiene
+                      // filas en varias tiendas.
                       final conteo = <String, int>{};
-                      for (final p in _productos) {
-                        if (p.productoPadreCodigo.isNotEmpty) continue;
-                        if (CategoriasProductos.usaIMEI(p.categoria)) {
-                          for (final i in _imeis.where((x) =>
-                              x.producto.codigo == p.codigo && !x.vendido)) {
-                            final t = i.ubicacion.isEmpty ? '(sin tienda)' : i.ubicacion;
-                            conteo[t] = (conteo[t] ?? 0) + 1;
-                          }
-                        } else {
-                          if (p.stockManual <= 0) continue;
-                          final t = p.tienda.isEmpty ? '(sin tienda)' : p.tienda;
-                          conteo[t] = (conteo[t] ?? 0) + p.stockManual;
-                        }
+                      for (final codigo in _repPorCodigo.keys) {
+                        _indice.porTienda(codigo).forEach((tienda, n) {
+                          final t = tienda.isEmpty ? '(sin tienda)' : tienda;
+                          conteo[t] = (conteo[t] ?? 0) + n;
+                        });
                       }
                       if (conteo.isEmpty) {
                         return const Text('No hay productos con stock en ninguna tienda.',
@@ -24188,6 +24606,10 @@ class _VentanaInventarioState extends State<VentanaInventario> {
                 // Cantidad de variantes (subproductos) del padre, para
                 // mostrar un badge informativo en la tile.
                 final numVariantes = _cantidadVariantes(p.codigo);
+                // ¿Se le puede tocar el stock desde la lista? (fila de
+                // otra tienda o "Todas" con varias filas → no).
+                final stockEditable = _stockEditableEnLista(p);
+                final esAjeno = _codigosAjenos.contains(p.codigo);
 
                 return Card(
                   margin: const EdgeInsets.only(bottom: 8),
@@ -24255,6 +24677,15 @@ class _VentanaInventarioState extends State<VentanaInventario> {
                           Text("${p.codigo} · ${p.categoria} · ${p.marca}",
                             style: const TextStyle(fontSize: 11, color: AppColors.textSecondary)),
                           const SizedBox(height: 4),
+                          // Stock aquí + total en todas las tiendas, sin
+                          // tener que hacer clic. Tocar → desglose.
+                          ChipStockTiendas(
+                            aqui: p.stockTotal,
+                            total: _indice.global(p.codigo),
+                            tienda: _tiendaFiltro,
+                            onTap: () => _verDesgloseStock(p),
+                          ),
+                          const SizedBox(height: 4),
                           Row(children: [
                             Text("Costo: ${formatCurrency(p.precioCosto)}",
                               style: const TextStyle(fontSize: 11, color: AppColors.textSecondary)),
@@ -24273,10 +24704,12 @@ class _VentanaInventarioState extends State<VentanaInventario> {
                           // Tocar el número abre el teclado para escribir
                           // la cantidad exacta (útil al cargar una caja
                           // entera). Solo en productos sin IMEI.
-                          onTap: (!CategoriasProductos.usaIMEI(p.categoria) &&
-                                  !p.esSubproducto)
+                          // Si no se puede editar aquí (IMEI, fila de otra
+                          // tienda, varias filas en "Todas"), abre el
+                          // desglose por tienda.
+                          onTap: stockEditable
                               ? () => _editarStockDirecto(p)
-                              : null,
+                              : () => _verDesgloseStock(p),
                           child: Container(
                             width: 54,
                             padding: const EdgeInsets.symmetric(vertical: 6),
@@ -24310,8 +24743,7 @@ class _VentanaInventarioState extends State<VentanaInventario> {
                       // Antes había que entrar a la ficha completa del
                       // producto para cambiar una cantidad. Con esto se
                       // suma o resta desde la misma lista.
-                      if (!CategoriasProductos.usaIMEI(p.categoria) &&
-                          !p.esSubproducto) ...[
+                      if (stockEditable) ...[
                         const SizedBox(width: 4),
                         Column(mainAxisSize: MainAxisSize.min, children: [
                           _BotonStockRapido(
@@ -24334,6 +24766,10 @@ class _VentanaInventarioState extends State<VentanaInventario> {
                       const SizedBox(width: 6),
 
                       // ── Botón editar ─────────────────────────
+                      // Si el producto sólo existe en OTRA tienda (se
+                      // ve por la búsqueda, es informativo) no se edita
+                      // desde aquí: la fila es de esa otra tienda.
+                      if (!esAjeno || _puedeVerTodas)
                       IconButton(
                         icon: const Icon(Icons.edit_outlined,
                           color: AppColors.primaryBlue, size: 20),
@@ -24347,9 +24783,10 @@ class _VentanaInventarioState extends State<VentanaInventario> {
 
                       // ── PUNTO 1: Botón eliminar producto ──────
                       // Solo roles con permiso (Maestro/Administrador/Dueño).
-                      if (usuarioSesion?.rol == "Maestro" ||
+                      if ((!esAjeno || _puedeVerTodas) &&
+                          (usuarioSesion?.rol == "Maestro" ||
                           usuarioSesion?.rol == "Administrador" ||
-                          usuarioSesion?.rol == "Dueño") ...[
+                          usuarioSesion?.rol == "Dueño")) ...[
                         const SizedBox(width: 2),
                         IconButton(
                           icon: const Icon(Icons.delete_outline,
@@ -24975,9 +25412,17 @@ class _VentanaInventarioFisicoState
         if (p.esSubproducto) continue;
         // Solo productos cuya categoría NO usa IMEI
         if (CategoriasProductos.usaIMEI(p.categoria)) continue;
-        // TODO: filtrar por tienda si tu Producto tiene stock por tienda
+        // Hay una fila por (codigo, tienda): sólo cuentan las filas de
+        // la tienda que se inventaría, y se SUMAN por código. Antes se
+        // tomaban todas las filas y la última pisaba a las demás, así
+        // que el teórico de una tienda salía con el stock de otra.
+        if (widget.tiendaFiltro.isNotEmpty &&
+            p.tienda.trim() != widget.tiendaFiltro.trim()) {
+          continue;
+        }
         if (p.stockManual > 0) {
-          _codigosEsperados[p.codigo] = p.stockManual;
+          _codigosEsperados[p.codigo] =
+              (_codigosEsperados[p.codigo] ?? 0) + p.stockManual;
         }
       }
     } catch (e) {
@@ -28726,8 +29171,7 @@ class _FormularioFacturaState extends State<FormularioFactura>
       // Reconstruir items por código
       final codigos = ((data['itemsCodigos'] as List?) ?? []).cast<String>();
       for (final cod in codigos) {
-        final p = catalogoGlobal
-            .where((x) => x.codigo == cod).firstOrNull;
+        final p = _productoPorCodigo(cod);
         if (p == null || _productoEsDeOtraTienda(p)) continue;
         _items.add(p);
       }
@@ -28867,6 +29311,39 @@ class _FormularioFacturaState extends State<FormularioFactura>
   bool _productoEsDeOtraTienda(Producto p) =>
       !CategoriasProductos.usaIMEI(p.categoria) && _esDeOtraTienda(p.tienda);
 
+  /// Fila del código que corresponde a la tienda de la factura.
+  ///
+  /// Hay una fila de `productos` por (codigo, tienda). Antes se tomaba
+  /// la PRIMERA fila con ese código: si era la de otra tienda, el
+  /// accesorio se rechazaba ("pertenece a X") aunque aquí sí hubiera,
+  /// o se descontaba/mostraba el stock de la fila equivocada. Ahora se
+  /// prefiere la fila de esta tienda, después la general (''), y sólo
+  /// si no hay ninguna se devuelve otra (para avisar dónde está).
+  Producto? _productoPorCodigo(String codigo) =>
+      filaProductoParaTienda(codigo, _tiendaVenta) ??
+      catalogoGlobal.where((p) => p.codigo == codigo).firstOrNull;
+
+  /// "Principal (3), Sucursal (2)": dónde hay unidades de ese código.
+  String _dondeHay(String codigo) {
+    final m = stockPorTienda(codigo);
+    if (m.isEmpty) return 'ninguna tienda';
+    return m.entries
+        .map((e) => '${nombreTiendaStock(e.key)} (${e.value})')
+        .join(', ');
+  }
+
+  /// Chip "Aquí: X · Total: Y" del producto/equipo detectado. Tocarlo
+  /// abre el desglose por tienda (informativo).
+  Widget _chipStockDetectado(Producto p, {int? aqui}) {
+    final indice = IndiceStockTiendas.global();
+    return ChipStockTiendas(
+      aqui: aqui ?? indice.enTienda(p.codigo, _tiendaVenta),
+      total: indice.global(p.codigo),
+      tienda: _tiendaVenta,
+      onTap: () => mostrarDesgloseStock(context, p, tiendaActual: _tiendaVenta),
+    );
+  }
+
   /// Aviso claro de por qué no se puede agregar ese producto.
   void _avisarOtraTienda(String queCosa, String ubicacion) {
     ScaffoldMessenger.of(context).showSnackBar(SnackBar(
@@ -28886,16 +29363,18 @@ class _FormularioFacturaState extends State<FormularioFactura>
             : "📱 ${imei.producto.nombre}";
         return;
       }
-      final prod = catalogoGlobal.where((p) => p.codigo == val).firstOrNull;
+      final prod = _productoPorCodigo(val);
       if (prod != null) {
         if (_productoEsDeOtraTienda(prod)) {
           _nombreProductoEncontrado =
-              "⛔ ${prod.nombre} — pertenece a ${prod.tienda}";
+              "⛔ ${prod.nombre} — aquí no hay; está en ${_dondeHay(prod.codigo)}";
           return;
         }
         final yaAgregados = _items.where((p) => p.codigo == val).length;
         final stockDisponible = prod.stockTotal - yaAgregados;
-        _nombreProductoEncontrado = "${prod.nombre} (Stock: $stockDisponible)";
+        // Aquí (lo vendible) + total en todas las tiendas.
+        _nombreProductoEncontrado = "${prod.nombre} "
+            "(Aquí: $stockDisponible · Total: ${stockGlobal(prod.codigo)})";
       }
     });
   }
@@ -28924,10 +29403,10 @@ class _FormularioFacturaState extends State<FormularioFactura>
     }
 
     // ── Buscar por código SKU (accesorios / productos sin IMEI) ──
-    final prod = catalogoGlobal.where((p) => p.codigo == val).firstOrNull;
+    final prod = _productoPorCodigo(val);
     if (prod != null) {
       if (_productoEsDeOtraTienda(prod)) {
-        _avisarOtraTienda('El producto ${prod.nombre}', prod.tienda);
+        _avisarOtraTienda('El producto ${prod.nombre}', _dondeHay(prod.codigo));
         return;
       }
       // Verificar stock disponible considerando los ya agregados en esta factura
@@ -29460,24 +29939,27 @@ class _FormularioFacturaState extends State<FormularioFactura>
             final rawFresh = await _Api.get('productos', {'codigo': entry.key});
             if (rawFresh == null) continue;
 
+            // Hay una fila por (codigo, tienda): se toma la de la tienda
+            // de la factura (o la general), no la primera que llegue.
             int stockActual;
+            Producto? filaFresca;
             if (rawFresh is List) {
-              final match = (rawFresh as List)
-                  .map((m) => Producto.fromMap(m as Map<String, dynamic>))
-                  .where((p) => p.codigo == entry.key)
-                  .firstOrNull;
-              stockActual = match?.stockManual ?? 0;
+              filaFresca = filaProductoParaTienda(entry.key, _tiendaVenta,
+                  productos: (rawFresh as List)
+                      .map((m) => Producto.fromMap(m as Map<String, dynamic>))
+                      .toList());
+              stockActual = filaFresca?.stockManual ?? 0;
             } else {
-              stockActual = Producto.fromMap(
-                rawFresh as Map<String, dynamic>).stockManual;
+              filaFresca = Producto.fromMap(rawFresh as Map<String, dynamic>);
+              stockActual = filaFresca.stockManual;
             }
 
             // Solo actualizamos la representación en memoria; el servidor
-            // ya tiene el valor correcto.
-            final prodEnSesion = catalogoGlobal
-                .where((p) => p.codigo == entry.key)
-                .firstOrNull;
-            if (prodEnSesion != null) {
+            // ya tiene el valor correcto. Si la fila que devolvió el
+            // backend es de otra tienda, no se toca la de esta.
+            final prodEnSesion = _productoPorCodigo(entry.key);
+            if (prodEnSesion != null && filaFresca != null &&
+                filaFresca.tienda.trim() == prodEnSesion.tienda.trim()) {
               prodEnSesion.stockManual = stockActual;
               prodEnSesion.stockTotal  = stockActual;
             }
@@ -30282,10 +30764,10 @@ class _FormularioFacturaState extends State<FormularioFactura>
         setS(() {});
         return;
       }
-      final prod = catalogoGlobal.where((p) => p.codigo == v).firstOrNull;
+      final prod = _productoPorCodigo(v);
       if (prod != null) {
         if (_productoEsDeOtraTienda(prod)) {
-          _avisarOtraTienda('El producto ${prod.nombre}', prod.tienda);
+          _avisarOtraTienda('El producto ${prod.nombre}', _dondeHay(prod.codigo));
           setS(() {});
           return;
         }
@@ -30428,6 +30910,14 @@ class _FormularioFacturaState extends State<FormularioFactura>
                                   fontSize: 13))),
                     ]),
                   ),
+                // Stock aquí + total global del modelo (informativo).
+                // Tocar → cuántos hay en cada tienda.
+                if (hayDetectado) ...[
+                  const SizedBox(height: 6),
+                  _chipStockDetectado(
+                      imeiDetectado?.producto ?? prodDetectado!,
+                      aqui: prodDetectado != null ? stockRestante : null),
+                ],
                 const SizedBox(height: 16),
                 // ── F/D por producto (solo aparece con producto detectado) ──
                 if (hayDetectado) ...[
@@ -30683,10 +31173,10 @@ class _FormularioFacturaState extends State<FormularioFactura>
       return;
     }
 
-    final prod = catalogoGlobal.where((p) => p.codigo == val).firstOrNull;
+    final prod = _productoPorCodigo(val);
     if (prod != null) {
       if (_productoEsDeOtraTienda(prod)) {
-        _avisarOtraTienda('El producto ${prod.nombre}', prod.tienda);
+        _avisarOtraTienda('El producto ${prod.nombre}', _dondeHay(prod.codigo));
         return;
       }
       final yaAgregados =
@@ -38153,12 +38643,30 @@ Future<void> generarReporteInventario({DateTime? desde, DateTime? hasta}) async 
   try {
     final rawP = await _Api.get('productos');
     final rawI = await _Api.get('stock_imei');
-    final imeis = (rawI as List?) ?? [];
-    for (var p in ((rawP as List?) ?? [])) {
-      final stockReal = p['categoria'] == 'Telefono'
-          ? imeis.where((i) =>
-              i['producto_codigo'] == p['codigo'] && (i['vendido'] ?? 0) == 0).length
-          : (int.tryParse(p['stock_manual'].toString()) ?? 0);
+    // Stock por tienda con el helper común. ANTES: se preguntaba
+    // `categoria == 'Telefono'` (ignoraba las demás categorías con
+    // IMEI) y se listaba cada fila de `productos`; como hay una fila
+    // por tienda, un accesorio salía repetido por tienda y un equipo
+    // contaba TODOS sus IMEIs en cada una de sus filas (inflado).
+    // AHORA: una línea por código, con el total y el desglose por
+    // tienda en la última columna. Las variantes van en su propia
+    // línea (no se suman al padre, para no contarlas dos veces).
+    final prods = ((rawP as List?) ?? [])
+        .map((m) => Producto.fromMap(Map<String, dynamic>.from(m as Map)))
+        .toList();
+    final regs = ((rawI as List?) ?? [])
+        .map((m) => ImeiRegistro.fromMap(Map<String, dynamic>.from(m as Map)))
+        .toList();
+    final indice =
+        IndiceStockTiendas.desde(prods, regs, sumarVariantes: false);
+    final yaListados = <String>{};
+    for (final prod in prods) {
+      if (!yaListados.add(prod.codigo)) continue; // una línea por código
+      final p = prod.toMap();
+      final stockReal = indice.global(prod.codigo);
+      final desglose = indice.porTienda(prod.codigo).entries
+          .map((e) => '${nombreTiendaStock(e.key)}: ${e.value}')
+          .join(' · ');
       final pCosto = double.tryParse(p['precio_costo']?.toString() ?? '0') ?? 0;
       final pVenta = double.tryParse(p['precio_venta']?.toString() ?? '0') ?? 0;
       valorTotalCosto += pCosto * stockReal;
@@ -38173,6 +38681,7 @@ Future<void> generarReporteInventario({DateTime? desde, DateTime? hasta}) async 
         stockReal,
         pCosto,
         pVenta,
+        desglose,
       ]);
       detalles.add({
         'codigo': (p['codigo'] ?? '').toString(),
@@ -38183,6 +38692,7 @@ Future<void> generarReporteInventario({DateTime? desde, DateTime? hasta}) async 
         'stock': stockReal,
         'precio_costo': pCosto,
         'precio_venta': pVenta,
+        'stock_por_tienda': desglose,
       });
     }
   } catch (e) {
@@ -38199,7 +38709,7 @@ Future<void> generarReporteInventario({DateTime? desde, DateTime? hasta}) async 
     hastaIso: hasta?.toIso8601String(),
     encabezados: const [
       'Código','Nombre','Categoría','Marca','Modelo',
-      'Stock','Precio Costo','Precio Venta'],
+      'Stock','Precio Costo','Precio Venta','Stock por tienda'],
     filas: filas,
     detalles: detalles,
     resumen: {
