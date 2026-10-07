@@ -53,3 +53,6 @@ android/key.properties
 
 # Datos locales de Claude Code
 .claude/
+
+# Datos de conexion del script de publicacion
+tool/.deploy.env
