@@ -6895,6 +6895,114 @@ class ListaPrecio {
   /// true si alguna columna tiene funcion configurada.
   bool get tieneFormulas => columnas.any((c) => !c.formula.esManual);
 
+  // ── PRECIO BASE E INICIAL/CUOTA POR COLUMNA ────────────────
+  // La inicial y la cuota se calculan sobre la PRIMERA columna (el
+  // precio base). Para mostrarlas sobre otra columna (consulta rápida
+  // con la columna "Cashea" elegida, por ejemplo) se usan los mismos %
+  // y cuotas del producto; los montos fijados a mano sólo valen para
+  // la columna base, que es donde el admin los escribió.
+
+  /// Precio base de [it]: el de la primera columna. Si está en 0 (o no
+  /// existe) se toma la primera columna con precio, como hacía el PDF.
+  double precioBaseDe(ItemListaPrecio it) {
+    if (columnas.isEmpty) return 0;
+    final p = it.preciosPorColumna[columnas.first.nombre] ?? 0;
+    if (p > 0) return p;
+    for (final c in columnas) {
+      final v = it.preciosPorColumna[c.nombre] ?? 0;
+      if (v > 0) return v;
+    }
+    return 0;
+  }
+
+  /// true si [col] es la columna base (la primera).
+  bool esColumnaBase(ColumnaPrecio col) =>
+      columnas.isNotEmpty && columnas.first.nombre == col.nombre;
+
+  /// Inicial de [it] calculada sobre el precio de la columna [col].
+  double inicialEnColumna(ItemListaPrecio it, ColumnaPrecio col) {
+    final precio = it.preciosPorColumna[col.nombre] ?? 0;
+    if (esColumnaBase(col)) return inicialDe(it, precioBaseDe(it));
+    return redondearPrecio(precio * (pctInicialDe(it) / 100));
+  }
+
+  /// Cuota de [it] calculada sobre el precio de la columna [col].
+  double cuotaEnColumna(ItemListaPrecio it, ColumnaPrecio col) {
+    if (esColumnaBase(col)) return cuotaDe(it, precioBaseDe(it));
+    if (!tieneCuotas) return 0;
+    final precio = it.preciosPorColumna[col.nombre] ?? 0;
+    final n = cuotasDe(it) > 0 ? cuotasDe(it) : 1;
+    final resto = precio - inicialEnColumna(it, col);
+    return redondearPrecio(resto * (1 + porcentajeRecargoCuotas / 100) / n);
+  }
+
+  /// % de inicial que realmente representa la inicial de [it]. Si el
+  /// admin fijó el monto a mano, el % se deduce del monto (si no, el
+  /// documento diría "40%" junto a un monto que no es el 40%).
+  double pctInicialEfectivo(ItemListaPrecio it) {
+    if (it.inicialManual == null) return pctInicialDe(it);
+    final base = precioBaseDe(it);
+    if (base <= 0) return pctInicialDe(it);
+    return it.inicialManual! / base * 100;
+  }
+
+  // ── STOCK ──────────────────────────────────────────────────
+  // Las listas sólo deben mostrar productos con existencia. Los items
+  // agotados NO se borran de la lista (conservan sus precios manuales
+  // para cuando vuelva a entrar mercancía): se ocultan al mostrar,
+  // exportar y consultar. El stock se calcula en vivo (todas las
+  // tiendas + variantes) con `stockVivoDeItem`.
+
+  /// Items con stock disponible, en el orden de la lista.
+  List<ItemListaPrecio> get itemsConStock =>
+      items.where((it) => stockVivoDeItem(it) > 0).toList();
+
+  // ── MONTOS FIJADOS A MANO ──────────────────────────────────
+  // `inicialManual` y `cuotaManual` congelan montos. Cuando cambian
+  // las condiciones generales de la lista (% inicial, cuotas, recargo)
+  // esos montos quedan viejos: estas funciones los cuentan/limpian.
+
+  /// Cuántos montos fijos (inicial o cuota) quedan desactualizados al
+  /// cambiar las condiciones generales. Un cambio de % sólo afecta a
+  /// los productos que usan el % general (los que tienen % propio no
+  /// cambian); igual con las cuotas. El recargo es de toda la lista.
+  int contarMontosFijosAfectados({
+    bool cambioPct = false,
+    bool cambioCuotas = false,
+    bool cambioRecargo = false,
+  }) =>
+      _montosFijos(cambioPct, cambioCuotas, cambioRecargo, limpiar: false);
+
+  /// Quita esos montos fijos para que inicial y cuota se recalculen
+  /// solas con las condiciones nuevas. Devuelve cuántos productos
+  /// cambiaron.
+  int limpiarMontosFijosAfectados({
+    bool cambioPct = false,
+    bool cambioCuotas = false,
+    bool cambioRecargo = false,
+  }) =>
+      _montosFijos(cambioPct, cambioCuotas, cambioRecargo, limpiar: true);
+
+  int _montosFijos(bool cambioPct, bool cambioCuotas, bool cambioRecargo,
+      {required bool limpiar}) {
+    var n = 0;
+    for (final it in items) {
+      // Cambia el % general → cambian inicial y (por el resto) cuota.
+      final tocaInicial = cambioPct && it.pctInicialOverride == null;
+      final tocaCuota = tocaInicial ||
+          cambioRecargo ||
+          (cambioCuotas && it.cuotasOverride == null);
+      final afectado = (tocaInicial && it.inicialManual != null) ||
+          (tocaCuota && it.cuotaManual != null);
+      if (!afectado) continue;
+      n++;
+      if (!limpiar) continue;
+      if (tocaInicial) it.inicialManual = null;
+      if (tocaCuota) it.cuotaManual = null;
+    }
+    return n;
+  }
+
   Map<String, dynamic> toMap() => {
     if (id != null) 'id': id,
     'nombre': nombre,
@@ -7115,6 +7223,438 @@ class ListaPrecio {
       items: items,
     );
   }
+}
+
+// ============================================================
+//  LISTAS DE PRECIOS: STOCK, PRECIOS POR DEFECTO Y SINCRONIZACIÓN
+//  CON EL INVENTARIO
+// ============================================================
+
+/// Índice de stock para las listas de precios. Calcular el stock de
+/// cada item recorriendo el catálogo y los IMEIs en cada repintado es
+/// muy caro (cientos de items × miles de IMEIs), así que se arma un
+/// índice por código y se rehace cuando cambian las listas globales
+/// (o a los pocos segundos, por si se modificaron en el lugar).
+class _IndiceStockListas {
+  static List<Producto>? _cat;
+  static List<ImeiRegistro>? _imeis;
+  static int _lenCat = -1;
+  static int _lenImei = -1;
+  static DateTime _hecho = DateTime(2000);
+
+  /// Suma de `stockManual` de TODAS las filas (una por tienda) de cada
+  /// código.
+  static final Map<String, int> _manual = {};
+
+  /// IMEIs no vendidos por código de producto (todas las tiendas).
+  static final Map<String, int> _imeiDisp = {};
+
+  /// Códigos de las variantes de cada producto padre.
+  static final Map<String, Set<String>> _hijos = {};
+
+  static void invalidar() => _cat = null;
+
+  static void _asegurar() {
+    final cat = catalogoGlobal;
+    final im = stockImeiGlobal;
+    if (identical(cat, _cat) &&
+        identical(im, _imeis) &&
+        cat.length == _lenCat &&
+        im.length == _lenImei &&
+        DateTime.now().difference(_hecho).inSeconds < 5) {
+      return;
+    }
+    _manual.clear();
+    _imeiDisp.clear();
+    _hijos.clear();
+    for (final p in cat) {
+      _manual[p.codigo] = (_manual[p.codigo] ?? 0) + p.stockManual;
+      if (p.productoPadreCodigo.isNotEmpty) {
+        _hijos.putIfAbsent(p.productoPadreCodigo, () => <String>{})
+            .add(p.codigo);
+      }
+    }
+    for (final i in im) {
+      if (i.vendido) continue;
+      final c = i.producto.codigo;
+      _imeiDisp[c] = (_imeiDisp[c] ?? 0) + 1;
+    }
+    _cat = cat;
+    _imeis = im;
+    _lenCat = cat.length;
+    _lenImei = im.length;
+    _hecho = DateTime.now();
+  }
+
+  /// Stock global de [p] (todas las tiendas + variantes) o null si no
+  /// se puede saber (los datos de stock todavía no están cargados).
+  static int? stockDe(Producto p) {
+    _asegurar();
+    final codigos = <String>{p.codigo, ...?_hijos[p.codigo]};
+    if (CategoriasProductos.usaIMEI(p.categoria)) {
+      // Sin IMEIs cargados no hay forma de saberlo: mejor no ocultar
+      // nada que ocultar todo.
+      if (_imeis == null || _imeis!.isEmpty) return null;
+      var n = 0;
+      for (final c in codigos) {
+        n += _imeiDisp[c] ?? 0;
+      }
+      return n;
+    }
+    if (!_manual.containsKey(p.codigo)) return null;
+    var n = 0;
+    for (final c in codigos) {
+      n += _manual[c] ?? 0;
+    }
+    return n < 0 ? 0 : n;
+  }
+}
+
+/// Stock disponible de [p] sumando TODAS las tiendas y sus variantes
+/// (teléfonos: IMEIs no vendidos; resto: stock manual). Devuelve 0 si
+/// los datos de stock no están cargados.
+int stockGlobalDeProducto(Producto p) => _IndiceStockListas.stockDe(p) ?? 0;
+
+/// Stock EN VIVO de un item de lista. Se recalcula con los datos
+/// actuales del inventario (así un producto que se agotó después de
+/// poblar la lista deja de mostrarse) y se anota en el item. Si los
+/// datos de stock no están cargados, usa el último valor guardado.
+int stockVivoDeItem(ItemListaPrecio it) {
+  final v = _IndiceStockListas.stockDe(it.producto);
+  if (v == null) return it.stockDisponible;
+  it.stockDisponible = v;
+  return v;
+}
+
+/// Fuerza a recalcular el índice de stock (después de recargar
+/// productos o IMEIs en el lugar).
+void invalidarStockListas() => _IndiceStockListas.invalidar();
+
+/// Trae del servidor el catálogo y los IMEIs para que las listas
+/// muestren el stock real. Si [forzar] es false sólo carga lo que esté
+/// vacío.
+Future<void> cargarStockParaListas({bool forzar = false}) async {
+  try {
+    final traerProd = forzar || catalogoGlobal.isEmpty;
+    final traerImei = forzar || stockImeiGlobal.isEmpty;
+    if (!traerProd && !traerImei) return;
+    final res = await Future.wait([
+      traerProd ? _Api.get('productos') : Future<dynamic>.value(null),
+      traerImei ? _Api.get('stock_imei') : Future<dynamic>.value(null),
+    ]);
+    // Productos primero: ImeiRegistro.fromMap los usa para completarse.
+    if (res[0] is List && (res[0] as List).isNotEmpty) {
+      catalogoGlobal = (res[0] as List)
+          .map((m) => Producto.fromMap(Map<String, dynamic>.from(m as Map)))
+          .toList();
+    }
+    if (res[1] is List) {
+      stockImeiGlobal = (res[1] as List)
+          .map((m) =>
+              ImeiRegistro.fromMap(Map<String, dynamic>.from(m as Map)))
+          .toList();
+    }
+    // Igual que `cargarTodosLosDatos`: dejar `stockTotal` calculado en
+    // los productos, porque otras pantallas leen `catalogoGlobal`.
+    if (traerProd || traerImei) {
+      final imeisPorCodigo = <String, int>{};
+      for (final i in stockImeiGlobal) {
+        if (i.vendido) continue;
+        imeisPorCodigo[i.producto.codigo] =
+            (imeisPorCodigo[i.producto.codigo] ?? 0) + 1;
+      }
+      for (final p in catalogoGlobal) {
+        p.stockTotal = CategoriasProductos.usaIMEI(p.categoria)
+            ? (imeisPorCodigo[p.codigo] ?? 0)
+            : p.stockManual;
+      }
+    }
+    _IndiceStockListas.invalidar();
+  } catch (e) {
+    debugPrint('[ListasPrecios] No se pudo cargar el stock: $e');
+  }
+}
+
+/// Precio "por defecto" con que se puebla una lista: precio de venta +
+/// % adicional (redondeado en USD) y, si la lista es en bolívares, por
+/// la tasa (redondeado otra vez). Es el mismo cálculo de `_poblarLista`
+/// y `_autoPoblar`.
+double precioPorDefectoEnLista(ListaPrecio lista, double precioVenta,
+    {double? tasa}) {
+  final factor = 1 + (lista.porcentajeAdicional / 100);
+  final usd = redondearPrecio(precioVenta * factor);
+  if (!lista.esEnBolivares) return usd;
+  final t = tasa ??
+      (ConfigSistema.tasaCambio > 0
+          ? ConfigSistema.tasaCambio
+          : lista.tasaDelDia);
+  return redondearPrecio(usd * t);
+}
+
+/// Recalcula el item en la posición [idx] de [lista] cuando el
+/// producto pasó de [anterior] a [nuevo] (cambió su precio de venta o
+/// de costo en el inventario). Devuelve cuántos valores cambiaron.
+///
+/// Reglas para no pisar el trabajo del admin:
+///   · Columnas con función AUTOMÁTICA: se recalculan siempre.
+///   · Columnas MANUALES: sólo si su precio era el "por defecto"
+///     calculado con el precio viejo (o sea, nadie lo tocó a mano).
+///     Si el admin había puesto otro precio, se respeta.
+///   · Inicial/cuota fijadas a mano: si coincidían con lo que daba el
+///     cálculo con el precio viejo se liberan (vuelven a calcularse
+///     solas); si eran otro monto, se respetan.
+int recalcularItemPorCambioDePrecio(
+    ListaPrecio lista, int idx, Producto anterior, Producto nuevo) {
+  final viejo = lista.items[idx];
+  var cambios = 0;
+
+  // Montos automáticos con el precio viejo (para comparar los fijos).
+  final baseVieja = lista.precioBaseDe(viejo);
+  final inicialAutoVieja =
+      redondearPrecio(baseVieja * (lista.pctInicialDe(viejo) / 100));
+  final cuotaAutoVieja = lista.cuotaDe(
+      ItemListaPrecio(
+        producto: viejo.producto,
+        preciosPorColumna: viejo.preciosPorColumna,
+        inicialManual: viejo.inicialManual,
+        pctInicialOverride: viejo.pctInicialOverride,
+        cuotasOverride: viejo.cuotasOverride,
+      ),
+      baseVieja);
+
+  final it = ItemListaPrecio(
+    producto: nuevo,
+    preciosPorColumna: Map<String, double>.of(viejo.preciosPorColumna),
+    stockDisponible: viejo.stockDisponible,
+    inicialManual: viejo.inicialManual,
+    cuotaManual: viejo.cuotaManual,
+    pctInicialOverride: viejo.pctInicialOverride,
+    cuotasOverride: viejo.cuotasOverride,
+  );
+
+  // 1) Columnas manuales que seguían el precio por defecto. En listas
+  //    en Bs se prueba con la tasa guardada y con la del sistema (la
+  //    lista pudo poblarse con cualquiera de las dos).
+  final tasas = <double>[
+    if (lista.esEnBolivares) ...[
+      if (lista.tasaDelDia > 0) lista.tasaDelDia,
+      if (ConfigSistema.tasaCambio > 0) ConfigSistema.tasaCambio,
+    ] else
+      1.0,
+  ];
+  final tolerancia = lista.esEnBolivares ? 1.0 : 0.01;
+  for (final col in lista.columnas) {
+    if (!col.formula.esManual) continue;
+    final actual = it.preciosPorColumna[col.nombre];
+    if (actual == null) continue;
+    for (final t in tasas) {
+      final defViejo =
+          precioPorDefectoEnLista(lista, anterior.precioVenta, tasa: t);
+      if ((actual - defViejo).abs() > tolerancia) continue;
+      final defNuevo =
+          precioPorDefectoEnLista(lista, nuevo.precioVenta, tasa: t);
+      if ((defNuevo - actual).abs() > 0.0001) {
+        it.preciosPorColumna[col.nombre] = defNuevo;
+        cambios++;
+      }
+      break;
+    }
+  }
+
+  // 2) Columnas con función automática (pueden depender de la venta,
+  //    del costo o de otra columna que acabamos de cambiar).
+  lista.items[idx] = it;
+  cambios += lista.aplicarFormulas();
+
+  // 3) Montos fijos de financiamiento que eran el cálculo automático.
+  if (lista.esFinanciamiento) {
+    if (it.inicialManual != null &&
+        (it.inicialManual! - inicialAutoVieja).abs() < 0.01) {
+      it.inicialManual = null;
+      cambios++;
+    }
+    if (it.cuotaManual != null &&
+        (it.cuotaManual! - cuotaAutoVieja).abs() < 0.01) {
+      it.cuotaManual = null;
+      cambios++;
+    }
+  }
+  return cambios;
+}
+
+/// Cuando cambia el precio (venta o costo) de un producto en el
+/// inventario, actualiza TODAS las listas de precios que lo tienen y
+/// las guarda en el servidor. Devuelve cuántas listas se actualizaron.
+///
+/// Se llama sin esperar (no bloquea el guardado del producto).
+Future<int> actualizarListasPorCambioDePrecio(
+    Producto anterior, Producto nuevo) async {
+  final cambioVenta =
+      (anterior.precioVenta - nuevo.precioVenta).abs() > 0.0001;
+  final cambioCosto =
+      (anterior.precioCosto - nuevo.precioCosto).abs() > 0.0001;
+  if (!cambioVenta && !cambioCosto) return 0;
+  try {
+    // `ListaPrecio.fromMap` descarta los items cuyo producto no está en
+    // el catálogo: sin catálogo cargado se perderían al guardar.
+    if (catalogoGlobal.isEmpty) await cargarStockParaListas();
+    if (catalogoGlobal.isEmpty) return 0;
+    final raw = await _Api.get('listas_precios');
+    if (raw is! List) return 0;
+    final listas = <ListaPrecio>[];
+    var actualizadas = 0;
+    for (final m in raw) {
+      if (m is! Map) continue;
+      final mapa = Map<String, dynamic>.from(m);
+      final lista = ListaPrecio.fromMap(mapa);
+      listas.add(lista);
+      if (lista.id == null) continue;
+      final idx = lista.items
+          .indexWhere((it) => it.producto.codigo == anterior.codigo);
+      if (idx < 0) continue;
+      // Seguridad: si al leer la lista se cayó algún item (producto
+      // que no está en el catálogo de este equipo), NO la guardamos:
+      // el PUT reemplaza la lista entera y lo borraría del servidor.
+      final crudos =
+          mapa['items'] is List ? (mapa['items'] as List).length : 0;
+      if (crudos != lista.items.length) {
+        debugPrint('[ListasPrecios] "${lista.nombre}" no se actualiza: '
+            'faltan productos en el catálogo local');
+        continue;
+      }
+      final n = recalcularItemPorCambioDePrecio(lista, idx, anterior, nuevo);
+      if (n == 0) continue;
+      try {
+        await _Api.put('listas_precios', lista.id.toString(), lista.toMap());
+        actualizadas++;
+      } catch (e) {
+        debugPrint('[ListasPrecios] Error guardando "${lista.nombre}": $e');
+      }
+    }
+    listasPreciosGlobal = listas;
+    debugPrint('[ListasPrecios] ${nuevo.codigo}: $actualizadas lista(s) '
+        'actualizada(s) por cambio de precio');
+    return actualizadas;
+  } catch (e) {
+    debugPrint('[ListasPrecios] Error actualizando por cambio de precio: $e');
+    return 0;
+  }
+}
+
+/// Pregunta si se recalculan los montos de inicial/cuota que el admin
+/// había fijado a mano, ahora que cambiaron las condiciones de la
+/// lista. Devuelve true para recalcular (la opción recomendada).
+Future<bool> preguntarRecalcularMontosFijos(
+    BuildContext context, int cantidad) async {
+  if (cantidad <= 0) return false;
+  final r = await showDialog<bool>(
+    context: context,
+    barrierDismissible: false,
+    builder: (ctx) => AlertDialog(
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+      title: const Row(children: [
+        Icon(Icons.calculate, color: AppColors.royalBlue),
+        SizedBox(width: 8),
+        Expanded(child: Text('Montos fijados a mano')),
+      ]),
+      content: Text(
+          '$cantidad producto${cantidad == 1 ? " tiene" : "s tienen"} la '
+          'inicial o la cuota escrita a mano con las condiciones '
+          'anteriores.\n\n'
+          '¿Recalcularlos con las condiciones nuevas? Si los mantienes, '
+          'esos productos seguirán mostrando los montos viejos.',
+          style: const TextStyle(fontSize: 13)),
+      actions: [
+        TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Mantener montos')),
+        ElevatedButton.icon(
+          icon: const Icon(Icons.refresh, size: 18),
+          label: const Text('Recalcular'),
+          style: ElevatedButton.styleFrom(
+              backgroundColor: AppColors.royalBlue,
+              foregroundColor: Colors.white),
+          onPressed: () => Navigator.pop(ctx, true),
+        ),
+      ],
+    ),
+  );
+  return r == true;
+}
+
+/// Guarda o comparte un archivo exportado de una lista de precios.
+///
+///   · Android / iOS: menú nativo de compartir (WhatsApp, etc.).
+///   · Escritorio: diálogo "Guardar como" (si falla, va a Descargas),
+///     se escribe el archivo y se abre con la app predeterminada.
+///     share_plus en Windows no sirve para archivos.
+///   · Web: descarga del navegador.
+///
+/// Devuelve la ruta donde quedó guardado (sólo en escritorio) o null.
+/// Lanza [StateError] con mensaje 'cancelado' si el usuario cerró el
+/// diálogo de guardar.
+Future<String?> guardarArchivoDeLista(
+    Uint8List bytes, String nombre, String mimeType,
+    {String? texto}) async {
+  if (kIsWeb) {
+    await descargarArchivo(bytes, nombre, mimeType);
+    return null;
+  }
+  if (Platform.isAndroid || Platform.isIOS) {
+    final dir = await getTemporaryDirectory();
+    final f = File('${dir.path}/$nombre');
+    await f.writeAsBytes(bytes, flush: true);
+    await SharePlus.instance.share(ShareParams(
+      files: [XFile(f.path, mimeType: mimeType, name: nombre)],
+      text: texto,
+    ));
+    return null;
+  }
+  // ── Escritorio ──
+  final punto = nombre.lastIndexOf('.');
+  final ext = punto > 0 ? nombre.substring(punto + 1).toLowerCase() : '';
+  String? ruta;
+  var dialogoFallo = false;
+  try {
+    ruta = await FilePicker.platform.saveFile(
+      dialogTitle: 'Guardar lista de precios',
+      fileName: nombre,
+      type: ext.isEmpty ? FileType.any : FileType.custom,
+      allowedExtensions: ext.isEmpty ? null : [ext],
+    );
+  } catch (e) {
+    debugPrint('[guardarArchivoDeLista] saveFile falló: $e');
+    dialogoFallo = true;
+  }
+  if (ruta == null && !dialogoFallo) throw StateError('cancelado');
+  if (ruta == null) {
+    Directory? carpeta;
+    try {
+      carpeta = await getDownloadsDirectory();
+    } catch (_) {}
+    if (carpeta == null) {
+      final home = Platform.isWindows
+          ? Platform.environment['USERPROFILE']
+          : Platform.environment['HOME'];
+      final desc = home == null
+          ? null
+          : Directory('$home${Platform.pathSeparator}Downloads');
+      carpeta = (desc != null && await desc.exists())
+          ? desc
+          : await getApplicationDocumentsDirectory();
+    }
+    ruta = '${carpeta.path}${Platform.pathSeparator}$nombre';
+  }
+  if (ext.isNotEmpty && !ruta.toLowerCase().endsWith('.$ext')) {
+    ruta = '$ruta.$ext';
+  }
+  await File(ruta).writeAsBytes(bytes, flush: true);
+  try {
+    await OpenFilex.open(ruta);
+  } catch (e) {
+    debugPrint('[guardarArchivoDeLista] No se pudo abrir: $e');
+  }
+  return ruta;
 }
 
 List<ListaPrecio> listasPreciosGlobal = [];
@@ -26609,6 +27149,28 @@ class _FormularioProductoState extends State<FormularioProducto> {
                 'Refresca el inventario y vuelve a intentar.';
         }
         await _Api.put('productos', fila['id'].toString(), prod.toMap());
+        // ── Listas de precios ──
+        // Si cambió el precio de venta (o el costo, que pueden usar las
+        // funciones de columna), las listas que tienen este producto se
+        // recalculan y se guardan en el servidor. Corre en segundo
+        // plano para no demorar el guardado; respeta los precios que
+        // el admin escribió a mano en la lista.
+        final anterior = widget.productoAEditar!;
+        if ((anterior.precioVenta - prod.precioVenta).abs() > 0.0001 ||
+            (anterior.precioCosto - prod.precioCosto).abs() > 0.0001) {
+          ScaffoldMessengerState? messenger;
+          if (mounted) messenger = ScaffoldMessenger.maybeOf(context);
+          unawaited(actualizarListasPorCambioDePrecio(anterior, prod)
+              .then((n) {
+            if (n > 0) {
+              messenger?.showSnackBar(SnackBar(
+                content: Text('Listas de precios actualizadas con el '
+                    'nuevo precio de ${prod.nombre}: $n'),
+                backgroundColor: AppColors.primaryBlue,
+                duration: const Duration(seconds: 3)));
+            }
+          }));
+        }
       } else {
         await _Api.post('productos', prod.toMap());
       }
@@ -31313,10 +31875,187 @@ class _VentanaConsultaRapidaPreciosState
   String _filtroMarca = "Todas";
   bool _cargando = true;
 
+  // ── Columna elegida por lista ─────────────────────────────
+  // Una lista puede tener varias columnas de precio (Divisa, Cashea,
+  // Krece…). Antes se mostraban TODAS mezcladas y el vendedor no sabía
+  // cuál cantar. Ahora, para cada lista con más de una columna, se
+  // elige UNA (o "todas" si se quiere a propósito). La elección se
+  // guarda en el equipo y se pregunta al abrir si falta alguna.
+
+  /// Clave de lista (ver `ConfigSistema.claveConsultaRapida`) → nombre
+  /// de la columna elegida, o [_todasLasColumnas].
+  Map<String, String> _columnaPorLista = {};
+  static const _todasLasColumnas = '*';
+  static const _prefColumnas = 'consulta_rapida_columna_por_lista';
+
   @override
   void initState() {
     super.initState();
     _cargarDatos();
+  }
+
+  /// % con a lo sumo un decimal ("40", "37.5").
+  static String _pctTexto(double v) {
+    final r = (v * 10).roundToDouble() / 10;
+    return r % 1 == 0 ? r.toStringAsFixed(0) : r.toStringAsFixed(1);
+  }
+
+  /// Columnas de precio reales de [l] (sin las virtuales __x__).
+  static List<ColumnaPrecio> _columnasReales(ListaPrecio l) => l.columnas
+      .where((c) => !FormulaColumna.esNombreVirtual(c.nombre))
+      .toList();
+
+  /// Columnas que se muestran de [l] según la elección guardada. Si la
+  /// lista tiene una sola columna, es ésa. Si la elección no existe más
+  /// (columna renombrada o borrada) se usa la primera hasta que se
+  /// elija otra.
+  List<ColumnaPrecio> _columnasAMostrar(ListaPrecio l) {
+    final cols = _columnasReales(l);
+    if (cols.length <= 1) return cols;
+    final elegida = _columnaPorLista[ConfigSistema.claveConsultaRapida(l)];
+    if (elegida == _todasLasColumnas) return cols;
+    final c = cols.where((c) => c.nombre == elegida).firstOrNull;
+    return [c ?? cols.first];
+  }
+
+  /// Listas visibles con varias columnas y sin una elección válida.
+  List<ListaPrecio> _listasSinColumnaElegida() =>
+      listasPreciosGlobal.where(_listaEsVisible).where((l) {
+        final cols = _columnasReales(l);
+        if (cols.length <= 1) return false;
+        final e = _columnaPorLista[ConfigSistema.claveConsultaRapida(l)];
+        return e == null ||
+            (e != _todasLasColumnas && !cols.any((c) => c.nombre == e));
+      }).toList();
+
+  Future<void> _leerColumnasElegidas() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final raw = prefs.getString(_prefColumnas);
+      if (raw == null || raw.isEmpty) return;
+      final j = jsonDecode(raw);
+      if (j is Map) {
+        _columnaPorLista = j.map((k, v) => MapEntry('$k', '$v'));
+      }
+    } catch (e) {
+      debugPrint('[ConsultaRapida] No se pudo leer columnas elegidas: $e');
+    }
+  }
+
+  Future<void> _guardarColumnasElegidas() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString(_prefColumnas, jsonEncode(_columnaPorLista));
+    } catch (e) {
+      debugPrint('[ConsultaRapida] No se pudo guardar columnas: $e');
+    }
+  }
+
+  /// Pregunta qué columna usar en cada lista con varias columnas.
+  /// [soloPendientes] limita el diálogo a las listas que todavía no
+  /// tienen una elección (lo que se hace al abrir la pantalla).
+  Future<void> _elegirColumnas({bool soloPendientes = false}) async {
+    final listas = soloPendientes
+        ? _listasSinColumnaElegida()
+        : listasPreciosGlobal
+            .where(_listaEsVisible)
+            .where((l) => _columnasReales(l).length > 1)
+            .toList();
+    if (listas.isEmpty) {
+      if (!soloPendientes && mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+          content: Text('Ninguna de las listas mostradas tiene más de '
+              'una columna de precio'),
+          backgroundColor: AppColors.statusOrange));
+      }
+      return;
+    }
+    // Selección de trabajo: lo guardado o, si no hay, la primera columna.
+    final sel = <String, String>{
+      for (final l in listas)
+        ConfigSistema.claveConsultaRapida(l): () {
+          final e = _columnaPorLista[ConfigSistema.claveConsultaRapida(l)];
+          final cols = _columnasReales(l);
+          if (e == _todasLasColumnas || cols.any((c) => c.nombre == e)) {
+            return e!;
+          }
+          return cols.first.nombre;
+        }(),
+    };
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => StatefulBuilder(builder: (ctx, setDlg) => AlertDialog(
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        title: const Row(children: [
+          Icon(Icons.view_column, color: AppColors.royalBlue),
+          SizedBox(width: 8),
+          Expanded(child: Text('¿Qué precio usar?')),
+        ]),
+        content: SizedBox(
+          width: 440,
+          child: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text(
+                    'Estas listas tienen varias columnas de precio. Elegí '
+                    'cuál se muestra en la consulta para no mezclarlas.',
+                    style: TextStyle(
+                        fontSize: 12, color: AppColors.textSecondary)),
+                const SizedBox(height: 10),
+                for (final l in listas) ...[
+                  Text(_etiquetaLista(l),
+                      style: const TextStyle(
+                          fontSize: 13, fontWeight: FontWeight.bold)),
+                  const SizedBox(height: 4),
+                  Wrap(spacing: 6, runSpacing: 4, children: [
+                    for (final c in _columnasReales(l))
+                      ChoiceChip(
+                        label: Text(c.nombre,
+                            style: const TextStyle(fontSize: 12)),
+                        selected:
+                            sel[ConfigSistema.claveConsultaRapida(l)] ==
+                                c.nombre,
+                        onSelected: (_) => setDlg(() =>
+                            sel[ConfigSistema.claveConsultaRapida(l)] =
+                                c.nombre),
+                      ),
+                    ChoiceChip(
+                      label: const Text('Todas',
+                          style: TextStyle(fontSize: 12)),
+                      selected: sel[ConfigSistema.claveConsultaRapida(l)] ==
+                          _todasLasColumnas,
+                      onSelected: (_) => setDlg(() =>
+                          sel[ConfigSistema.claveConsultaRapida(l)] =
+                              _todasLasColumnas),
+                    ),
+                  ]),
+                  const SizedBox(height: 12),
+                ],
+              ],
+            ),
+          ),
+        ),
+        actions: [
+          if (!soloPendientes)
+            TextButton(
+                onPressed: () => Navigator.pop(ctx, false),
+                child: const Text('Cancelar')),
+          ElevatedButton.icon(
+            icon: const Icon(Icons.check, size: 18),
+            label: const Text('Usar estos precios'),
+            onPressed: () => Navigator.pop(ctx, true),
+          ),
+        ],
+      )),
+    );
+    // Al abrir la pantalla, cerrar el diálogo sin elegir deja la
+    // primera columna (igual queda guardado para no volver a molestar).
+    if (ok != true && !soloPendientes) return;
+    _columnaPorLista.addAll(sel);
+    await _guardarColumnasElegidas();
+    if (mounted) setState(() {});
   }
 
   /// Trae el catálogo y las listas de precios del servidor.
@@ -31349,6 +32088,11 @@ class _VentanaConsultaRapidaPreciosState
       // ids. Es una sola vez por equipo.
       await ConfigSistema.migrarSeleccionConsultaRapidaAIds(
           listasPreciosGlobal);
+      // Stock real (catálogo + IMEIs de todas las tiendas): la consulta
+      // sólo muestra productos con existencia. Se trae fresco cada vez
+      // para no ofrecer lo que ya se vendió o se agotó.
+      await cargarStockParaListas(forzar: true);
+      await _leerColumnasElegidas();
     } catch (e) {
       debugPrint('[ConsultaRapida] Error cargando datos: $e');
       if (mounted) {
@@ -31358,6 +32102,11 @@ class _VentanaConsultaRapidaPreciosState
       }
     } finally {
       if (mounted) setState(() => _cargando = false);
+    }
+    // Si alguna lista visible tiene varias columnas (Divisa, Cashea,
+    // Krece…) y todavía no se eligió cuál usar, se pregunta ahora.
+    if (mounted && _listasSinColumnaElegida().isNotEmpty) {
+      await _elegirColumnas(soloPendientes: true);
     }
   }
 
@@ -31370,8 +32119,15 @@ class _VentanaConsultaRapidaPreciosState
   /// Obtiene todos los productos únicos del catálogo (excluyendo
   /// subproductos/variantes — solo padres).
   List<Producto> _productosFiltrados() {
+    // El catálogo trae una fila por tienda del mismo código: cada
+    // producto se muestra una sola vez.
+    final vistos = <String>{};
     final productos = catalogoGlobal.where((p) {
       if (p.esSubproducto) return false;
+      if (!vistos.add(p.codigo)) return false;
+      // Sólo productos con stock (todas las tiendas + variantes). Si
+      // el stock no se pudo cargar no se oculta nada.
+      if ((_IndiceStockListas.stockDe(p) ?? 1) <= 0) return false;
       if (_filtroCategoria != "Todas" && p.categoria != _filtroCategoria) {
         return false;
       }
@@ -31430,7 +32186,13 @@ class _VentanaConsultaRapidaPreciosState
   /// mostrárselos al usuario en los avisos.
   List<String> get _nombresListasVisibles => listasPreciosGlobal
       .where(_listaEsVisible)
-      .map(_etiquetaLista)
+      .map((l) {
+        // Con la columna que se está usando, si la lista tiene varias.
+        if (_columnasReales(l).length <= 1) return _etiquetaLista(l);
+        final cols = _columnasAMostrar(l);
+        final txt = cols.length == 1 ? cols.first.nombre : 'todas';
+        return '${_etiquetaLista(l)} ($txt)';
+      })
       .toList();
 
   /// Abre el selector de listas. Sólo lo llama el dueño.
@@ -31563,6 +32325,11 @@ class _VentanaConsultaRapidaPreciosState
     await ConfigSistema.guardarListasConsultaRapida(elegidas);
     if (!mounted) return;
     setState(() {});
+    // Las listas recién agregadas pueden tener varias columnas.
+    if (_listasSinColumnaElegida().isNotEmpty) {
+      await _elegirColumnas(soloPendientes: true);
+      if (!mounted) return;
+    }
     ScaffoldMessenger.of(context).showSnackBar(SnackBar(
       content: Text(elegidas.isEmpty
           ? 'Se volvió a la selección de fábrica'
@@ -31586,21 +32353,30 @@ class _VentanaConsultaRapidaPreciosState
               stockDisponible: 0,
               preciosPorColumna: {}));
       if (item.preciosPorColumna.isEmpty) continue;
-      for (final col in lista.columnas) {
+      // Sólo la columna elegida para esta lista (o todas, si así se
+      // eligió): antes salían todas mezcladas.
+      final cols = _columnasAMostrar(lista);
+      final variasColumnas = _columnasReales(lista).length > 1;
+      for (final col in cols) {
         final precio = item.preciosPorColumna[col.nombre];
         if (precio == null || precio == 0) continue;
         resultados.add({
           'lista': lista.nombre,
           'columna': col.nombre,
+          'varias_columnas': variasColumnas,
           'precio': precio,
           'moneda': lista.esEnBolivares ? 'Bs' : '\$',
           'es_financ': lista.esFinanciamiento,
           'financiadora': lista.financiadora,
           // Condiciones DE ESTE producto: una lista puede tener un
           // % de inicial y unas cuotas distintas por marca o modelo.
-          'inicial_pct': lista.pctInicialDe(item),
+          'inicial_pct': lista.esColumnaBase(col)
+              ? lista.pctInicialEfectivo(item)
+              : lista.pctInicialDe(item),
+          'inicial': lista.inicialEnColumna(item, col),
           'tiene_cuotas': lista.tieneCuotas,
           'n_cuotas': lista.cuotasDe(item),
+          'cuota': lista.cuotaEnColumna(item, col),
         });
       }
     }
@@ -31632,6 +32408,13 @@ class _VentanaConsultaRapidaPreciosState
               tooltip: 'Elegir qué precios se muestran',
               onPressed: _elegirListasVisibles,
             ),
+          // Qué columna de precio usar en las listas que tienen varias
+          // (Divisa, Cashea, Krece…). Cualquier usuario la puede cambiar.
+          IconButton(
+            icon: const Icon(Icons.view_column),
+            tooltip: 'Elegir qué columna de precio usar',
+            onPressed: _cargando ? null : () => _elegirColumnas(),
+          ),
           IconButton(
             icon: const Icon(Icons.refresh),
             tooltip: 'Actualizar precios',
@@ -31853,9 +32636,11 @@ class _VentanaConsultaRapidaPreciosState
                                                 fontWeight: FontWeight.bold)),
                                         if (esFinanc) ...[
                                           Text(
-                                            "${pr['financiadora']} · "
-                                            "Inicial ${pr['inicial_pct']}%"
-                                            "${(pr['tiene_cuotas'] as bool) ? ' · ${pr['n_cuotas']} cuotas' : ' · sin cuotas'}",
+                                            "${(pr['varias_columnas'] as bool) ? '${pr['columna']} · ' : ''}"
+                                            "${pr['financiadora'] ?? 'Financiamiento'} · "
+                                            "Inicial ${moneda == 'Bs' ? '${(pr['inicial'] as double).toStringAsFixed(2)} Bs' : '\$${(pr['inicial'] as double).toStringAsFixed(2)}'}"
+                                            " (${_pctTexto(pr['inicial_pct'] as double)}%)"
+                                            "${(pr['tiene_cuotas'] as bool) ? ' · ${pr['n_cuotas']} cuotas de ${moneda == 'Bs' ? '${(pr['cuota'] as double).toStringAsFixed(2)} Bs' : '\$${(pr['cuota'] as double).toStringAsFixed(2)}'}' : ' · sin cuotas'}",
                                             style: const TextStyle(
                                                 fontSize: 10,
                                                 color: AppColors.textSecondary)),
@@ -31933,8 +32718,18 @@ class _VentanaListasPreciosState extends State<VentanaListasPrecios> {
   /// no parpadee la UI.
   Future<void> _cargarDesdeServidor({bool silencioso = false}) async {
     if (!silencioso && mounted) setState(() => _cargando = true);
+    // Al abrir la pantalla se trae el stock real (catálogo + IMEIs) en
+    // paralelo: las listas sólo muestran productos con existencia y un
+    // producto que se agotó después de poblar no debe aparecer.
+    final fStock = silencioso
+        ? Future<void>.value()
+        : cargarStockParaListas(forzar: true);
     try {
+      // `ListaPrecio.fromMap` necesita el catálogo para resolver los
+      // productos: si todavía no hay, se espera a que llegue.
+      if (catalogoGlobal.isEmpty) await fStock;
       final raw = await _Api.get('listas_precios');
+      await fStock;
       if (raw is List) {
         // Hash PROFUNDO: incluye precios, %, items, financiadora.
         // Antes solo se hashaba id+nombre+fecha_creacion → el polling
@@ -32023,6 +32818,10 @@ class _VentanaListasPreciosState extends State<VentanaListasPrecios> {
   /// PERSISTE en el backend. Antes el "Actualizar" sólo cambiaba la
   /// memoria local del admin: otros usuarios nunca veían los cambios.
   Future<void> _actualizarListaYPersistir(ListaPrecio lista) async {
+    // 0) Stock fresco del servidor: la lista sólo debe ofrecer lo que
+    //    hay hoy en las tiendas.
+    await cargarStockParaListas(forzar: true);
+    if (!mounted) return;
     // 1) Re-poblar localmente
     setState(() => _poblarLista(lista));
     // 2) Persistir en BD: si ya tiene id, hacemos PUT; si no, POST.
@@ -32039,8 +32838,8 @@ class _VentanaListasPreciosState extends State<VentanaListasPrecios> {
       }
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-          content: Text('✅ ${lista.items.length} productos actualizados '
-              'y sincronizados con todos los usuarios'),
+          content: Text('✅ ${lista.itemsConStock.length} productos con '
+              'stock actualizados y sincronizados con todos los usuarios'),
           backgroundColor: AppColors.statusGreen));
       }
       // Forzar siguiente refresh para los demás dispositivos
@@ -32131,27 +32930,27 @@ class _VentanaListasPreciosState extends State<VentanaListasPrecios> {
     final nuevaListaItems = <ItemListaPrecio>[];
     int agregados = 0;
     int preservados = 0;
+    int sinStockOmitidos = 0;
+    // El catálogo trae una fila por tienda del mismo código: el
+    // producto entra una sola vez (su stock ya suma todas las tiendas).
+    final codigosVistos = <String>{};
 
     for (final p in productosFiltrados) {
-      // Calcular stock disponible real (siempre actualizado del catálogo)
-      int stock;
-      if (CategoriasProductos.usaIMEI(p.categoria)) {
-        final imeisPropios = stockImeiGlobal.where(
-            (i) => i.producto.codigo == p.codigo && !i.vendido).length;
-        final variantes = catalogoGlobal.where(
-            (x) => x.productoPadreCodigo == p.codigo).map((v) => v.codigo).toList();
-        final imeisVariantes = stockImeiGlobal.where(
-            (i) => variantes.contains(i.producto.codigo) && !i.vendido).length;
-        stock = imeisPropios + imeisVariantes;
-      } else {
-        final stockVariantes = catalogoGlobal
-            .where((x) => x.productoPadreCodigo == p.codigo)
-            .fold<int>(0, (s, v) => s + v.stockManual);
-        stock = p.stockManual + stockVariantes;
-      }
+      if (!codigosVistos.add(p.codigo)) continue;
+      // Stock disponible real: TODAS las tiendas + variantes.
+      final int stock = stockGlobalDeProducto(p);
 
       // ── ¿El producto ya estaba en la lista? ──
       final itemExistente = existentes[p.codigo];
+      // Producto NUEVO y agotado: no se agrega (las listas sólo deben
+      // ofrecer lo que hay). Cuando vuelva a tener stock entra en el
+      // próximo "Actualizar". Los que YA estaban se conservan aunque
+      // estén agotados (se ocultan al mostrar/exportar) para no perder
+      // los precios que el admin les puso.
+      if (itemExistente == null && stock <= 0) {
+        sinStockOmitidos++;
+        continue;
+      }
       if (itemExistente != null) {
         // PRESERVAR: el admin pudo haber editado precios e iniciales
         // manuales. Solo actualizamos el stock (info, no precio).
@@ -32197,10 +32996,14 @@ class _VentanaListasPreciosState extends State<VentanaListasPrecios> {
     lista.items
       ..clear()
       ..addAll(nuevaListaItems);
+    // Las columnas con función automática mandan sobre el precio por
+    // defecto de los productos recién agregados (y siguen al precio de
+    // venta actual en los que ya estaban).
+    lista.aplicarFormulas();
 
     debugPrint('[_poblarLista] ${lista.nombre}: '
         '$preservados preservados, $agregados nuevos, '
-        '$eliminados eliminados');
+        '$eliminados eliminados, $sinStockOmitidos sin stock omitidos');
   }
 
   // ── Diálogo de creación ───────────────────────────────────────
@@ -32443,33 +33246,50 @@ class _VentanaListasPreciosState extends State<VentanaListasPrecios> {
                 lista.financiadora = financiadoraCtrl.text.trim().isEmpty
                     ? null
                     : financiadoraCtrl.text.trim();
-                lista.porcentajeInicial =
-                    double.tryParse(pctInicialCtrl.text) ?? 0.0;
+                final nuevoPct = double.tryParse(
+                        pctInicialCtrl.text.replaceAll(',', '.')) ??
+                    0.0;
                 // ── Detectar cambio del número de cuotas ──
                 // Si el usuario editó las cuotas (por ejemplo de 8 → 6),
                 // el `cuotaManual` de cada item quedó "pegado" con el
                 // monto calculado antes (150). Sin limpiarlo, la lista
                 // seguiría mostrando 150 por cuota aunque ahora sean 6.
-                // Al limpiar cuotaManual e inicialManual, el sistema
-                // los recalcula al vuelo con el nuevo divisor.
+                // Lo mismo pasa con la inicial fijada a mano cuando
+                // cambia el % de inicial, y con la cuota cuando cambia
+                // el recargo.
                 final nuevoNumeroCuotas =
                     int.tryParse(cuotasCtrl.text) ?? lista.numeroCuotas;
+                final nuevoRecargo = double.tryParse(
+                        pctRecargoCuotasCtrl.text.replaceAll(',', '.')) ??
+                    0.0;
+                final cambioPct =
+                    (nuevoPct - lista.porcentajeInicial).abs() > 0.0001;
                 final cambiaronCuotas = nuevoNumeroCuotas != lista.numeroCuotas;
+                final cambioRecargo =
+                    (nuevoRecargo - lista.porcentajeRecargoCuotas).abs() >
+                        0.0001;
+                lista.porcentajeInicial = nuevoPct;
                 lista.numeroCuotas = nuevoNumeroCuotas;
                 lista.porcentajeComisionWeppa =
                     double.tryParse(pctComisionWeppaCtrl.text) ?? 0.0;
-                lista.porcentajeRecargoCuotas =
-                    double.tryParse(pctRecargoCuotasCtrl.text) ?? 0.0;
+                lista.porcentajeRecargoCuotas = nuevoRecargo;
                 lista.tieneCuotas = tieneCuotas;
-                if (cambiaronCuotas) {
-                  for (final it in lista.items) {
-                    it.cuotaManual   = null;
-                    it.inicialManual = null;
-                  }
-                  debugPrint('[EditarLista] Cuotas cambiaron a '
-                      '$nuevoNumeroCuotas — se limpiaron ${lista.items.length} '
-                      'overrides manuales para recalcular al vuelo');
+                // Montos escritos a mano con las condiciones viejas:
+                // se pregunta si se recalculan (recomendado).
+                final afectados = lista.contarMontosFijosAfectados(
+                    cambioPct: cambioPct,
+                    cambioCuotas: cambiaronCuotas,
+                    cambioRecargo: cambioRecargo);
+                if (afectados > 0 &&
+                    await preguntarRecalcularMontosFijos(ctx, afectados)) {
+                  final n = lista.limpiarMontosFijosAfectados(
+                      cambioPct: cambioPct,
+                      cambioCuotas: cambiaronCuotas,
+                      cambioRecargo: cambioRecargo);
+                  debugPrint('[EditarLista] Condiciones cambiaron — se '
+                      'recalcularon $n montos fijados a mano');
                 }
+                if (!ctx.mounted) return;
               } else {
                 lista.financiadora = null;
               }
@@ -32968,7 +33788,7 @@ class _VentanaListasPreciosState extends State<VentanaListasPrecios> {
                     title: Text(lista.nombre, style: const TextStyle(fontWeight: FontWeight.bold)),
                     subtitle: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
                       Text("${lista.categoria} · ${lista.marcaFiltro == 'Todas' ? 'Todas las marcas' : lista.marcaFiltro}"),
-                      Text("${lista.items.length} productos · ${lista.esEnBolivares ? 'Bs (tasa ${lista.tasaDelDia.toStringAsFixed(2)})' : '\$ Divisas'} · ${lista.fechaCreacion}",
+                      Text("${lista.itemsConStock.length} con stock · ${lista.esEnBolivares ? 'Bs (tasa ${lista.tasaDelDia.toStringAsFixed(2)})' : '\$ Divisas'} · ${lista.fechaCreacion}",
                         style: const TextStyle(fontSize: 11, color: Colors.grey)),
                     ]),
                     trailing: Row(mainAxisSize: MainAxisSize.min, children: [
@@ -33416,6 +34236,15 @@ class _DetalleListaPrecioState extends State<DetalleListaPrecio> {
   String _busqueda = "";
   final _searchCtrl = TextEditingController();
 
+  /// Los productos agotados quedan guardados en la lista (con sus
+  /// precios) pero no se muestran. El admin puede verlos con este
+  /// interruptor para editar sus precios antes de que vuelva el stock.
+  /// En los documentos exportados NUNCA salen.
+  bool _mostrarAgotados = false;
+
+  /// true mientras se trae el stock del servidor al abrir la lista.
+  bool _cargandoStock = true;
+
   /// Indica si la lista se está sincronizando con el backend en
   /// este momento (para mostrar el spinner en la AppBar).
   bool _guardandoBackend = false;
@@ -33444,6 +34273,10 @@ class _DetalleListaPrecioState extends State<DetalleListaPrecio> {
       // por si el servidor devolvio las columnas sin su funcion.
       await _restaurarFormulasDeCache();
       if (!mounted) return;
+      // Stock real para ocultar los agotados (sólo carga lo que falte).
+      await cargarStockParaListas();
+      if (!mounted) return;
+      setState(() => _cargandoStock = false);
       // Aplicar las funciones automaticas con los datos ya cargados
       if (widget.lista.items.isNotEmpty && widget.lista.tieneFormulas) {
         final n = widget.lista.aplicarFormulas();
@@ -33571,18 +34404,17 @@ class _DetalleListaPrecioState extends State<DetalleListaPrecio> {
     setState(() {
       lista.items.clear();
       bool _debugFirst = true;
+      // Una fila por tienda del mismo código en el catálogo: el
+      // producto entra una sola vez.
+      final vistos = <String>{};
       for (final p in filtrados) {
-        // Calcular stock (suma teléfonos: IMEIs; otros: stockManual)
-        int stock;
-        if (CategoriasProductos.usaIMEI(p.categoria)) {
-          stock = stockImeiGlobal.where(
-              (i) => i.producto.codigo == p.codigo && !i.vendido).length;
-        } else {
-          stock = p.stockManual;
-        }
-        // No filtramos por stock para no esconder productos agotados
-        // en el editor — el admin debe poder editar precios incluso
-        // de productos sin stock momentáneo.
+        if (!vistos.add(p.codigo)) continue;
+        // Stock global: todas las tiendas + variantes.
+        final stock = stockGlobalDeProducto(p);
+        // Las listas sólo ofrecen productos con existencia: los
+        // agotados no se agregan. Cuando vuelvan a tener stock entran
+        // con "Actualizar" desde la pantalla de listas.
+        if (stock <= 0) continue;
         // ── CÁLCULO EXACTO DE PRECIO ──
         // 1) Aplicar el % adicional al precio USD y redondear a 2 dec.
         //    Esto fija el precio en USD ANTES de convertir, así no
@@ -33618,6 +34450,18 @@ class _DetalleListaPrecioState extends State<DetalleListaPrecio> {
     });
     // Persistir al backend después de poblar
     _persistirLista();
+  }
+
+  /// "Re-poblar": trae el stock fresco y vuelve a armar la lista desde
+  /// el catálogo con la misma lógica que `_autoPoblar`.
+  Future<void> _repoblarDesdeCatalogo() async {
+    await cargarStockParaListas(forzar: true);
+    if (!mounted) return;
+    _autoPoblar();
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+      content: Text(
+          "✅ ${widget.lista.items.length} productos con stock actualizados"),
+      backgroundColor: AppColors.statusGreen));
   }
 
   /// Inicia el polling de sincronización del detalle. Cada 15 segundos
@@ -33871,13 +34715,19 @@ class _DetalleListaPrecioState extends State<DetalleListaPrecio> {
   }
 
   // Agrupa los ítems por marca
-  Map<String, List<ItemListaPrecio>> _agrupadosPorMarca() {
+  //
+  // Los productos AGOTADOS (stock global en vivo = 0) no se incluyen,
+  // salvo que [incluirAgotados] sea true (interruptor del admin en
+  // pantalla). Los documentos exportados siempre los excluyen.
+  Map<String, List<ItemListaPrecio>> _agrupadosPorMarca(
+      {bool incluirAgotados = false}) {
     final mapa = <String, List<ItemListaPrecio>>{};
     final filtrados = widget.lista.items.where((it) =>
-      _busqueda.isEmpty ||
+      (incluirAgotados || stockVivoDeItem(it) > 0) &&
+      (_busqueda.isEmpty ||
       it.producto.nombre.toLowerCase().contains(_busqueda.toLowerCase()) ||
       it.producto.marca.toLowerCase().contains(_busqueda.toLowerCase()) ||
-      it.producto.codigo.toLowerCase().contains(_busqueda.toLowerCase())).toList();
+      it.producto.codigo.toLowerCase().contains(_busqueda.toLowerCase()))).toList();
     for (final it in filtrados) {
       final marca = it.producto.marca.isEmpty ? "Sin marca" : it.producto.marca;
       mapa.putIfAbsent(marca, () => []).add(it);
@@ -35262,6 +36112,59 @@ class _DetalleListaPrecioState extends State<DetalleListaPrecio> {
     return Icons.numbers;
   }
 
+  /// Cambia una condición GENERAL de la lista de financiamiento (% de
+  /// inicial, % de recargo o número de cuotas). Inicial y cuota se
+  /// recalculan solas para todos los productos; los que tenían el monto
+  /// escrito a mano con las condiciones viejas se recalculan también si
+  /// el usuario lo confirma (antes quedaban "pegados" y parecía que la
+  /// lista no se actualizaba).
+  Future<void> _aplicarCondicionGeneral(
+      BuildContext ctx, String campo, double valor) async {
+    final lista = widget.lista;
+    final cambioPct = campo == 'inicial_pct' &&
+        (valor - lista.porcentajeInicial).abs() > 0.0001;
+    final cambioRecargo = campo == 'recargo_pct' &&
+        (valor - lista.porcentajeRecargoCuotas).abs() > 0.0001;
+    final cambioCuotas =
+        campo == 'n_cuotas' && valor.toInt() != lista.numeroCuotas;
+    final afectados = lista.contarMontosFijosAfectados(
+        cambioPct: cambioPct,
+        cambioCuotas: cambioCuotas,
+        cambioRecargo: cambioRecargo);
+    final limpiar =
+        afectados > 0 && await preguntarRecalcularMontosFijos(ctx, afectados);
+    if (!mounted) return;
+    String msg;
+    setState(() {
+      if (limpiar) {
+        lista.limpiarMontosFijosAfectados(
+            cambioPct: cambioPct,
+            cambioCuotas: cambioCuotas,
+            cambioRecargo: cambioRecargo);
+      }
+      if (campo == 'inicial_pct') {
+        lista.porcentajeInicial = valor;
+      } else if (campo == 'recargo_pct') {
+        lista.porcentajeRecargoCuotas = valor;
+      } else {
+        lista.numeroCuotas = valor.toInt();
+      }
+      // Fórmulas que usan `inicial`, `cuotas` o `recargo`.
+      lista.aplicarFormulas();
+    });
+    msg = campo == 'inicial_pct'
+        ? '✓ % inicial actualizado a $valor%'
+        : campo == 'recargo_pct'
+            ? '✓ % recargo actualizado a $valor%'
+            : '✓ Número de cuotas actualizado a ${valor.toInt()}';
+    if (limpiar) msg += ' · $afectados monto(s) fijo(s) recalculado(s)';
+    if (ctx.mounted) Navigator.pop(ctx);
+    _persistirLista();
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+      content: Text(msg),
+      backgroundColor: AppColors.statusGreen));
+  }
+
   /// Ejecuta el cambio masivo en los productos.
   ///
   /// Si `indices == null` → aplica a TODOS los items de la lista.
@@ -35282,38 +36185,18 @@ class _DetalleListaPrecioState extends State<DetalleListaPrecio> {
     final lista = widget.lista;
     final esFinanc = lista.esFinanciamiento;
 
-    setState(() {
-      // ─── CASO 1: cambio a nivel de LISTA (financ. solo) ───
-      if (esFinanc) {
-        if (campoFinanc == 'inicial_pct') {
-          lista.porcentajeInicial = valor;
-          Navigator.pop(ctx);
-          _persistirLista();
-          ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-            content: Text('✓ % inicial actualizado a $valor%'),
-            backgroundColor: AppColors.statusGreen));
-          return;
-        }
-        if (campoFinanc == 'recargo_pct') {
-          lista.porcentajeRecargoCuotas = valor;
-          Navigator.pop(ctx);
-          _persistirLista();
-          ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-            content: Text('✓ % recargo actualizado a $valor%'),
-            backgroundColor: AppColors.statusGreen));
-          return;
-        }
-        if (campoFinanc == 'n_cuotas') {
-          lista.numeroCuotas = valor.toInt();
-          Navigator.pop(ctx);
-          _persistirLista();
-          ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-            content: Text('✓ Número de cuotas actualizado a ${valor.toInt()}'),
-            backgroundColor: AppColors.statusGreen));
-          return;
-        }
-      }
+    // ─── CASO 1: cambio a nivel de LISTA (financ. solo) ───
+    // Va aparte porque puede tener que preguntar (async) qué hacer con
+    // las iniciales/cuotas escritas a mano con las condiciones viejas.
+    if (esFinanc &&
+        (campoFinanc == 'inicial_pct' ||
+            campoFinanc == 'recargo_pct' ||
+            campoFinanc == 'n_cuotas')) {
+      _aplicarCondicionGeneral(ctx, campoFinanc, valor);
+      return;
+    }
 
+    setState(() {
       // ─── CASO 2: cambio POR PRODUCTO ───
       // Determinar la lista de items a modificar
       final itemsAModificar = indices == null
@@ -35383,335 +36266,113 @@ class _DetalleListaPrecioState extends State<DetalleListaPrecio> {
     });
   }
 
-  /// Exporta la lista completa como una IMAGEN PNG compacta, en una
-  /// sola "hoja larga" ideal para compartir por WhatsApp, Instagram
-  /// o cualquier red social. La imagen agrupa todos los productos
-  /// en filas compactas con encabezado de la tienda en la parte
-  /// superior y precios en columnas.
-  Future<void> _exportarImagen() async {
-    if (!mounted) return;
-    final lista = widget.lista;
-    const anchoImg = 800.0;
-    final filaAlto = 28.0;
-    final headerAlto = 140.0;
-    final altoImg = headerAlto +
-        (lista.items.length * filaAlto) + 80;
+  // ════════════════════════════════════════════════════════════
+  //  EXPORTAR LA LISTA (PDF e IMAGEN)
+  // ════════════════════════════════════════════════════════════
+  //
+  // El PDF y la imagen salen del MISMO documento (paquete `pdf`), así
+  // muestran exactamente lo mismo:
+  //   · Sólo productos CON STOCK (los agotados quedan en la lista pero
+  //     no se publican).
+  //   · TODAS las columnas de precio de la lista (Contado, Cashea,
+  //     Krece…). En listas de financiamiento se puede elegir ocultarlas.
+  //   · En financiamiento: inicial (monto y %), número de cuotas y
+  //     monto de la cuota, respetando las condiciones propias de cada
+  //     marca/modelo y los montos fijados a mano (`inicialDe`,
+  //     `cuotaDe`, `pctInicialDe`, `cuotasDe`).
+  //   · NUNCA el stock (es información interna).
+  //
+  // La imagen se obtiene rasterizando una página "larga" (alto según
+  // el contenido) a alta resolución: antes se capturaba un widget
+  // dentro de un diálogo, que en el teléfono quedaba recortado al
+  // ancho de la pantalla y pixelado, y en Windows no se compartía.
 
-    final boundaryKey = GlobalKey();
-
-    // Mostrar overlay con vista a renderizar
-    showDialog<void>(
-      context: context,
-      barrierDismissible: false,
-      builder: (ctx) => Dialog(
-        backgroundColor: Colors.transparent,
-        child: Column(mainAxisSize: MainAxisSize.min, children: [
-          const Card(
-            child: Padding(
-              padding: EdgeInsets.all(20),
-              child: Column(mainAxisSize: MainAxisSize.min, children: [
-                CircularProgressIndicator(),
-                SizedBox(height: 12),
-                Text("Generando imagen…"),
-              ]),
-            ),
-          ),
-          Offstage(
-            offstage: false,
-            child: RepaintBoundary(
-              key: boundaryKey,
-              child: _construirWidgetParaImagen(lista, anchoImg, altoImg),
-            ),
-          ),
-        ]),
-      ),
-    );
-
-    await Future.delayed(const Duration(milliseconds: 500));
-
-    try {
-      final boundary = boundaryKey.currentContext?.findRenderObject()
-          as RenderRepaintBoundary?;
-      if (boundary == null) throw Exception("No se pudo renderizar");
-      final image = await boundary.toImage(pixelRatio: 3.0);
-      final byteData = await image.toByteData(format: ImageByteFormat.png);
-      if (byteData == null) throw Exception("No se pudo convertir a PNG");
-      final pngBytes = byteData.buffer.asUint8List();
-
-      if (mounted) Navigator.of(context, rootNavigator: true).pop();
-
-      final dir = await getTemporaryDirectory();
-      final ts = DateTime.now().millisecondsSinceEpoch;
-      final fileName = 'lista_${lista.nombre.replaceAll(RegExp(r"[^a-zA-Z0-9]"), "_")}_$ts.png';
-      final file = File('${dir.path}/$fileName');
-      await file.writeAsBytes(pngBytes);
-
-      if (mounted) {
-        await SharePlus.instance.share(ShareParams(
-          files: [XFile(file.path)],
-          text: 'Lista de Precios: ${lista.nombre}',
-        ));
-      }
-    } catch (e) {
-      debugPrint('[ListaPrecios._exportarImagen] error: $e');
-      if (mounted) {
-        Navigator.of(context, rootNavigator: true).pop();
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-          content: Text('Error generando imagen: $e'),
-          backgroundColor: Colors.red));
-      }
-    }
-  }
-
-  /// Construye el widget que se renderiza a imagen.
-  Widget _construirWidgetParaImagen(
-      ListaPrecio lista, double ancho, double alto) {
-    final tienda = usuarioSesion?.tienda ?? '';
-    final enc = ConfigSistema.encabezadoDe(tienda);
-    final moneda = lista.esEnBolivares ? 'Bs' : '\$';
-    final esFinanc = lista.esFinanciamiento;
-
-    return Material(
-      color: Colors.white,
-      child: Container(
-        width: ancho,
-        color: Colors.white,
-        child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
-          // Encabezado
-          Container(
-            padding: const EdgeInsets.all(16),
-            decoration: const BoxDecoration(
-              gradient: LinearGradient(
-                colors: [AppColors.royalBlue, AppColors.primaryBlue],
-                begin: Alignment.topLeft, end: Alignment.bottomRight),
-            ),
-            child: Row(children: [
-              if (enc.logoBytes != null)
-                Container(
-                  width: 60, height: 60,
-                  margin: const EdgeInsets.only(right: 12),
-                  decoration: BoxDecoration(
-                    color: Colors.white,
-                    borderRadius: BorderRadius.circular(10)),
-                  child: ClipRRect(
-                    borderRadius: BorderRadius.circular(9),
-                    child: Image.memory(enc.logoBytes!, fit: BoxFit.contain),
-                  ),
-                ),
-              Expanded(child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      ConfigSistema.nombreEmpresa.isEmpty
-                          ? tienda
-                          : ConfigSistema.nombreEmpresa,
-                      style: const TextStyle(
-                          color: Colors.white, fontSize: 20,
-                          fontWeight: FontWeight.bold)),
-                    if (enc.telefono.isNotEmpty)
-                      Text("Tel: ${enc.telefono}",
-                          style: const TextStyle(
-                              color: Colors.white70, fontSize: 12)),
-                    const SizedBox(height: 4),
-                    Text(lista.nombre,
-                        style: const TextStyle(
-                            color: Colors.white, fontSize: 14,
-                            fontWeight: FontWeight.w600)),
-                    Text(
-                        "${lista.categoria} · "
-                        "${lista.items.length} productos · "
-                        "${DateTime.now().toString().substring(0, 10)}",
-                        style: const TextStyle(
-                            color: Colors.white70, fontSize: 11)),
-                  ])),
-            ]),
-          ),
-          // Encabezado de columnas
-          Container(
-            color: AppColors.surfaceGrey,
-            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-            child: Row(children: [
-              const Expanded(flex: 5, child: Text("Producto",
-                  style: TextStyle(fontWeight: FontWeight.bold, fontSize: 12))),
-              if (esFinanc) ...[
-                Expanded(flex: 2, child: Text("Base",
-                    textAlign: TextAlign.right,
-                    style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 12))),
-                Expanded(flex: 2, child: Text("Inicial",
-                    textAlign: TextAlign.right,
-                    style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 12))),
-                if (lista.tieneCuotas)
-                  Expanded(flex: 2, child: Text("Cuota",
-                      textAlign: TextAlign.right,
-                      style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 12))),
-              ] else
-                ...lista.columnas.map((col) => Expanded(flex: 2,
-                    child: Text(col.nombre,
-                        textAlign: TextAlign.right,
-                        style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 12)))),
-            ]),
-          ),
-          // Filas de productos
-          ...lista.items.asMap().entries.map((entry) {
-            final idx = entry.key;
-            final item = entry.value;
-            final esPar = idx % 2 == 0;
-            final precioBase = lista.columnas.isNotEmpty
-                ? (item.preciosPorColumna[lista.columnas.first.nombre] ?? 0.0)
-                : 0.0;
-            double inicial = 0;
-            double cuota = 0;
-            if (esFinanc) {
-              inicial = lista.inicialDe(item, precioBase);
-              if (lista.tieneCuotas) {
-                cuota = lista.cuotaDe(item, precioBase);
-              }
-            }
-            return Container(
-              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 5),
-              color: esPar ? Colors.white : Colors.grey[50],
-              child: Row(children: [
-                Expanded(flex: 5, child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(item.producto.nombre,
-                          style: const TextStyle(
-                              fontWeight: FontWeight.w600, fontSize: 12),
-                          maxLines: 1, overflow: TextOverflow.ellipsis),
-                      if (item.producto.modelo.isNotEmpty &&
-                          item.producto.modelo != item.producto.nombre)
-                        Text(item.producto.modelo,
-                            style: const TextStyle(
-                                fontSize: 10,
-                                color: AppColors.textSecondary),
-                            maxLines: 1, overflow: TextOverflow.ellipsis),
-                    ])),
-                if (esFinanc) ...[
-                  Expanded(flex: 2, child: Text(
-                      "$moneda${precioBase.toStringAsFixed(0)}",
-                      textAlign: TextAlign.right,
-                      style: const TextStyle(fontSize: 11))),
-                  Expanded(flex: 2, child: Text(
-                      "$moneda${inicial.toStringAsFixed(0)}",
-                      textAlign: TextAlign.right,
-                      style: const TextStyle(
-                          fontSize: 11, fontWeight: FontWeight.bold,
-                          color: AppColors.royalBlue))),
-                  if (lista.tieneCuotas)
-                    Expanded(flex: 2, child: Text(
-                        "$moneda${cuota.toStringAsFixed(0)}",
-                        textAlign: TextAlign.right,
-                        style: const TextStyle(
-                            fontSize: 11, color: Colors.green))),
-                ] else
-                  ...lista.columnas.map((col) {
-                    final precio = item.preciosPorColumna[col.nombre] ?? 0.0;
-                    return Expanded(flex: 2, child: Text(
-                        "$moneda${precio.toStringAsFixed(0)}",
-                        textAlign: TextAlign.right,
-                        style: const TextStyle(
-                            fontSize: 11, fontWeight: FontWeight.bold)));
-                  }),
-              ]),
-            );
-          }),
-          // Pie
-          Container(
-            padding: const EdgeInsets.all(10),
-            color: AppColors.surfaceGrey,
-            child: Center(child: Text(
-              "Precios sujetos a cambios sin previo aviso · "
-              "Garantía: ${ConfigSistema.diasGarantia} días",
-              style: const TextStyle(
-                  fontSize: 10, fontStyle: FontStyle.italic,
-                  color: AppColors.textSecondary))),
-          ),
-        ]),
-      ),
-    );
-  }
-
-  /// Genera y comparte un PDF de la lista de precios.
-  ///
-  /// REGLAS DE NEGOCIO IMPORTANTES:
-  ///   1. **NUNCA** se muestra el stock disponible. Es info interna
-  ///      del negocio que no debe llegar al cliente / financiadora.
-  ///   2. Si la lista es de **financiamiento** (esFinanciamiento=true):
-  ///      - NO se muestra el precio base del producto (la columna
-  ///        principal de precio). Solo Inicial + Cuotas.
-  ///      - La financiadora solo necesita saber "cuánto cuesta el
-  ///        plan", no el desglose interno.
-  ///   3. Si es lista **normal** (Detal / Mayorista / etc):
-  ///      - Se muestran todas las columnas de precios configuradas.
-  ///
-  /// Después de generar el PDF, se muestra el diálogo nativo de
-  /// compartir (`share_plus`) para que el usuario elija destino:
-  /// WhatsApp, correo, descargar al disco, etc.
-  Future<void> _exportarPdf() async {
-    if (!mounted) return;
-
-    // ── PUNTO 5: Preguntar si desea redondear los montos ──
-    // Al aplicar un % los precios quedan con "picos" (ej 153.47).
-    // Ofrecemos redondear para que las listas se vean limpias.
-    int modoRedondeo = 0; // 0=sin redondeo, 1=entero, 2=decena, 3=centena
-    final continuar = await showDialog<bool>(
+  /// Pide las opciones del documento. null si el usuario canceló.
+  Future<({int redondeo, bool columnas})?> _pedirOpcionesExportacion(
+      {required bool esImagen}) async {
+    var modoRedondeo = 0; // 0=sin redondeo, 1=entero, 2=decena, 3=centena
+    var incluirColumnas = true;
+    final esFinanc = widget.lista.esFinanciamiento;
+    Widget opcion(StateSetter setD, int v, String titulo, String ej) =>
+        RadioListTile<int>(
+          value: v,
+          groupValue: modoRedondeo,
+          onChanged: (x) => setD(() => modoRedondeo = x!),
+          title: Text(titulo, style: const TextStyle(fontSize: 13)),
+          subtitle: Text(ej, style: const TextStyle(fontSize: 11)),
+          dense: true,
+          contentPadding: EdgeInsets.zero,
+        );
+    final ok = await showDialog<bool>(
       context: context,
       builder: (ctx) => StatefulBuilder(builder: (ctx, setD) {
         return AlertDialog(
-          shape: RoundedRectangleBorder(
-              borderRadius: BorderRadius.circular(14)),
-          title: const Row(children: [
-            Icon(Icons.tune, color: AppColors.royalBlue),
-            SizedBox(width: 8),
-            Text('Redondear montos'),
+          shape:
+              RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+          title: Row(children: [
+            Icon(esImagen ? Icons.image : Icons.picture_as_pdf,
+                color: AppColors.royalBlue),
+            const SizedBox(width: 8),
+            Expanded(
+                child: Text(esImagen ? 'Exportar imagen' : 'Exportar PDF')),
           ]),
-          content: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              const Text(
-                'Al aplicar un porcentaje, los precios pueden quedar '
-                'con cifras irregulares. Elige cómo redondear:',
-                style: TextStyle(fontSize: 13),
-              ),
-              const SizedBox(height: 10),
-              RadioListTile<int>(
-                value: 0, groupValue: modoRedondeo,
-                onChanged: (v) => setD(() => modoRedondeo = v!),
-                title: const Text('Sin redondeo', style: TextStyle(fontSize: 13)),
-                subtitle: const Text('Ej: 153.47', style: TextStyle(fontSize: 11)),
-                dense: true, contentPadding: EdgeInsets.zero,
-              ),
-              RadioListTile<int>(
-                value: 1, groupValue: modoRedondeo,
-                onChanged: (v) => setD(() => modoRedondeo = v!),
-                title: const Text('Al entero', style: TextStyle(fontSize: 13)),
-                subtitle: const Text('Ej: 153', style: TextStyle(fontSize: 11)),
-                dense: true, contentPadding: EdgeInsets.zero,
-              ),
-              RadioListTile<int>(
-                value: 2, groupValue: modoRedondeo,
-                onChanged: (v) => setD(() => modoRedondeo = v!),
-                title: const Text('A la decena', style: TextStyle(fontSize: 13)),
-                subtitle: const Text('Ej: 150', style: TextStyle(fontSize: 11)),
-                dense: true, contentPadding: EdgeInsets.zero,
-              ),
-              RadioListTile<int>(
-                value: 3, groupValue: modoRedondeo,
-                onChanged: (v) => setD(() => modoRedondeo = v!),
-                title: const Text('A la centena', style: TextStyle(fontSize: 13)),
-                subtitle: const Text('Ej: 200', style: TextStyle(fontSize: 11)),
-                dense: true, contentPadding: EdgeInsets.zero,
-              ),
-            ],
+          content: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text(
+                  'Al aplicar un porcentaje, los precios pueden quedar '
+                  'con cifras irregulares. Elige cómo redondear:',
+                  style: TextStyle(fontSize: 13),
+                ),
+                const SizedBox(height: 6),
+                opcion(setD, 0, 'Sin redondeo', 'Ej: 153.47'),
+                opcion(setD, 1, 'Al entero', 'Ej: 153'),
+                opcion(setD, 2, 'A la decena', 'Ej: 150'),
+                opcion(setD, 3, 'A la centena', 'Ej: 200'),
+                if (esFinanc) ...[
+                  const Divider(),
+                  CheckboxListTile(
+                    value: incluirColumnas,
+                    onChanged: (v) =>
+                        setD(() => incluirColumnas = v ?? true),
+                    dense: true,
+                    contentPadding: EdgeInsets.zero,
+                    controlAffinity: ListTileControlAffinity.leading,
+                    title: const Text('Mostrar las columnas de precio',
+                        style: TextStyle(fontSize: 13)),
+                    subtitle: Text(
+                        widget.lista.columnas
+                            .where((c) =>
+                                !FormulaColumna.esNombreVirtual(c.nombre))
+                            .map((c) => c.nombre)
+                            .join(' · '),
+                        style: const TextStyle(fontSize: 11)),
+                  ),
+                  const Text(
+                      'Siempre se incluyen la inicial (monto y %), el '
+                      'número de cuotas y el monto de cada cuota.',
+                      style: TextStyle(
+                          fontSize: 11, color: AppColors.textSecondary)),
+                ],
+                const SizedBox(height: 6),
+                const Text('Sólo salen los productos con stock disponible.',
+                    style: TextStyle(
+                        fontSize: 11,
+                        fontStyle: FontStyle.italic,
+                        color: AppColors.textSecondary)),
+              ],
+            ),
           ),
           actions: [
             TextButton(
                 onPressed: () => Navigator.pop(ctx, false),
                 child: const Text('Cancelar')),
             ElevatedButton.icon(
-              icon: const Icon(Icons.picture_as_pdf, size: 18),
-              label: const Text('Generar PDF'),
+              icon: Icon(esImagen ? Icons.image : Icons.picture_as_pdf,
+                  size: 18),
+              label: Text(esImagen ? 'Generar imagen' : 'Generar PDF'),
               style: ElevatedButton.styleFrom(
                   backgroundColor: AppColors.royalBlue,
                   foregroundColor: Colors.white),
@@ -35721,340 +36382,564 @@ class _DetalleListaPrecioState extends State<DetalleListaPrecio> {
         );
       }),
     );
-    if (continuar != true) return;
+    if (ok != true) return null;
+    return (redondeo: modoRedondeo, columnas: incluirColumnas || !esFinanc);
+  }
 
-    // Helper de redondeo según el modo elegido
-    double redondear(double v) {
-      switch (modoRedondeo) {
-        case 1: return v.roundToDouble();
-        case 2: return (v / 10).round() * 10.0;
-        case 3: return (v / 100).round() * 100.0;
-        default: return v;
+  /// Redondeo elegido en el diálogo de exportación.
+  static double _redondearExport(double v, int modo) {
+    switch (modo) {
+      case 1:
+        return v.roundToDouble();
+      case 2:
+        return (v / 10).round() * 10.0;
+      case 3:
+        return (v / 100).round() * 100.0;
+      default:
+        return v;
+    }
+  }
+
+  static String _fmtPct(double v) {
+    final r = (v * 10).roundToDouble() / 10;
+    return r % 1 == 0 ? r.toStringAsFixed(0) : r.toStringAsFixed(1);
+  }
+
+  /// Nombre del producto para el documento: sin repetir el modelo si
+  /// el nombre ya lo trae ("TECNO SPARK 20" + "SPARK 20").
+  static String _nombreParaDocumento(Producto p) {
+    final nombre = p.nombre.trim();
+    final modelo = p.modelo.trim();
+    if (modelo.isEmpty ||
+        modelo.toUpperCase() == 'N/A' ||
+        nombre.toLowerCase().contains(modelo.toLowerCase())) {
+      return nombre;
+    }
+    return '$nombre $modelo';
+  }
+
+  /// Tabla que comparten el PDF y la imagen: encabezados y filas
+  /// agrupadas por marca (sólo productos con stock).
+  ({List<String> headers, Map<String, List<List<String>>> filas, int total})
+      _tablaExport(int modo, bool incluirColumnas) {
+    final lista = widget.lista;
+    final moneda = lista.esEnBolivares ? 'Bs' : '\$';
+    final esFinanc = lista.esFinanciamiento;
+    final decimales = modo == 0 ? 2 : 0;
+    String monto(double v) =>
+        '$moneda ${_redondearExport(v, modo).toStringAsFixed(decimales)}';
+
+    // Columnas reales (las virtuales __x__ son internas).
+    final columnas = lista.columnas
+        .where((c) => !FormulaColumna.esNombreVirtual(c.nombre))
+        .toList();
+    final mostrarColumnas = !esFinanc || incluirColumnas;
+
+    final headers = <String>['Producto'];
+    if (mostrarColumnas) headers.addAll(columnas.map((c) => c.nombre));
+    if (esFinanc) {
+      headers.add('Inicial');
+      if (lista.tieneCuotas) {
+        headers.add('Cuotas');
+        headers.add('Monto cuota');
       }
     }
 
-    // 1) Mostrar indicador de carga
-    if (!mounted) return;
-    showDialog(
-      context: context,
-      barrierDismissible: false,
-      builder: (_) => const Center(child: CircularProgressIndicator()),
-    );
-
-    try {
-      final lista = widget.lista;
-      final moneda = lista.esEnBolivares ? "Bs" : "\$";
-      final esFinanc = lista.esFinanciamiento;
-      final agrupados = _agrupadosPorMarca();
-
-      // 2) Construir documento PDF
-      final pdf = pw.Document();
-
-      // Definir columnas según el tipo de lista:
-      //   · Financiamiento: Producto | Inicial | Cuota
-      //   · Normal:         Producto | Col1 | Col2 | ...
-      // NUNCA aparece "Stock" — ni siquiera como columna.
-      final List<String> headers = ['Producto'];
-      if (esFinanc) {
-        headers.add('Inicial');
-        // Si hay condiciones por marca/modelo el número de cuotas ya
-        // no es único, así que el encabezado no lo puede anunciar.
-        final nUnif = lista.cuotasUniformes;
-        headers.add(nUnif == null ? 'Cuota' : 'Cuota x$nUnif');
-      } else {
-        // Para listas normales, usar todas las columnas configuradas.
-        // Filtramos las columnas virtuales (__inicial_manual__, etc.)
-        // que se usan internamente para persistir overrides — no son
-        // columnas reales para el cliente.
-        for (final col in lista.columnas) {
-          if (col.nombre.startsWith('__')) continue;
-          headers.add(col.nombre);
+    final filas = <String, List<List<String>>>{};
+    var total = 0;
+    // Sólo con stock (ver `_agrupadosPorMarca`).
+    for (final entry in _agrupadosPorMarca().entries) {
+      final filasMarca = <List<String>>[];
+      for (final item in entry.value) {
+        final fila = <String>[_nombreParaDocumento(item.producto)];
+        if (mostrarColumnas) {
+          for (final col in columnas) {
+            fila.add(monto(item.preciosPorColumna[col.nombre] ?? 0));
+          }
         }
+        if (esFinanc) {
+          final base = lista.precioBaseDe(item);
+          final inicial = lista.inicialDe(item, base);
+          fila.add('${monto(inicial)} '
+              '(${_fmtPct(lista.pctInicialEfectivo(item))}%)');
+          if (lista.tieneCuotas) {
+            final n = lista.cuotasDe(item);
+            fila.add('$n cuota${n == 1 ? '' : 's'}');
+            fila.add(monto(lista.cuotaDe(item, base)));
+          }
+        }
+        filasMarca.add(fila);
+        total++;
       }
+      if (filasMarca.isNotEmpty) filas[entry.key] = filasMarca;
+    }
+    return (headers: headers, filas: filas, total: total);
+  }
 
-      // 3) Página principal
-      pdf.addPage(
-        pw.MultiPage(
-          pageFormat: PdfPageFormat.a4,
-          margin: const pw.EdgeInsets.all(24),
-          build: (ctx) {
-            final widgets = <pw.Widget>[];
+  /// Resumen de las condiciones de financiamiento para el encabezado
+  /// ("Inicial 40% · 6 cuotas · recargo 20%").
+  String _condicionesFinanciamiento() {
+    final l = widget.lista;
+    final conStock = l.itemsConStock;
+    final pcts = conStock.map((it) => _fmtPct(l.pctInicialEfectivo(it))).toSet();
+    final partes = <String>[
+      pcts.length <= 1
+          ? 'Inicial ${pcts.isEmpty ? _fmtPct(l.porcentajeInicial) : pcts.first}%'
+          : 'Inicial según modelo',
+    ];
+    if (l.tieneCuotas) {
+      final ns = conStock.map(l.cuotasDe).toSet();
+      partes.add(ns.length <= 1
+          ? '${ns.isEmpty ? l.numeroCuotas : ns.first} cuotas'
+          : 'Cuotas según modelo');
+      if (l.porcentajeRecargoCuotas > 0) {
+        partes.add('Recargo ${_fmtPct(l.porcentajeRecargoCuotas)}%');
+      }
+    } else {
+      partes.add('Sin cuotas');
+    }
+    return partes.join(' · ');
+  }
 
-            // ── Encabezado con info de la tienda ──
-            // Identifica el PDF cuando se comparte en redes. Combina:
-            //   · Nombre de la empresa (si está configurado)
-            //   · Tienda específica del usuario (Principal/Sucursal)
-            //   · Teléfono / WhatsApp para que clientes contacten
-            //
-            // Siempre se muestra el bloque — aunque no haya empresa
-            // configurada, usamos un nombre genérico de TecnoLider.
-            final nombreTienda = ConfigSistema.nombreEmpresa.trim().isNotEmpty
-                ? ConfigSistema.nombreEmpresa.trim()
-                : 'TECNO LÍDER';
-            final tiendaUsuario = (usuarioSesion?.tienda ?? '').trim();
-            final telTienda = ConfigBDV.telefonoComercio.trim();
-            final vendedor = (usuarioSesion?.nombre ?? '').trim();
+  /// Arma el documento de la lista.
+  ///
+  /// [imagen] = true genera UNA sola página de alto variable (para
+  /// rasterizarla como imagen); false genera un PDF A4 multipágina.
+  Future<pw.Document> _documentoLista({
+    required bool imagen,
+    required int modo,
+    required bool incluirColumnas,
+    bool conLogo = true,
+  }) async {
+    final lista = widget.lista;
+    final moneda = lista.esEnBolivares ? 'Bs' : '\$';
+    final esFinanc = lista.esFinanciamiento;
+    final tabla = _tablaExport(modo, incluirColumnas);
+    final nCols = tabla.headers.length;
 
-            widgets.add(pw.Container(
-              width: double.infinity,
-              padding: const pw.EdgeInsets.symmetric(
-                  horizontal: 14, vertical: 12),
+    final nombreTienda = ConfigSistema.nombreEmpresa.trim().isNotEmpty
+        ? ConfigSistema.nombreEmpresa.trim()
+        : 'TECNO LÍDER';
+    final tiendaUsuario = (usuarioSesion?.tienda ?? '').trim();
+    final telTienda = ConfigBDV.telefonoComercio.trim();
+    final vendedor = (usuarioSesion?.nombre ?? '').trim();
+    pw.MemoryImage? logo;
+    if (conLogo) {
+      final bytes = ConfigSistema.encabezadoDe(tiendaUsuario).logoBytes;
+      if (bytes != null) {
+        try {
+          logo = pw.MemoryImage(bytes);
+        } catch (_) {}
+      }
+    }
+
+    // Tamaños: más columnas → letra un poco más chica.
+    final fCelda = nCols > 6 ? 8.0 : 9.5;
+    final fHeader = nCols > 6 ? 8.5 : 10.0;
+
+    final contenido = <pw.Widget>[];
+
+    // ── Encabezado con los datos de la tienda ──
+    contenido.add(pw.Container(
+      width: double.infinity,
+      padding: const pw.EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+      decoration: pw.BoxDecoration(
+        gradient: const pw.LinearGradient(
+          colors: [
+            PdfColor.fromInt(0xFF1F2270),
+            PdfColor.fromInt(0xFF3949AB),
+          ],
+          begin: pw.Alignment.centerLeft,
+          end: pw.Alignment.centerRight,
+        ),
+        borderRadius: pw.BorderRadius.circular(8),
+      ),
+      child: pw.Row(
+        crossAxisAlignment: pw.CrossAxisAlignment.center,
+        children: [
+          if (logo != null)
+            pw.Container(
+              width: 52,
+              height: 52,
+              padding: const pw.EdgeInsets.all(3),
               decoration: pw.BoxDecoration(
-                gradient: const pw.LinearGradient(
-                  colors: [
-                    PdfColor.fromInt(0xFF1F2270),
-                    PdfColor.fromInt(0xFF3949AB),
-                  ],
-                  begin: pw.Alignment.centerLeft,
-                  end: pw.Alignment.centerRight,
-                ),
+                color: PdfColors.white,
                 borderRadius: pw.BorderRadius.circular(8),
               ),
-              child: pw.Row(
-                crossAxisAlignment: pw.CrossAxisAlignment.center,
+              child: pw.Image(logo, fit: pw.BoxFit.contain),
+            )
+          else
+            pw.Container(
+              width: 48,
+              height: 48,
+              decoration: const pw.BoxDecoration(
+                color: PdfColor.fromInt(0xFFFFC20E),
+                shape: pw.BoxShape.circle,
+              ),
+              alignment: pw.Alignment.center,
+              child: pw.Text(
+                nombreTienda.substring(0, 1).toUpperCase(),
+                style: pw.TextStyle(
+                  fontSize: 26,
+                  fontWeight: pw.FontWeight.bold,
+                  color: const PdfColor.fromInt(0xFF1F2270),
+                ),
+              ),
+            ),
+          pw.SizedBox(width: 14),
+          pw.Expanded(
+            child: pw.Column(
+              crossAxisAlignment: pw.CrossAxisAlignment.start,
+              children: [
+                pw.Text(nombreTienda,
+                    style: pw.TextStyle(
+                      fontSize: 20,
+                      fontWeight: pw.FontWeight.bold,
+                      color: PdfColors.white,
+                      letterSpacing: 1,
+                    )),
+                if (tiendaUsuario.isNotEmpty) ...[
+                  pw.SizedBox(height: 2),
+                  pw.Text(tiendaUsuario,
+                      style: const pw.TextStyle(
+                          fontSize: 11, color: PdfColors.white)),
+                ],
+                if (telTienda.isNotEmpty) ...[
+                  pw.SizedBox(height: 2),
+                  pw.Text('Tel / WhatsApp: $telTienda',
+                      style: const pw.TextStyle(
+                          fontSize: 10, color: PdfColors.white)),
+                ],
+              ],
+            ),
+          ),
+          if (vendedor.isNotEmpty)
+            pw.Container(
+              padding:
+                  const pw.EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+              decoration: pw.BoxDecoration(
+                color: PdfColors.white.shade(0.15),
+                borderRadius: pw.BorderRadius.circular(4),
+              ),
+              child: pw.Column(
+                crossAxisAlignment: pw.CrossAxisAlignment.end,
                 children: [
-                  // "Logo" textual (un círculo con la inicial)
-                  pw.Container(
-                    width: 48,
-                    height: 48,
-                    decoration: pw.BoxDecoration(
-                      color: const PdfColor.fromInt(0xFFFFC20E),
-                      shape: pw.BoxShape.circle,
-                    ),
-                    alignment: pw.Alignment.center,
-                    child: pw.Text(
-                      nombreTienda.substring(0, 1).toUpperCase(),
+                  pw.Text('Asesor',
+                      style: const pw.TextStyle(
+                          fontSize: 8, color: PdfColors.white)),
+                  pw.Text(vendedor,
                       style: pw.TextStyle(
-                        fontSize: 26,
+                        fontSize: 10,
                         fontWeight: pw.FontWeight.bold,
-                        color: const PdfColor.fromInt(0xFF1F2270),
-                      ),
-                    ),
-                  ),
-                  pw.SizedBox(width: 14),
-                  // Info de la tienda
-                  pw.Expanded(
-                    child: pw.Column(
-                      crossAxisAlignment: pw.CrossAxisAlignment.start,
-                      children: [
-                        pw.Text(
-                          nombreTienda,
-                          style: pw.TextStyle(
-                            fontSize: 20,
-                            fontWeight: pw.FontWeight.bold,
-                            color: PdfColors.white,
-                            letterSpacing: 1,
-                          ),
-                        ),
-                        if (tiendaUsuario.isNotEmpty) ...[
-                          pw.SizedBox(height: 2),
-                          pw.Text(
-                            tiendaUsuario,
-                            style: const pw.TextStyle(
-                              fontSize: 11,
-                              color: PdfColors.white,
-                            ),
-                          ),
-                        ],
-                        if (telTienda.isNotEmpty) ...[
-                          pw.SizedBox(height: 2),
-                          pw.Text(
-                            'Tel / WhatsApp: $telTienda',
-                            style: const pw.TextStyle(
-                              fontSize: 10,
-                              color: PdfColors.white,
-                            ),
-                          ),
-                        ],
-                      ],
-                    ),
-                  ),
-                  // Asesor / vendedor que generó la lista
-                  if (vendedor.isNotEmpty)
-                    pw.Container(
-                      padding: const pw.EdgeInsets.symmetric(
-                          horizontal: 8, vertical: 4),
-                      decoration: pw.BoxDecoration(
-                        color: PdfColors.white.shade(0.15),
-                        borderRadius: pw.BorderRadius.circular(4),
-                      ),
-                      child: pw.Column(
-                        crossAxisAlignment: pw.CrossAxisAlignment.end,
-                        children: [
-                          pw.Text(
-                            'Asesor',
-                            style: const pw.TextStyle(
-                              fontSize: 8,
-                              color: PdfColors.white,
-                            ),
-                          ),
-                          pw.Text(
-                            vendedor,
-                            style: pw.TextStyle(
-                              fontSize: 10,
-                              fontWeight: pw.FontWeight.bold,
-                              color: PdfColors.white,
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
+                        color: PdfColors.white,
+                      )),
                 ],
               ),
-            ));
-            widgets.add(pw.SizedBox(height: 14));
+            ),
+        ],
+      ),
+    ));
+    contenido.add(pw.SizedBox(height: 12));
 
-            // ── Encabezado ──
-            widgets.add(pw.Center(
-              child: pw.Text(
-                lista.nombre,
-                style: pw.TextStyle(
-                    fontSize: 20, fontWeight: pw.FontWeight.bold),
-              ),
-            ));
-            widgets.add(pw.SizedBox(height: 4));
-            widgets.add(pw.Center(
-              child: pw.Text(
-                '${lista.categoria} · '
-                '${lista.marcaFiltro == "Todas" ? "Todas las marcas" : lista.marcaFiltro} · '
-                '$moneda'
-                '${esFinanc ? " · ${lista.financiadora ?? "Financiamiento"}" : ""}',
-                style: const pw.TextStyle(
-                    fontSize: 11, color: PdfColors.grey700),
-              ),
-            ));
-            widgets.add(pw.SizedBox(height: 2));
-            widgets.add(pw.Center(
-              child: pw.Text(
-                'Generada: ${DateTime.now().toString().substring(0, 16)}',
-                style: const pw.TextStyle(
-                    fontSize: 9, color: PdfColors.grey600),
-              ),
-            ));
-            widgets.add(pw.SizedBox(height: 16));
-
-            // ── Tabla por marca ──
-            for (final entry in agrupados.entries) {
-              final marca = entry.key;
-              final items = entry.value;
-
-              // Título de la sección (marca)
-              widgets.add(pw.Container(
-                width: double.infinity,
-                color: PdfColors.blue50,
-                padding: const pw.EdgeInsets.symmetric(
-                    horizontal: 6, vertical: 4),
-                child: pw.Text(
-                  marca,
-                  style: pw.TextStyle(
-                      fontSize: 12,
-                      fontWeight: pw.FontWeight.bold,
-                      color: PdfColors.blue900),
-                ),
-              ));
-
-              // Construir filas de la tabla
-              final filas = <List<String>>[];
-              for (final item in items) {
-                final fila = <String>[];
-
-                // Columna 1: nombre del producto (con modelo si aplica)
-                // PUNTO 3: evitar que salga "nombre modelo" repetido.
-                // Si el nombre del producto YA contiene el modelo (caso
-                // muy común: nombre="TECNO SPARK 20" modelo="SPARK 20"),
-                // no lo concatenamos otra vez.
-                final nombreProd = item.producto.nombre.trim();
-                final modeloProd = item.producto.modelo.trim();
-                final String nombreCompleto;
-                if (modeloProd.isEmpty ||
-                    nombreProd.toLowerCase().contains(modeloProd.toLowerCase())) {
-                  // El nombre ya incluye el modelo (o no hay modelo)
-                  nombreCompleto = nombreProd;
-                } else {
-                  nombreCompleto = '$nombreProd $modeloProd';
-                }
-                fila.add(nombreCompleto);
-
-                // Columnas de precios según tipo de lista
-                if (esFinanc) {
-                  // Cálculo de inicial + cuota.
-                  // Tomamos el primer precio definido (la columna
-                  // principal de la financiadora) como base.
-                  double precioBase = 0;
-                  for (final col in lista.columnas) {
-                    if (col.nombre.startsWith('__')) continue;
-                    precioBase = item.preciosPorColumna[col.nombre] ?? 0;
-                    if (precioBase > 0) break;
-                  }
-
-                  // Inicial y cuota salen de los mismos helpers que
-                  // usa la pantalla, así que respetan tanto los montos
-                  // fijados a mano como el % y las cuotas propias de
-                  // esa marca o ese modelo.
-                  final inicial = lista.inicialDe(item, precioBase);
-                  final cuota = lista.cuotaDe(item, precioBase);
-
-                  // NO mostramos el precio base — solo inicial + cuota
-                  fila.add('$moneda ${redondear(inicial).toStringAsFixed(2)}');
-                  fila.add('$moneda ${redondear(cuota).toStringAsFixed(2)}');
-                } else {
-                  // Lista normal: una celda por columna real
-                  for (final col in lista.columnas) {
-                    if (col.nombre.startsWith('__')) continue;
-                    final precio = item.preciosPorColumna[col.nombre] ?? 0;
-                    fila.add('$moneda ${redondear(precio).toStringAsFixed(2)}');
-                  }
-                }
-
-                filas.add(fila);
-              }
-
-              // Tabla con encabezado + filas
-              widgets.add(pw.Table.fromTextArray(
-                headers: headers,
-                data: filas,
-                cellAlignment: pw.Alignment.centerLeft,
-                cellAlignments: {
-                  for (var i = 1; i < headers.length; i++)
-                    i: pw.Alignment.centerRight,
-                },
-                headerStyle: pw.TextStyle(
-                    fontWeight: pw.FontWeight.bold,
-                    fontSize: 10,
-                    color: PdfColors.white),
-                headerDecoration: const pw.BoxDecoration(
-                    color: PdfColors.blueGrey700),
-                cellStyle: const pw.TextStyle(fontSize: 9),
-                cellPadding: const pw.EdgeInsets.symmetric(
-                    horizontal: 5, vertical: 3),
-                border: pw.TableBorder.all(
-                    color: PdfColors.grey400, width: 0.5),
-              ));
-
-              widgets.add(pw.SizedBox(height: 10));
-            }
-
-            return widgets;
-          },
+    // ── Título de la lista ──
+    contenido.add(pw.Center(
+      child: pw.Text(lista.nombre,
+          style: pw.TextStyle(fontSize: 20, fontWeight: pw.FontWeight.bold)),
+    ));
+    contenido.add(pw.SizedBox(height: 4));
+    contenido.add(pw.Center(
+      child: pw.Text(
+        '${lista.categoria} · '
+        '${lista.marcaFiltro == "Todas" ? "Todas las marcas" : lista.marcaFiltro} · '
+        '$moneda'
+        '${esFinanc ? " · ${lista.financiadora ?? "Financiamiento"}" : ""}',
+        style: const pw.TextStyle(fontSize: 11, color: PdfColors.grey700),
+      ),
+    ));
+    if (esFinanc) {
+      contenido.add(pw.SizedBox(height: 4));
+      contenido.add(pw.Center(
+        child: pw.Container(
+          padding: const pw.EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+          decoration: pw.BoxDecoration(
+            color: PdfColors.blue50,
+            borderRadius: pw.BorderRadius.circular(10),
+          ),
+          child: pw.Text(_condicionesFinanciamiento(),
+              style: pw.TextStyle(
+                  fontSize: 11,
+                  fontWeight: pw.FontWeight.bold,
+                  color: PdfColors.blue900)),
         ),
-      );
+      ));
+    }
+    contenido.add(pw.SizedBox(height: 2));
+    contenido.add(pw.Center(
+      child: pw.Text(
+        '${tabla.total} producto${tabla.total == 1 ? "" : "s"} · '
+        'Generada: ${DateTime.now().toString().substring(0, 16)}',
+        style: const pw.TextStyle(fontSize: 9, color: PdfColors.grey600),
+      ),
+    ));
+    contenido.add(pw.SizedBox(height: 12));
 
-      // 4) Generar bytes y compartir
-      final bytes = await pdf.save();
+    if (tabla.filas.isEmpty) {
+      contenido.add(pw.Center(
+        child: pw.Text('No hay productos con stock en esta lista.',
+            style: const pw.TextStyle(fontSize: 12, color: PdfColors.grey700)),
+      ));
+    }
 
-      // Cerrar el indicador de carga ANTES de compartir
-      if (mounted) Navigator.of(context).pop();
+    // ── Una tabla por marca ──
+    for (final entry in tabla.filas.entries) {
+      contenido.add(pw.Container(
+        width: double.infinity,
+        color: PdfColors.blue50,
+        padding: const pw.EdgeInsets.symmetric(horizontal: 6, vertical: 4),
+        child: pw.Text(entry.key,
+            style: pw.TextStyle(
+                fontSize: 12,
+                fontWeight: pw.FontWeight.bold,
+                color: PdfColors.blue900)),
+      ));
+      contenido.add(pw.TableHelper.fromTextArray(
+        headers: tabla.headers,
+        data: entry.value,
+        columnWidths: {
+          0: const pw.FlexColumnWidth(3),
+          for (var i = 1; i < nCols; i++) i: const pw.FlexColumnWidth(1.4),
+        },
+        cellAlignment: pw.Alignment.centerLeft,
+        cellAlignments: {
+          for (var i = 1; i < nCols; i++) i: pw.Alignment.centerRight,
+        },
+        headerAlignments: {
+          for (var i = 1; i < nCols; i++) i: pw.Alignment.centerRight,
+        },
+        headerStyle: pw.TextStyle(
+            fontWeight: pw.FontWeight.bold,
+            fontSize: fHeader,
+            color: PdfColors.white),
+        headerDecoration:
+            const pw.BoxDecoration(color: PdfColors.blueGrey700),
+        cellStyle: pw.TextStyle(fontSize: fCelda),
+        oddRowDecoration: const pw.BoxDecoration(color: PdfColors.grey100),
+        cellPadding: const pw.EdgeInsets.symmetric(horizontal: 5, vertical: 3),
+        border: pw.TableBorder.all(color: PdfColors.grey400, width: 0.5),
+      ));
+      contenido.add(pw.SizedBox(height: 10));
+    }
 
-      // Nombre de archivo amigable
-      final nombreArch = 'lista_precios_${lista.nombre}_'
-          '${DateTime.now().toString().substring(0, 10)}.pdf'
+    // ── Pie ──
+    contenido.add(pw.Center(
+      child: pw.Text(
+        'Precios sujetos a cambios sin previo aviso · '
+        'Garantía: ${ConfigSistema.diasGarantia} días',
+        style: pw.TextStyle(
+            fontSize: 9,
+            fontStyle: pw.FontStyle.italic,
+            color: PdfColors.grey600),
+      ),
+    ));
+
+    final pdf = pw.Document();
+    if (imagen) {
+      // Una sola página con el alto justo del contenido. El ancho
+      // crece con la cantidad de columnas para que no se aprieten.
+      final ancho = nCols > 6 ? 820.0 : (nCols > 4 ? 680.0 : 560.0);
+      pdf.addPage(pw.Page(
+        pageFormat: PdfPageFormat(ancho, double.infinity, marginAll: 18),
+        build: (ctx) => pw.Column(
+          mainAxisSize: pw.MainAxisSize.min,
+          crossAxisAlignment: pw.CrossAxisAlignment.stretch,
+          children: contenido,
+        ),
+      ));
+    } else {
+      pdf.addPage(pw.MultiPage(
+        // Muchas columnas → hoja horizontal.
+        pageFormat:
+            nCols > 6 ? PdfPageFormat.a4.landscape : PdfPageFormat.a4,
+        margin: const pw.EdgeInsets.all(24),
+        build: (ctx) => contenido,
+      ));
+    }
+    return pdf;
+  }
+
+  /// Genera el documento; si el logo de la tienda no se puede usar
+  /// (imagen dañada o formato raro) lo repite sin logo.
+  Future<Uint8List> _bytesDocumentoLista({
+    required bool imagen,
+    required int modo,
+    required bool incluirColumnas,
+    void Function(pw.Document doc)? alGuardar,
+  }) async {
+    try {
+      final doc = await _documentoLista(
+          imagen: imagen, modo: modo, incluirColumnas: incluirColumnas);
+      final b = await doc.save();
+      alGuardar?.call(doc);
+      return b;
+    } catch (e) {
+      debugPrint('[ListaPrecios] Documento con logo falló ($e), sin logo');
+      final doc = await _documentoLista(
+          imagen: imagen,
+          modo: modo,
+          incluirColumnas: incluirColumnas,
+          conLogo: false);
+      final b = await doc.save();
+      alGuardar?.call(doc);
+      return b;
+    }
+  }
+
+  /// Nombre de archivo seguro para la lista.
+  String _nombreArchivoLista(String ext) =>
+      'lista_precios_${widget.lista.nombre}_'
+              '${DateTime.now().toString().substring(0, 16)}.$ext'
           .replaceAll(RegExp(r'[^a-zA-Z0-9._-]+'), '_');
 
-      // Diálogo nativo de compartir → WhatsApp, correo, descargar...
-      await Printing.sharePdf(bytes: bytes, filename: nombreArch);
+  /// Muestra un spinner modal mientras se genera el documento.
+  void _mostrarGenerando(String texto) {
+    showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => PopScope(
+        canPop: false,
+        child: Center(
+          child: Card(
+            child: Padding(
+              padding: const EdgeInsets.all(20),
+              child: Column(mainAxisSize: MainAxisSize.min, children: [
+                const CircularProgressIndicator(),
+                const SizedBox(height: 12),
+                Text(texto),
+              ]),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// Avisa dónde quedó guardado el archivo (escritorio).
+  void _avisarGuardado(String? ruta, String que) {
+    if (!mounted || ruta == null) return;
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+      content: Text('$que guardado en:\n$ruta'),
+      backgroundColor: AppColors.statusGreen,
+      duration: const Duration(seconds: 8),
+      action: SnackBarAction(
+        label: 'ABRIR',
+        textColor: Colors.white,
+        onPressed: () => OpenFilex.open(ruta),
+      ),
+    ));
+  }
+
+  /// Exporta la lista como IMAGEN PNG de alta resolución, en una sola
+  /// "hoja larga" ideal para WhatsApp o redes sociales. Mismo contenido
+  /// que el PDF.
+  Future<void> _exportarImagen() async {
+    if (!mounted) return;
+    final opciones = await _pedirOpcionesExportacion(esImagen: true);
+    if (opciones == null || !mounted) return;
+
+    _mostrarGenerando('Generando imagen…');
+    var spinnerAbierto = true;
+    void cerrarSpinner() {
+      if (spinnerAbierto && mounted) {
+        Navigator.of(context, rootNavigator: true).pop();
+      }
+      spinnerAbierto = false;
+    }
+
+    try {
+      PdfPageFormat? formato;
+      final pdfBytes = await _bytesDocumentoLista(
+        imagen: true,
+        modo: opciones.redondeo,
+        incluirColumnas: opciones.columnas,
+        alGuardar: (doc) {
+          final paginas = doc.document.pdfPageList.pages;
+          if (paginas.isNotEmpty) formato = paginas.first.pageFormat;
+        },
+      );
+
+      // Resolución: ~3,2 px por punto (≈ 230 ppp → 1800 px de ancho en
+      // una lista de pocas columnas). Las listas MUY largas bajan un
+      // poco para no pasar de ~32 megapíxeles (el teléfono se queda
+      // sin memoria con imágenes más grandes).
+      var dpi = 230.0;
+      final w = formato?.width ?? 560;
+      final h = formato?.height ?? 2000;
+      if (w > 0 && h > 0 && h.isFinite) {
+        final maxDpi = 72 * math.sqrt(32e6 / (w * h));
+        if (maxDpi < dpi) dpi = math.max(110.0, maxDpi);
+      }
+
+      Uint8List? png;
+      await for (final pagina in Printing.raster(pdfBytes, pages: [0], dpi: dpi)) {
+        png = await pagina.toPng();
+        break;
+      }
+      if (png == null) throw Exception('No se pudo generar la imagen');
+
+      cerrarSpinner();
+      final ruta = await guardarArchivoDeLista(
+          png, _nombreArchivoLista('png'), 'image/png',
+          texto: 'Lista de Precios: ${widget.lista.nombre}');
+      _avisarGuardado(ruta, 'Imagen');
     } catch (e) {
-      // Cerrar el indicador si quedó abierto
-      if (mounted) Navigator.of(context).pop();
+      cerrarSpinner();
+      // El usuario cerró el diálogo "Guardar como": no es un error.
+      if (e is StateError && e.message == 'cancelado') return;
+      debugPrint('[ListaPrecios._exportarImagen] error: $e');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text('Error generando imagen: $e'),
+          backgroundColor: Colors.red));
+      }
+    }
+  }
+
+  /// Genera y comparte (o guarda, en escritorio) el PDF de la lista.
+  /// Mismo contenido que la imagen (ver comentario de la sección).
+  Future<void> _exportarPdf() async {
+    if (!mounted) return;
+    final opciones = await _pedirOpcionesExportacion(esImagen: false);
+    if (opciones == null || !mounted) return;
+
+    _mostrarGenerando('Generando PDF…');
+    var spinnerAbierto = true;
+    void cerrarSpinner() {
+      if (spinnerAbierto && mounted) {
+        Navigator.of(context, rootNavigator: true).pop();
+      }
+      spinnerAbierto = false;
+    }
+
+    try {
+      final bytes = await _bytesDocumentoLista(
+        imagen: false,
+        modo: opciones.redondeo,
+        incluirColumnas: opciones.columnas,
+      );
+      cerrarSpinner();
+      final nombreArch = _nombreArchivoLista('pdf');
+      if (!kIsWeb && (Platform.isAndroid || Platform.isIOS)) {
+        // Diálogo nativo de compartir → WhatsApp, correo, descargar...
+        await Printing.sharePdf(bytes: bytes, filename: nombreArch);
+      } else {
+        final ruta =
+            await guardarArchivoDeLista(bytes, nombreArch, 'application/pdf');
+        _avisarGuardado(ruta, 'PDF');
+      }
+    } catch (e) {
+      cerrarSpinner();
+      // El usuario cerró el diálogo "Guardar como": no es un error.
+      if (e is StateError && e.message == 'cancelado') return;
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(
           content: Text('Error al generar PDF: $e'),
@@ -36067,13 +36952,17 @@ class _DetalleListaPrecioState extends State<DetalleListaPrecio> {
 
   @override
   Widget build(BuildContext context) {
-    final agrupados = _agrupadosPorMarca();
     final moneda = widget.lista.esEnBolivares ? "Bs" : "\$";
     // Administrador, Dueño y Maestro pueden crear/editar listas de precios.
     // Otros roles las ven en modo lectura.
     final esAdmin = (usuarioSesion?.rol == "Administrador" ||
                      usuarioSesion?.rol == "Dueño" ||
                      usuarioSesion?.rol == "Maestro");
+    // Los agotados sólo los puede ver el admin (para editar precios).
+    final agrupados =
+        _agrupadosPorMarca(incluirAgotados: esAdmin && _mostrarAgotados);
+    final agotados = widget.lista.items.length -
+        widget.lista.itemsConStock.length;
     // Editor masivo de precios — Admin, Dueño, Maestro Y Gerente
     final puedeEditarPorcentajes = esAdmin ||
         usuarioSesion?.rol == "Gerente";
@@ -36183,39 +37072,12 @@ class _DetalleListaPrecioState extends State<DetalleListaPrecio> {
                       if (widget.lista.esEnBolivares && TasaBCVScheduler.ultimaTasa != null) {
                         widget.lista.tasaDelDia = ConfigSistema.tasaCambio;
                       }
-                      setState(() {
-                        // Re-poblar usando la lógica de VentanaListasPrecios
-                        final tasa = widget.lista.esEnBolivares ? ConfigSistema.tasaCambio : 1.0;
-                        final filtrados = catalogoGlobal.where((p) {
-                          final catOk = widget.lista.categoria == "Todos" || p.categoria == widget.lista.categoria;
-                          final marcaOk = widget.lista.marcaFiltro == "Todas" ||
-                              p.marca.toLowerCase() == widget.lista.marcaFiltro.toLowerCase();
-                          return catOk && marcaOk;
-                        }).toList()
-                          ..sort((a, b) {
-                            final mc = a.marca.toLowerCase().compareTo(b.marca.toLowerCase());
-                            return mc != 0 ? mc : a.nombre.toLowerCase().compareTo(b.nombre.toLowerCase());
-                          });
-                        widget.lista.items.clear();
-                        for (final p in filtrados) {
-                          final stock = CategoriasProductos.usaIMEI(p.categoria)
-                              ? stockImeiGlobal.where((i) => i.producto.codigo == p.codigo && !i.vendido).length
-                              : p.stockManual;
-                          final precioBase = widget.lista.esEnBolivares ? (p.precioVenta * tasa) : p.precioVenta;
-                          widget.lista.items.add(ItemListaPrecio(
-                            producto: p,
-                            stockDisponible: stock,
-                            preciosPorColumna: { for (var col in widget.lista.columnas) col.nombre: precioBase },
-                          ));
-                        }
-                        // Las columnas con funcion mandan sobre el
-                        // precio heredado del catalogo.
-                        widget.lista.aplicarFormulas();
-                      });
                       Navigator.pop(ctx);
-                      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-                        content: Text("✅ ${widget.lista.items.length} productos actualizados"),
-                        backgroundColor: AppColors.statusGreen));
+                      // Misma lógica que al abrir una lista vacía: sólo
+                      // productos padre con stock (todas las tiendas),
+                      // precio venta + % adicional (× tasa en Bs),
+                      // funciones de columna y guardado en el servidor.
+                      _repoblarDesdeCatalogo();
                     }),
                 ],
               ))),
@@ -36280,10 +37142,16 @@ class _DetalleListaPrecioState extends State<DetalleListaPrecio> {
       ),
       body: widget.lista.items.isEmpty
           ? Center(child: Column(mainAxisAlignment: MainAxisAlignment.center, children: [
-              const CircularProgressIndicator(),
+              if (_cargandoStock)
+                const CircularProgressIndicator()
+              else
+                Icon(Icons.inventory_2_outlined,
+                    size: 56, color: Colors.grey[400]),
               const SizedBox(height: 16),
-              const Text("Cargando productos...",
-                  style: TextStyle(fontSize: 14, color: Colors.grey)),
+              Text(_cargandoStock
+                      ? "Cargando productos..."
+                      : "No hay productos con stock para esta lista",
+                  style: const TextStyle(fontSize: 14, color: Colors.grey)),
               const SizedBox(height: 4),
               Text(
                   "Categoría: ${widget.lista.categoria} · Marca: ${widget.lista.marcaFiltro}",
@@ -36310,6 +37178,46 @@ class _DetalleListaPrecioState extends State<DetalleListaPrecio> {
                     contentPadding: const EdgeInsets.symmetric(vertical: 10)),
                   onChanged: (v) => setState(() => _busqueda = v)),
               ),
+
+              // ── Productos agotados ──
+              // Siguen en la lista (con sus precios) pero no se
+              // muestran ni se exportan. El admin puede verlos para
+              // editarlos antes de que vuelva el stock.
+              if (agotados > 0)
+                Container(
+                  width: double.infinity,
+                  margin: const EdgeInsets.fromLTRB(12, 2, 12, 4),
+                  padding: const EdgeInsets.symmetric(
+                      horizontal: 10, vertical: 4),
+                  decoration: BoxDecoration(
+                    color: Colors.orange.withValues(alpha: 0.08),
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                  child: Row(children: [
+                    const Icon(Icons.inventory_2_outlined,
+                        size: 16, color: AppColors.statusOrange),
+                    const SizedBox(width: 6),
+                    Expanded(
+                      child: Text(
+                          esAdmin && _mostrarAgotados
+                              ? '$agotados agotado(s) visible(s): no salen '
+                                'en PDF, imagen ni consulta rápida'
+                              : '$agotados producto(s) agotado(s) oculto(s) '
+                                '(conservan sus precios para cuando vuelva '
+                                'el stock)',
+                          style: const TextStyle(
+                              fontSize: 11, color: AppColors.statusOrange)),
+                    ),
+                    if (esAdmin)
+                      TextButton(
+                        onPressed: () => setState(
+                            () => _mostrarAgotados = !_mostrarAgotados),
+                        child: Text(
+                            _mostrarAgotados ? 'Ocultar' : 'Mostrar',
+                            style: const TextStyle(fontSize: 11)),
+                      ),
+                  ]),
+                ),
 
               // Encabezado de columnas (sticky)
               if (widget.lista.columnas.isNotEmpty)
@@ -36474,7 +37382,7 @@ class _DetalleListaPrecioState extends State<DetalleListaPrecio> {
   }
 
   Widget _buildItemRow(ItemListaPrecio item, bool esAdmin, String moneda) {
-    final stockOk = item.stockDisponible > 0;
+    final stockOk = stockVivoDeItem(item) > 0;
     final esFinanc = widget.lista.esFinanciamiento;
 
     // ── Cálculo de valores de financiamiento ─────────────────
@@ -36670,18 +37578,13 @@ class _DetalleListaPrecioState extends State<DetalleListaPrecio> {
           ..._celdasColumnas(item, esAdmin, moneda, widget.lista.columnas),
         const SizedBox(width: 8),
         // ── Stock disponible (DESPUÉS de los precios) ────────
+        // Es el stock REAL (todas las tiendas + variantes), calculado en
+        // vivo: ya no se edita a mano acá, porque decide si el producto
+        // sale o no en la lista. El stock se ajusta en el inventario.
         SizedBox(width: 56, child: _CeldaConEtiqueta(
           etiqueta: 'Stock',
           colorEtiqueta: stockOk ? AppColors.statusGreen : AppColors.statusRed,
-          child: esAdmin
-              ? _CeldaPrecioInline(
-                  key: ValueKey('stock-${item.producto.codigo}'),
-                  valor: item.stockDisponible.toDouble(),
-                  moneda: '',
-                  onCambio: (v) =>
-                      setState(() => item.stockDisponible = v.toInt()),
-                )
-              : Container(
+          child: Container(
                   alignment: Alignment.center,
                   padding: const EdgeInsets.symmetric(vertical: 4),
                   decoration: BoxDecoration(
@@ -36702,7 +37605,10 @@ class _DetalleListaPrecioState extends State<DetalleListaPrecio> {
             icon: const Icon(Icons.remove_circle_outline, size: 20, color: Colors.red),
             padding: EdgeInsets.zero,
             tooltip: 'Eliminar producto de la lista',
-            onPressed: () => setState(() => widget.lista.items.remove(item)),
+            onPressed: () {
+              setState(() => widget.lista.items.remove(item));
+              _persistirLista(); // sincronizar con backend
+            },
           )),
       ]),
     );
