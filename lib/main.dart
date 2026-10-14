@@ -7954,7 +7954,8 @@ List<Extraccion>               extraccionesGlobal             = [];
 // ────────────────────────────────────────────────────────────
 bool puedeVerTodasLasTiendas() {
   final rol = usuarioSesion?.rol;
-  return rol == 'Administrador' || rol == 'Dueño' || rol == 'Gerente';
+  return rol == 'Administrador' || rol == 'Dueño' || rol == 'Gerente' ||
+      rol == 'Maestro'; // el maestro (soporte) tiene acceso total
 }
 
 /// Devuelve la tienda asignada al usuario actual. Vacío = sin restricción
