@@ -45,6 +45,8 @@ import 'package:mailer/smtp_server.dart' as smtp;
 // POST_NOTIFICATIONS en Android 13+ ya se solicita en PermisosApp).
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 
+part 'auditoria_facturas.dart';
+
 
 // ═══════════════════════════════════════════════════════════════════════
 //  SISTEMA DE ACTUALIZACIÓN OTA (Android + Windows)
@@ -10553,25 +10555,21 @@ class _ResumenInicialFactura {
     required this.financiadora,
   });
 
-  /// % que representa la inicial sobre (inicial + financiado).
-  double? get porcentaje {
-    final fin = financiadoUsd;
-    if (fin == null || fin <= 0 || inicialUsd <= 0) return null;
-    return inicialUsd / (inicialUsd + fin) * 100;
-  }
+  // YA NO se imprime el % de inicial ni un "Financiado por X: $N".
+  // Ambos salían de `financiadoUsd` (N° cuotas × monto de cuota), que
+  // NO es el saldo financiado: las cuotas de Krece llevan su recargo y
+  // las escribe el vendedor. Caso real (factura 304, Geo Cell, Krece):
+  // inicial Bs 48.224 = $55,13 y 6 cuotas de $14 → se imprimía
+  // "Financiado por Krece: $84" (6 × 14) e "Inicial (39.6%)"
+  // (55,13 / (55,13 + 84)), cifras que no corresponden a nada. Ahora la
+  // factura dice solo la inicial y las cuotas tal como quedaron.
 
-  /// "Inicial (40%)" o "Inicial" si no se puede calcular el %.
-  String get etiquetaInicial {
-    final pct = porcentaje;
-    if (pct == null) return 'Inicial';
-    final redondeado = (pct - pct.roundToDouble()).abs() < 0.05;
-    return 'Inicial (${pct.toStringAsFixed(redondeado ? 0 : 1)}%)';
-  }
-
-  /// "Financiado por Cashea" / "Saldo financiado".
-  String get etiquetaFinanciado => financiadora.isNotEmpty
-      ? 'Financiado por $financiadora'
-      : 'Saldo financiado';
+  /// "Cuotas: 6 de $14.00" o null si no hay datos de cuotas.
+  String? get textoCuotas =>
+      (numeroCuotas != null && numeroCuotas! > 0 &&
+              montoCuota != null && montoCuota! > 0)
+          ? 'Cuotas: $numeroCuotas de ${formatCurrency(montoCuota!)}'
+          : null;
 
   bool esPagoInicial(PagoFactura p) =>
       pagosInicial.any((x) => identical(x, p));
@@ -10639,8 +10637,8 @@ _ResumenInicialFactura? _resumenInicialFactura(
 }
 
 /// Bloque PDF con el concepto "Inicial" de una venta financiada:
-///   Inicial (40%):            $50.00
-///   Financiado por Cashea:    $75.00   (solo si hay dato de cuotas)
+///   Inicial:                  $50.00
+///   Cuotas: 6 de $14.00       (solo si hay dato de cuotas)
 pw.Widget _bloqueInicialPdf(_ResumenInicialFactura r,
     {required double fontSize}) {
   pw.Widget fila(String etiqueta, String valor, {bool fuerte = false}) =>
@@ -10665,7 +10663,7 @@ pw.Widget _bloqueInicialPdf(_ResumenInicialFactura r,
   return pw.Column(
     crossAxisAlignment: pw.CrossAxisAlignment.stretch,
     children: [
-      fila(r.etiquetaInicial, formatCurrency(r.inicialUsd), fuerte: true),
+      fila('Inicial', formatCurrency(r.inicialUsd), fuerte: true),
       // Si la inicial se pagó completa en bolívares, su monto en Bs
       // va en una línea aparte (cabe en térmica de 58mm).
       if (r.inicialBs != null)
@@ -10676,8 +10674,14 @@ pw.Widget _bloqueInicialPdf(_ResumenInicialFactura r,
               fontSize: fontSize * 0.9,
               fontWeight: pw.FontWeight.bold,
               color: PdfColors.black))),
-      if (r.financiadoUsd != null && r.financiadoUsd! > 0)
-        fila(r.etiquetaFinanciado, formatCurrency(r.financiadoUsd!)),
+      if (r.textoCuotas != null)
+        pw.Padding(
+          padding: const pw.EdgeInsets.only(top: 1),
+          child: pw.Text(r.textoCuotas!,
+            style: pw.TextStyle(
+              fontSize: fontSize,
+              fontWeight: pw.FontWeight.bold,
+              color: PdfColors.black))),
     ]);
 }
 
@@ -14434,6 +14438,10 @@ Future<File?> generarFacturaPDF(FacturaModel factura) async {
                             style: pw.TextStyle(
                               fontSize: 9, color: PdfColors.grey700,
                               fontWeight: pw.FontWeight.bold)),
+                        ...lineasPrecioReferenciaPdf(factura, e.producto,
+                            esEquipo: true,
+                            ventaFinanciada: resumenIni != null,
+                            fontSize: 8.5),
                       ],
                     )),
                   pw.Padding(padding: const pw.EdgeInsets.all(5),
@@ -14443,7 +14451,15 @@ Future<File?> generarFacturaPDF(FacturaModel factura) async {
               }),
               ...factura.itemsSinImei.map((p) => pw.TableRow(children: [
                 pw.Padding(padding: const pw.EdgeInsets.all(5),
-                  child: pw.Text(p.nombre, style: const pw.TextStyle(fontSize: 10))),
+                  child: pw.Column(
+                    crossAxisAlignment: pw.CrossAxisAlignment.start,
+                    children: [
+                      pw.Text(p.nombre, style: const pw.TextStyle(fontSize: 10)),
+                      ...lineasPrecioReferenciaPdf(factura, p,
+                          esEquipo: false,
+                          ventaFinanciada: resumenIni != null,
+                          fontSize: 8.5),
+                    ])),
                 pw.Padding(padding: const pw.EdgeInsets.all(5),
                   child: pw.Text(p.codigo, style: const pw.TextStyle(fontSize: 9))),
               ])),
@@ -14464,8 +14480,6 @@ Future<File?> generarFacturaPDF(FacturaModel factura) async {
             // Así el cliente ve claramente el plan de financiamiento.
             // Se muestran cuotas si existen, sin importar el tipo
             // del pago (ver PDF térmico para detalles del cambio).
-            final tieneCuotas = p.numeroCuotas != null && p.numeroCuotas! > 0
-                && p.montoCuota != null && p.montoCuota! > 0;
             return pw.Padding(
               padding: const pw.EdgeInsets.symmetric(vertical: 2),
               child: pw.Column(
@@ -14479,19 +14493,10 @@ Future<File?> generarFacturaPDF(FacturaModel factura) async {
                     pw.Text(_fmtMontoFactura(p.monto, p.metodo),
                       style: pw.TextStyle(fontSize: 11, fontWeight: pw.FontWeight.bold)),
                   ]),
-                  if (tieneCuotas)
-                    pw.Padding(
-                      padding: const pw.EdgeInsets.only(left: 12, top: 1),
-                      child: pw.Text(
-                        "${p.numeroCuotas} cuotas de \$${p.montoCuota!.toStringAsFixed(2)} c/u"
-                        + ((p.financiadora ?? '').isNotEmpty
-                            ? " · ${p.financiadora}" : ""),
-                        style: pw.TextStyle(
-                          fontSize: 9,
-                          color: PdfColors.grey700,
-                          fontStyle: pw.FontStyle.italic),
-                      ),
-                    ),
+                  // Las cuotas ya NO se repiten bajo cada pago: con dos
+                  // pagos (p. ej. punto + divisas) salían dos veces y
+                  // parecían sumarse. Van una sola vez en el bloque de
+                  // inicial (_bloqueInicialPdf).
                 ],
               ),
             );
@@ -14770,20 +14775,9 @@ Future<void> imprimirFactura(FacturaModel factura, [BuildContext? context]) asyn
   final totalBs = factura.total * tasa;
   final pdf = pw.Document();
 
-  // ── Detectar si hay CUALQUIER pago con cuotas para mostrar el
-  // mensaje "Equipo financiado por X — N cuotas de $Y" al final de la
-  // factura. Buscar el primer pago que tenga los datos, sin importar
-  // el `tipo`. En ventas con inicial (Punto de venta/Efectivo) + resto
-  // financiado, la app guarda las cuotas en el pago inicial (tipo
-  // Contado), no en un pago aparte tipo Financiado.
-  PagoFactura? pagoFin;
-  for (final p in factura.pagos) {
-    if (p.numeroCuotas != null && p.numeroCuotas! > 0 &&
-        p.montoCuota != null && p.montoCuota! > 0) {
-      pagoFin = p;
-      break;
-    }
-  }
+  // Las cuotas se imprimen UNA vez dentro del bloque de inicial
+  // (_bloqueInicialPdf); antes se repetían bajo cada pago y otra vez
+  // en un "Le quedan N cuotas" aparte.
   // ── Resumen de INICIAL (solo ventas financiadas) ──
   // Clasifica explícitamente lo que el cliente pagó como "Inicial" y,
   // si hay datos de cuotas, lo que queda financiado.
@@ -15016,6 +15010,13 @@ Future<void> imprimirFactura(FacturaModel factura, [BuildContext? context]) asyn
                         fontWeight: pw.FontWeight.bold,
                         color: PdfColors.black),
                       maxLines: 1, overflow: pw.TextOverflow.clip)),
+                  // Precio de referencia en divisa (y, si es financiado,
+                  // precio base + precio de la financiadora).
+                  ...lineasPrecioReferenciaPdf(factura, e.producto,
+                      esEquipo: true, ventaFinanciada: resumenIni != null,
+                      fontSize: fs(8)).map((w) => pw.Padding(
+                          padding: const pw.EdgeInsets.only(left: 4, top: 1),
+                          child: w)),
                 ],
               ),
             );
@@ -15041,6 +15042,9 @@ Future<void> imprimirFactura(FacturaModel factura, [BuildContext? context]) asyn
                         fontWeight: pw.FontWeight.bold,
                         color: PdfColors.black),
                       maxLines: 1, overflow: pw.TextOverflow.clip),
+                  ...lineasPrecioReferenciaPdf(factura, p,
+                      esEquipo: false, ventaFinanciada: resumenIni != null,
+                      fontSize: fs(8)),
                 ],
               ),
             );
@@ -15112,25 +15116,8 @@ Future<void> imprimirFactura(FacturaModel factura, [BuildContext? context]) asyn
                           fontWeight: pw.FontWeight.bold,
                           color: PdfColors.black)),
                     ),
-                  // ── CUOTAS INLINE (térmica) ──
-                  // Se muestra si el pago tiene cuotas, sin importar
-                  // el `tipo` del pago (Contado/Financiado). Un pago
-                  // inicial de una venta financiada puede tener tipo
-                  // Contado y esInicial=true PERO también traer los
-                  // datos de las cuotas del resto financiado. Antes
-                  // exigíamos tipo=Financiado y esto ocultaba las
-                  // cuotas de las ventas más comunes (inicial + resto
-                  // en financiamiento).
-                  if (p.numeroCuotas != null && p.numeroCuotas! > 0 &&
-                      p.montoCuota != null && p.montoCuota! > 0)
-                    pw.Padding(
-                      padding: const pw.EdgeInsets.only(left: 4, top: 1),
-                      child: pw.Text(
-                        "${p.numeroCuotas} cuotas de \$${p.montoCuota!.toStringAsFixed(2)} c/u",
-                        style: pw.TextStyle(
-                          fontSize: fs(8),
-                          fontWeight: pw.FontWeight.bold)),
-                    ),
+                  // Cuotas: una sola vez en el bloque de financiamiento
+                  // (antes se repetían bajo cada pago).
                 ]),
             );
           }),
@@ -15157,13 +15144,6 @@ Future<void> imprimirFactura(FacturaModel factura, [BuildContext? context]) asyn
                   fontWeight: pw.FontWeight.bold)),
               pw.SizedBox(height: 2),
               _bloqueInicialPdf(resumenIni, fontSize: fs(8.5)),
-              if (pagoFin != null) ...[
-                pw.SizedBox(height: 2),
-                pw.Text(
-                  "Le quedan ${pagoFin.numeroCuotas} cuotas de "
-                  "\$${pagoFin.montoCuota!.toStringAsFixed(2)} cada una.",
-                  style: pw.TextStyle(fontSize: fs(8))),
-              ],
             ]),
           ),
 
@@ -15325,6 +15305,10 @@ Future<void> imprimirFactura(FacturaModel factura, [BuildContext? context]) asyn
                               style: pw.TextStyle(
                                 fontSize: 9, color: PdfColors.grey700,
                                 fontWeight: pw.FontWeight.bold)),
+                          ...lineasPrecioReferenciaPdf(factura, e.producto,
+                              esEquipo: true,
+                              ventaFinanciada: resumenIni != null,
+                              fontSize: 8.5),
                         ],
                       )),
                     pw.Padding(padding: const pw.EdgeInsets.all(7),
@@ -15335,8 +15319,16 @@ Future<void> imprimirFactura(FacturaModel factura, [BuildContext? context]) asyn
                 // Items sin IMEI (solo nombre, sin código interno)
                 ...factura.itemsSinImei.map((p) => pw.TableRow(children: [
                   pw.Padding(padding: const pw.EdgeInsets.all(7),
-                    child: pw.Text(p.nombre,
-                      style: pw.TextStyle(fontSize: 10, fontWeight: pw.FontWeight.bold))),
+                    child: pw.Column(
+                      crossAxisAlignment: pw.CrossAxisAlignment.start,
+                      children: [
+                        pw.Text(p.nombre,
+                          style: pw.TextStyle(fontSize: 10, fontWeight: pw.FontWeight.bold)),
+                        ...lineasPrecioReferenciaPdf(factura, p,
+                            esEquipo: false,
+                            ventaFinanciada: resumenIni != null,
+                            fontSize: 8.5),
+                      ])),
                   pw.Padding(padding: const pw.EdgeInsets.all(7),
                     child: pw.Text("—",
                       style: const pw.TextStyle(fontSize: 9))),
@@ -15414,23 +15406,8 @@ Future<void> imprimirFactura(FacturaModel factura, [BuildContext? context]) asyn
                                   fontWeight: pw.FontWeight.bold,
                                   color: PdfColors.black)),
                             ),
-                          // ── CUOTAS INLINE (A4 elegante) ──
-                          // Se muestra si el pago tiene cuotas, sin
-                          // importar el tipo (ver comentario del bloque
-                          // térmico para detalles). Antes exigíamos
-                          // tipo=Financiado y ocultaba las cuotas de
-                          // ventas con inicial + financiamiento.
-                          if (p.numeroCuotas != null && p.numeroCuotas! > 0 &&
-                              p.montoCuota != null && p.montoCuota! > 0)
-                            pw.Padding(
-                              padding: const pw.EdgeInsets.only(left: 10, top: 1),
-                              child: pw.Text(
-                                "${p.numeroCuotas} cuotas de \$${p.montoCuota!.toStringAsFixed(2)} c/u",
-                                style: pw.TextStyle(
-                                  fontSize: 9,
-                                  fontWeight: pw.FontWeight.bold,
-                                  color: PdfColors.grey700)),
-                            ),
+                          // Cuotas: una sola vez en el bloque de
+                          // financiamiento (antes se repetían por pago).
                         ]),
                     );
                   }),
@@ -15459,13 +15436,6 @@ Future<void> imprimirFactura(FacturaModel factura, [BuildContext? context]) asyn
                     letterSpacing: 0.8)),
                 pw.SizedBox(height: 4),
                 _bloqueInicialPdf(resumenIni, fontSize: 10),
-                if (pagoFin != null) ...[
-                  pw.SizedBox(height: 4),
-                  pw.Text(
-                    "Le quedan ${pagoFin.numeroCuotas} cuotas de "
-                    "\$${pagoFin.montoCuota!.toStringAsFixed(2)} cada una.",
-                    style: const pw.TextStyle(fontSize: 10)),
-                ],
               ]),
             ),
 
@@ -40740,6 +40710,29 @@ Future<void> generarReporteVentas(
       stockImeiRaw = (await _Api.get('stock_imei') as List?) ?? [];
     } catch (_) {}
 
+    // Listas de precios para la AUDITORÍA AUTOMÁTICA: precio en divisa,
+    // BCV y de la financiadora de cada producto (ver
+    // auditoria_facturas.dart). Si no están en memoria se leen del
+    // servidor; `ListaPrecio.fromMap` necesita el catálogo cargado.
+    List<ListaPrecio> listasAud = listasPreciosGlobal;
+    if (listasAud.isEmpty) {
+      try {
+        if (catalogoGlobal.isEmpty && productosRaw.isNotEmpty) {
+          catalogoGlobal = productosRaw
+              .map((m) => Producto.fromMap(Map<String, dynamic>.from(m as Map)))
+              .toList();
+        }
+        final rawL = await _Api.get('listas_precios');
+        if (rawL is List) {
+          listasAud = rawL
+              .map((m) => ListaPrecio.fromMap(Map<String, dynamic>.from(m as Map)))
+              .toList();
+        }
+      } catch (e) {
+        debugPrint('generarReporteVentas: listas para auditoría: $e');
+      }
+    }
+
     // Indexar por código / IMEI para búsquedas rápidas
     final prodPorCodigo = <String, Map>{};
     for (final p in productosRaw) {
@@ -40869,7 +40862,59 @@ Future<void> generarReporteVentas(
       // inicial que realmente se cobró.
       _asignarMontoRenglones(productosDetalle, pagosDetalle, total);
 
+      // ── Auditoría automática (reglas, sin IA) ──
+      // Precio de referencia de cada renglón (divisa, BCV y de la
+      // financiadora) y comparación contra lo pagado.
+      String finFactura = '';
+      String? listaFactura;
+      int? nCuotas;
+      double? mCuota;
+      for (final p in pagosDetalle) {
+        if (finFactura.isEmpty) {
+          finFactura = normalizarFinanciadoraAud(p['financiadora']?.toString()) ??
+              normalizarFinanciadoraAud(p['metodo']?.toString()) ?? '';
+        }
+        final nl = (p['nombre_lista'] ?? '').toString();
+        if (nl.isNotEmpty) listaFactura ??= nl;
+        final nc = int.tryParse(p['numero_cuotas']?.toString() ?? '');
+        final mc = double.tryParse(p['monto_cuota']?.toString() ?? '');
+        if (nCuotas == null && nc != null && nc > 0 && mc != null && mc > 0) {
+          nCuotas = nc;
+          mCuota = mc;
+        }
+      }
+      final renglonesAud = <RenglonAuditoria>[];
+      for (final pd in productosDetalle) {
+        final esFin = pd['financiado'] == true;
+        final precios = preciosReferenciaDe(
+          codigo: (pd['codigo'] ?? '').toString(),
+          precioVenta: double.tryParse(pd['precio_venta']?.toString() ?? ''),
+          listas: listasAud,
+          financiadora: esFin ? finFactura : null,
+          nombreLista: listaFactura,
+        );
+        pd.addAll(precios.toMap());
+        pd['financiadora'] = esFin ? finFactura : '';
+        renglonesAud.add(RenglonAuditoria(financiado: esFin, precios: precios));
+      }
+      final autoAud = rawPagos.isEmpty
+          ? const ResultadoAuditoriaAuto(EstadoAuditoriaAuto.sinDatos,
+              detalle: 'La factura no tiene pagos registrados')
+          : auditarFacturaAuto(
+              renglones: renglonesAud,
+              pagadoUsd: totales.usd,
+              pagadoBsEnUsd: totales.equivUsd - totales.usd,
+              numeroCuotas: nCuotas,
+              montoCuota: mCuota,
+              financiadora: finFactura,
+            );
+
       detalles.add({
+        'id': (v['id'] ?? '').toString(),
+        'financiadora': finFactura,
+        'numero_cuotas': nCuotas,
+        'monto_cuota': mCuota,
+        'auditoria_auto': autoAud.toMap(),
         'nro_factura': (v['nro_factura'] ?? '').toString(),
         'cliente':     (v['cliente'] ?? '').toString(),
         'cedula':      (v['cedula'] ?? '').toString(),
@@ -40903,6 +40948,13 @@ Future<void> generarReporteVentas(
     debugPrint('generarReporteVentas: $e');
   }
 
+  // Unidades de contado / financiadas (por financiadora): en auditoría
+  // el dueño cuenta los equipos de cada financiadora contra el reporte.
+  final conteo = contarUnidadesVentas(detalles);
+  final conDiferencia = detalles.where((d) =>
+      (d['auditoria_auto'] as Map?)?['estado'] ==
+          EstadoAuditoriaAuto.diferencia.name).length;
+
   await _registrarReporte(HistorialReporteEntry(
     nombreArchivo: _nombreReporte(
         tiendaEfectiva == null
@@ -40927,6 +40979,11 @@ Future<void> generarReporteVentas(
       'total_equivalente_usd': formatCurrency(granTotalUsdEquiv),
       'total_cobrado_en_bs': formatBolivares(granTotalBs),
       'total_cobrado_en_divisas': formatCurrency(granTotalUsd),
+      'unidades_de_contado': conteo.contado,
+      'unidades_financiadas': conteo.financiado,
+      if (conteo.porFinanciadora.isNotEmpty)
+        'financiadas_por_financiadora': conteo.porFinanciadora,
+      'facturas_con_diferencia_(auto)': conDiferencia,
       'total_por_metodo': totalPorMetodo.map(
           (k, val) => MapEntry(k, formatMontoPorMetodo(val, k))),
     },
@@ -42913,6 +42970,71 @@ class _VisorReporteScreenState extends State<VisorReporteScreen> {
   bool _exportando = false;
   String _filtro = '';
 
+  // ── Auditoría de facturas (solo reporte de ventas) ──
+  // Las marcas viven en el servidor (tabla configuracion, una clave por
+  // factura), no en el reporte guardado: así todos los equipos ven lo
+  // mismo aunque cada uno abra su propia copia del reporte.
+  Map<String, MarcaAuditoria> _marcas = {};
+  bool _cargandoMarcas = false;
+  String? _errorMarcas;
+  final Set<String> _guardandoMarca = {};
+  /// 'todas' | 'pendientes' | 'diferencia' | 'problema'
+  String _filtroAud = 'todas';
+
+  @override
+  void initState() {
+    super.initState();
+    if (widget.entrada.tipoReporte == 'ventas') _cargarMarcas();
+  }
+
+  Future<void> _cargarMarcas() async {
+    setState(() { _cargandoMarcas = true; _errorMarcas = null; });
+    try {
+      final m = await AuditoriaFacturas.cargar();
+      if (mounted) setState(() => _marcas = m);
+    } catch (err) {
+      if (mounted) setState(() => _errorMarcas = '$err');
+    } finally {
+      if (mounted) setState(() => _cargandoMarcas = false);
+    }
+  }
+
+  MarcaAuditoria _marcaDe(Map<String, dynamic> f) =>
+      _marcas[claveAuditoriaFactura((f['nro_factura'] ?? '').toString())] ??
+      MarcaAuditoria();
+
+  Future<void> _guardarMarca(Map<String, dynamic> f, MarcaAuditoria m) async {
+    final nro = (f['nro_factura'] ?? '').toString();
+    if (nro.isEmpty) return;
+    final clave = claveAuditoriaFactura(nro);
+    final anterior = _marcas[clave];
+    setState(() { _marcas[clave] = m; _guardandoMarca.add(clave); });
+    try {
+      await AuditoriaFacturas.guardar(nro, m);
+    } catch (err) {
+      // Revertir: la marca no quedó en el servidor.
+      if (mounted) {
+        setState(() {
+          if (anterior == null) {
+            _marcas.remove(clave);
+          } else {
+            _marcas[clave] = anterior;
+          }
+        });
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text('No se pudo guardar la auditoría: $err'),
+          backgroundColor: AppColors.statusRed));
+      }
+    } finally {
+      if (mounted) setState(() => _guardandoMarca.remove(clave));
+    }
+  }
+
+  ResultadoAuditoriaAuto? _autoDe(Map<String, dynamic> f) {
+    final a = f['auditoria_auto'];
+    return a is Map ? ResultadoAuditoriaAuto.fromMap(a) : null;
+  }
+
   HistorialReporteEntry get e => widget.entrada;
 
   String _fmtMoneda(num? v) {
@@ -43200,8 +43322,55 @@ class _VisorReporteScreenState extends State<VisorReporteScreen> {
             pm.contains(f);
       }).toList();
     }
+    // Filtro de auditoría.
+    if (_filtroAud != 'todas') {
+      detalles = detalles.where((d) {
+        final m = _marcaDe(d);
+        switch (_filtroAud) {
+          case 'pendientes': return m.pendiente;
+          case 'diferencia':
+            return _autoDe(d)?.estado == EstadoAuditoriaAuto.diferencia;
+          case 'problema': return m.conProblema;
+        }
+        return true;
+      }).toList();
+    }
+    final pendientesTotal =
+        e.detalles.where((d) => _marcaDe(d).pendiente).length;
+    Widget chipFiltro(String clave, String texto) => Padding(
+      padding: const EdgeInsets.only(right: 6),
+      child: ChoiceChip(
+        label: Text(texto, style: const TextStyle(fontSize: 11.5)),
+        selected: _filtroAud == clave,
+        visualDensity: VisualDensity.compact,
+        onSelected: (_) => setState(() => _filtroAud = clave),
+      ),
+    );
     return Column(
       children: [
+        SingleChildScrollView(
+          scrollDirection: Axis.horizontal,
+          padding: const EdgeInsets.fromLTRB(10, 8, 10, 0),
+          child: Row(children: [
+            chipFiltro('todas', 'Todas'),
+            chipFiltro('pendientes', 'Pendientes de auditar ($pendientesTotal)'),
+            chipFiltro('diferencia', 'Con diferencia (auto)'),
+            chipFiltro('problema', 'Marcadas "no listo"'),
+            if (_cargandoMarcas)
+              const SizedBox(width: 16, height: 16,
+                  child: CircularProgressIndicator(strokeWidth: 2))
+            else
+              IconButton(
+                tooltip: _errorMarcas == null
+                    ? 'Recargar auditoría'
+                    : 'No se pudo cargar la auditoría: $_errorMarcas',
+                icon: Icon(Icons.refresh,
+                    color: _errorMarcas == null
+                        ? AppColors.textSecondary : AppColors.statusRed),
+                onPressed: _cargarMarcas,
+              ),
+          ]),
+        ),
         Padding(
           padding: const EdgeInsets.all(10),
           child: TextField(
@@ -43306,10 +43475,34 @@ class _VisorReporteScreenState extends State<VisorReporteScreen> {
                         f['tipo_venta'].toString()),
                 ],
               ),
+              // Estado de auditoría visible sin abrir la factura.
+              Padding(
+                padding: const EdgeInsets.only(top: 4),
+                child: Wrap(spacing: 6, runSpacing: 4, children: [
+                  if (_autoDe(f) != null)
+                    ChipAuditoriaAuto(_autoDe(f)!, compacto: true),
+                  _chipMarca('Pago', _marcaDe(f).pagoRecibido),
+                  _chipMarca('Auditoría', _marcaDe(f).auditoriaOk),
+                ]),
+              ),
             ],
           ),
         ),
         children: [
+          // Financiamiento tal como quedó (cuotas: cantidad y monto).
+          if ((int.tryParse('${f['numero_cuotas'] ?? ''}') ?? 0) > 0 &&
+              _aDouble(f['monto_cuota']) != null)
+            Padding(
+              padding: const EdgeInsets.only(bottom: 6),
+              child: Text(
+                'Financiado'
+                '${(f['financiadora'] ?? '').toString().isNotEmpty ? ' por ${f['financiadora']}' : ''}'
+                ' · Cuotas: ${f['numero_cuotas']} de '
+                '${_fmtMoneda(_aDouble(f['monto_cuota']))}',
+                style: const TextStyle(fontSize: 12,
+                    fontWeight: FontWeight.w600,
+                    color: AppColors.textPrimary)),
+            ),
           // Productos
           if (productos.isNotEmpty) ...[
             const _TituloSeccion(texto: 'PRODUCTOS / EQUIPOS'),
@@ -43323,6 +43516,14 @@ class _VisorReporteScreenState extends State<VisorReporteScreen> {
             const SizedBox(height: 6),
             ...pagos.map(_filaPago),
           ],
+          PanelAuditoriaFactura(
+            auto: _autoDe(f),
+            marca: _marcaDe(f),
+            puedeMarcar: puedeVerTodasLasTiendas(),
+            guardando: _guardandoMarca.contains(
+                claveAuditoriaFactura((f['nro_factura'] ?? '').toString())),
+            onCambiar: (m) => _guardarMarca(f, m),
+          ),
           if (productos.isEmpty && pagos.isEmpty)
             const Padding(
               padding: EdgeInsets.symmetric(vertical: 10),
@@ -43334,6 +43535,21 @@ class _VisorReporteScreenState extends State<VisorReporteScreen> {
         ],
       ),
     );
+  }
+
+  Widget _chipMarca(String texto, bool? v) {
+    final color = v == null
+        ? AppColors.textSecondary
+        : (v ? AppColors.statusGreen : AppColors.statusRed);
+    return Row(mainAxisSize: MainAxisSize.min, children: [
+      Icon(v == null ? Icons.radio_button_unchecked
+          : (v ? Icons.check_circle : Icons.cancel), size: 13, color: color),
+      const SizedBox(width: 3),
+      Text(v == null
+              ? '$texto: pendiente'
+              : '$texto: ${v ? 'listo' : 'no listo'}',
+          style: TextStyle(fontSize: 11, color: color)),
+    ]);
   }
 
   Widget _miniInfo(IconData i, String t) => Row(
@@ -43403,6 +43619,15 @@ class _VisorReporteScreenState extends State<VisorReporteScreen> {
                       _miniInfo(Icons.tag, p['codigo'].toString()),
                   ],
                 ),
+                // Precios de referencia (reportes nuevos): divisa y, si
+                // es financiado, precio base + precio de la financiadora.
+                ...lineasPrecioReferencia(
+                        PreciosReferencia.fromMap(p),
+                        financiado: p['financiado'] == true,
+                        financiadora: (p['financiadora'] ?? '').toString())
+                    .map((t) => Text(t,
+                        style: const TextStyle(
+                            fontSize: 11, color: AppColors.textSecondary))),
               ],
             ),
           ),
