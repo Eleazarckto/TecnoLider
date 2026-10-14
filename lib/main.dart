@@ -27,6 +27,7 @@ import 'package:printing/printing.dart';
 import 'package:share_plus/share_plus.dart';
 import 'descarga.dart';
 import 'cuenta_financiadora.dart';
+import 'cxp_perfil.dart';
 // ── Impresión térmica directa (sin drivers) ─────────
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 import 'package:usb_serial/usb_serial.dart';
@@ -45,6 +46,9 @@ import 'package:mailer/smtp_server.dart' as smtp;
 // POST_NOTIFICATIONS en Android 13+ ya se solicita en PermisosApp).
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 part 'inventario_tiendas.dart';
+
+// Perfil por acreedor y adjuntos de cuentas por pagar.
+part 'cxp_perfil_ui.dart';
 
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -4834,8 +4838,10 @@ String _escribirFavorApartado(String notas, double valor) {
   return limpio.isEmpty ? marca : '$limpio\n$marca';
 }
 
+// También se quitan las marcas `[[comp:N]]` que enlazan una factura
+// con su adjunto (ver cxp_perfil.dart).
 String _notasSinMarcas(String notas) =>
-    notas.replaceAll(_reFavorApartado, '').trim();
+    quitarMarcasComprobante(notas.replaceAll(_reFavorApartado, '')).trim();
 
 class CuentaPorPagar {
   int? id;
@@ -21631,7 +21637,12 @@ class _DetalleCuentaCobrarState extends State<DetalleCuentaCobrar> {
       final raw = await _Api.get('comprobantes', {
         'cuenta_id': widget.cuenta.id!.toString(),
       });
-      final lista = (raw as List?) ?? [];
+      // Sólo los de cuentas por cobrar: los ids de cuenta se repiten con
+      // los de cuentas por pagar, que guardan sus adjuntos en la misma
+      // tabla con otro `ambito`.
+      final lista = ((raw as List?) ?? []).where((m) => m is Map &&
+          (m['ambito'] ?? 'cuentas_cobrar').toString() == 'cuentas_cobrar')
+          .toList();
       if (!mounted) return;
       if (lista.isEmpty) {
         ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
@@ -22692,7 +22703,6 @@ class VentanaCuentasPorPagar extends StatefulWidget {
 class _VentanaCuentasPorPagarState extends State<VentanaCuentasPorPagar> {
   List<CuentaPorPagar> _cuentas = [];
   bool _cargando = true;
-  String _query = '';
   bool get puedeEditar => (usuarioSesion?.rol == "Administrador" || usuarioSesion?.rol == "Maestro" || usuarioSesion?.rol == "Dueño");
 
   @override
@@ -22713,11 +22723,6 @@ class _VentanaCuentasPorPagarState extends State<VentanaCuentasPorPagar> {
       if (mounted) setState(() => _cargando = false);
     }
   }
-
-  List<CuentaPorPagar> get _filtradas => _cuentas.where((c) =>
-    _query.isEmpty ||
-    c.nombre.toLowerCase().contains(_query.toLowerCase()) ||
-    c.rif.contains(_query)).toList();
 
   void _crearCuenta() {
     final rifCtrl   = TextEditingController();
@@ -23031,147 +23036,19 @@ class _VentanaCuentasPorPagarState extends State<VentanaCuentasPorPagar> {
 
   @override
   Widget build(BuildContext context) {
-    final filtradas = _filtradas;
-    final totalPendiente = filtradas.fold(0.0, (s, c) => s + c.saldoRestante);
+    // Una tarjeta por acreedor (agrupando sus cuentas) y arriba el total
+    // que se debe y el total a favor. Ver cxp_perfil_ui.dart.
     return Scaffold(
       appBar: AppBar(
         title: const Text("Cuentas por Pagar"),
         actions: [IconButton(icon: const Icon(Icons.refresh), tooltip: "Actualizar", onPressed: _cargar)],
       ),
-      body: Column(children: [
-        Container(
-          width: double.infinity,
-          padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 14),
-          color: AppColors.statusRed,
-          child: Row(children: [
-            Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-              const Text("TOTAL POR PAGAR", style: TextStyle(color: Colors.white70, fontSize: 11, letterSpacing: 1)),
-              Text(formatCurrency(totalPendiente),
-                style: const TextStyle(color: Colors.white, fontSize: 28, fontWeight: FontWeight.bold)),
-            ]),
-            const Spacer(),
-            Column(crossAxisAlignment: CrossAxisAlignment.end, children: [
-              const Text("Cuentas", style: TextStyle(color: Colors.white70, fontSize: 11)),
-              Text("${filtradas.length}", style: const TextStyle(color: Colors.white, fontSize: 22, fontWeight: FontWeight.bold)),
-            ]),
-          ]),
-        ),
-        Padding(
-          padding: const EdgeInsets.all(12),
-          child: TextField(
-            decoration: InputDecoration(
-              hintText: "Buscar por nombre o RIF...",
-              prefixIcon: const Icon(Icons.search, color: AppColors.primaryBlue),
-              filled: true, fillColor: Colors.white,
-              border: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: BorderSide.none),
-              contentPadding: const EdgeInsets.symmetric(vertical: 0, horizontal: 16),
-            ),
-            onChanged: (v) => setState(() => _query = v),
-          ),
-        ),
-        if (_cargando)
-          const Expanded(child: Center(child: CircularProgressIndicator()))
-        else if (filtradas.isEmpty)
-          const Expanded(child: EmptyState(mensaje: "No hay cuentas por pagar.", icono: Icons.request_quote_outlined))
-        else
-          Expanded(child: RefreshIndicator(
-            onRefresh: _cargar,
-            child: ListView.builder(
-              padding: const EdgeInsets.symmetric(horizontal: 12),
-              itemCount: filtradas.length,
-              itemBuilder: (c, i) {
-                final cuenta = filtradas[i];
-                final pct = cuenta.montoTotal > 0
-                    ? (1 - cuenta.saldoRestante / cuenta.montoTotal).clamp(0.0, 1.0)
-                    : 1.0;
-                final saldado = cuenta.saldoRestante <= 0;
-                return Card(
-                  margin: const EdgeInsets.only(bottom: 8),
-                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                  elevation: 1,
-                  child: InkWell(
-                    borderRadius: BorderRadius.circular(12),
-                    onTap: () => Navigator.push(context,
-                      MaterialPageRoute(builder: (_) => DetalleCuentaPorPagar(cuenta: cuenta)))
-                      .then((_) => _cargar()),
-                    child: Padding(
-                      padding: const EdgeInsets.all(14),
-                      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                        Row(children: [
-                          CircleAvatar(
-                            radius: 20,
-                            backgroundColor: (saldado ? AppColors.statusGreen : AppColors.statusRed).withValues(alpha: 0.12),
-                            child: Icon(Icons.business_outlined, size: 18,
-                              color: saldado ? AppColors.statusGreen : AppColors.statusRed),
-                          ),
-                          const SizedBox(width: 10),
-                          Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                            // El saldo a favor va pegado al nombre: es
-                            // lo primero que hay que ver antes de
-                            // pagarle otra factura a este acreedor.
-                            Row(children: [
-                              Flexible(
-                                child: Text(cuenta.nombre,
-                                    overflow: TextOverflow.ellipsis,
-                                    style: const TextStyle(
-                                        fontWeight: FontWeight.w600)),
-                              ),
-                              ChipSaldoFavor(saldoFavor: cuenta.saldoFavor),
-                            ]),
-                            Text("RIF: ${cuenta.rif}", style: const TextStyle(fontSize: 12, color: AppColors.textSecondary)),
-                          ])),
-                          Column(crossAxisAlignment: CrossAxisAlignment.end, children: [
-                            Text(formatCurrency(cuenta.saldoRestante),
-                              style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16,
-                                color: saldado ? AppColors.statusGreen : AppColors.statusRed)),
-                            Text("de ${formatCurrency(cuenta.montoTotal)}",
-                              style: const TextStyle(fontSize: 11, color: AppColors.textSecondary)),
-                          ]),
-                        ]),
-                        const SizedBox(height: 10),
-                        ClipRRect(
-                          borderRadius: BorderRadius.circular(4),
-                          child: LinearProgressIndicator(
-                            value: pct, minHeight: 5,
-                            backgroundColor: Colors.grey[200],
-                            valueColor: AlwaysStoppedAnimation<Color>(
-                              saldado ? AppColors.statusGreen : (pct > 0.5 ? AppColors.statusOrange : AppColors.statusRed)),
-                          ),
-                        ),
-                        const SizedBox(height: 4),
-                        Row(children: [
-                          Text("${(pct * 100).toStringAsFixed(0)}% pagado",
-                            style: const TextStyle(fontSize: 11, color: AppColors.textSecondary)),
-                          const Spacer(),
-                          if (cuenta.proximaCuota != null)
-                            Container(
-                              padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2),
-                              decoration: BoxDecoration(
-                                color: AppColors.statusOrange.withValues(alpha: 0.1),
-                                borderRadius: BorderRadius.circular(8),
-                                border: Border.all(color: AppColors.statusOrange.withValues(alpha: 0.4), width: 0.7),
-                              ),
-                              child: Row(mainAxisSize: MainAxisSize.min, children: [
-                                const Icon(Icons.event_outlined, size: 11, color: AppColors.statusOrange),
-                                const SizedBox(width: 3),
-                                Text(
-                                  "Cuota ${cuenta.proximaCuota!.numero}: ${formatCurrency(cuenta.proximaCuota!.monto)} · ${cuenta.proximaCuota!.fecha}",
-                                  style: const TextStyle(fontSize: 10, color: AppColors.statusOrange),
-                                ),
-                              ]),
-                            )
-                          else if (cuenta.cuotas.isNotEmpty && saldado)
-                            const Text("Todas las cuotas pagadas ✓",
-                              style: TextStyle(fontSize: 11, color: AppColors.statusGreen)),
-                        ]),
-                      ]),
-                    ),
-                  ),
-                );
-              },
-            ),
-          )),
-      ]),
+      body: VistaPerfilesCxp(
+        cuentas: _cuentas.map(CuentaCxp.persona).toList(),
+        esProveedor: false,
+        cargando: _cargando,
+        onRecargar: _cargar,
+      ),
       floatingActionButton: puedeEditar
           ? FloatingActionButton.extended(
               onPressed: _crearCuenta,
@@ -23220,7 +23097,10 @@ class _DetalleCuentaPorPagarState extends State<DetalleCuentaPorPagar> {
     // deuda que en la base no existe.
     final montoAnterior  = cuenta.montoTotal;
     final notasAnteriores = cuenta.notas;
-    final visibles = cuenta.notasVisibles;
+    // Sin la marca del saldo apartado pero conservando las marcas de
+    // adjunto `[[comp:N]]`: con `notasVisibles` se perdía el enlace
+    // entre cada factura y su foto/PDF.
+    final visibles = cuenta.notas.replaceAll(_reFavorApartado, '').trim();
     final linea = lineaNotaAumento(res);
     cuenta.montoTotal = res.nuevoMontoTotal;
     cuenta.notas = visibles.isEmpty ? linea : '$visibles\n$linea';
@@ -23991,166 +23871,19 @@ class _VentanaCuentasPorPagarProveedorState extends State<VentanaCuentasPorPagar
 
   @override
   Widget build(BuildContext context) {
-    final total = _cuentas.fold(0.0, (sum, c) => sum + c.saldoRestante);
-    final vencidas = _cuentas.where((c) => c.saldoRestante > 0).length;
-
+    // Un perfil fijo por proveedor (antes "Maxi" salía una vez por cada
+    // cuenta) y arriba la deuda total y el saldo a favor total.
     return Scaffold(
       appBar: AppBar(
         title: const Text("CxP Proveedores"),
         actions: [IconButton(icon: const Icon(Icons.refresh), tooltip: "Actualizar", onPressed: _cargar)],
       ),
-      body: Column(children: [
-        // Header con estadísticas
-        Container(
-          width: double.infinity,
-          padding: const EdgeInsets.fromLTRB(20, 16, 20, 20),
-          decoration: const BoxDecoration(
-            gradient: LinearGradient(
-              colors: [AppColors.royalBlue, Color(0xFF003580)],
-              begin: Alignment.topLeft,
-              end: Alignment.bottomRight,
-            ),
-          ),
-          child: Row(children: [
-            Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-              const Text("TOTAL POR PAGAR", style: TextStyle(color: Colors.white60, fontSize: 11, letterSpacing: 1)),
-              const SizedBox(height: 4),
-              Text(formatCurrency(total),
-                style: const TextStyle(color: Colors.white, fontSize: 28, fontWeight: FontWeight.bold)),
-            ])),
-            Column(crossAxisAlignment: CrossAxisAlignment.end, children: [
-              Container(
-                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-                decoration: BoxDecoration(
-                  color: Colors.white.withValues(alpha: 0.15),
-                  borderRadius: BorderRadius.circular(20),
-                ),
-                child: Text("$vencidas pendientes",
-                  style: const TextStyle(color: Colors.white, fontSize: 12, fontWeight: FontWeight.w600)),
-              ),
-            ]),
-          ]),
-        ),
-        if (_cargando)
-          const Expanded(child: Center(child: CircularProgressIndicator()))
-        else if (_cuentas.isEmpty)
-          const Expanded(child: EmptyState(mensaje: "No hay cuentas por pagar registradas.", icono: Icons.business_outlined))
-        else
-          Expanded(child: RefreshIndicator(
-            onRefresh: _cargar,
-            child: ListView.builder(
-              padding: const EdgeInsets.all(12),
-              itemCount: _cuentas.length,
-              itemBuilder: (c, i) {
-                final cuenta = _cuentas[i];
-                final saldado = cuenta.saldoRestante <= 0;
-                final pct = cuenta.montoTotal > 0
-                  ? (1 - cuenta.saldoRestante / cuenta.montoTotal).clamp(0.0, 1.0)
-                  : 1.0;
-                return Card(
-                  margin: const EdgeInsets.only(bottom: 8),
-                  shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(12),
-                    side: saldado
-                      ? const BorderSide(color: AppColors.statusGreen, width: 1)
-                      : BorderSide.none,
-                  ),
-                  child: InkWell(
-                    borderRadius: BorderRadius.circular(12),
-                    onTap: () => Navigator.push(context,
-                      MaterialPageRoute(builder: (_) => DetalleCuentaProveedor(cuenta: cuenta)))
-                      .then((_) => _cargar()),
-                    child: Padding(
-                      padding: const EdgeInsets.all(14),
-                      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                        Row(children: [
-                          Container(
-                            padding: const EdgeInsets.all(8),
-                            decoration: BoxDecoration(
-                              color: (saldado ? AppColors.statusGreen : AppColors.statusRed).withValues(alpha: 0.1),
-                              borderRadius: BorderRadius.circular(8),
-                            ),
-                            child: Icon(Icons.business_outlined,
-                              color: saldado ? AppColors.statusGreen : AppColors.statusRed, size: 20),
-                          ),
-                          const SizedBox(width: 10),
-                          Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                            // Igual que en cuentas por pagar: el saldo
-                            // a favor del proveedor, al lado del nombre.
-                            Row(children: [
-                              Flexible(
-                                child: Text(cuenta.nombre,
-                                    overflow: TextOverflow.ellipsis,
-                                    style: const TextStyle(
-                                        fontWeight: FontWeight.w600,
-                                        fontSize: 14)),
-                              ),
-                              ChipSaldoFavor(saldoFavor: cuenta.saldoFavor),
-                            ]),
-                            Text("RIF: ${cuenta.rif} · Vence: ${cuenta.fechaLimite}",
-                              style: const TextStyle(fontSize: 11, color: AppColors.textSecondary)),
-                          ])),
-                          Column(crossAxisAlignment: CrossAxisAlignment.end, children: [
-                            Text(formatCurrency(cuenta.saldoRestante),
-                              style: TextStyle(
-                                fontWeight: FontWeight.bold, fontSize: 15,
-                                color: saldado ? AppColors.statusGreen : AppColors.statusRed)),
-                            Text(saldado ? "SALDADO" : "PENDIENTE",
-                              style: TextStyle(
-                                fontSize: 9, fontWeight: FontWeight.bold, letterSpacing: 0.5,
-                                color: saldado ? AppColors.statusGreen : AppColors.statusRed)),
-                          ]),
-                        ]),
-                        const SizedBox(height: 10),
-                        ClipRRect(
-                          borderRadius: BorderRadius.circular(4),
-                          child: LinearProgressIndicator(
-                            value: pct, minHeight: 6,
-                            backgroundColor: Colors.grey[200],
-                            valueColor: AlwaysStoppedAnimation<Color>(
-                              saldado ? AppColors.statusGreen : AppColors.primaryBlue),
-                          ),
-                        ),
-                        const SizedBox(height: 4),
-                        Row(children: [
-                          Expanded(
-                            child: Text(
-                              "${(pct * 100).toStringAsFixed(0)}% pagado de ${formatCurrency(cuenta.montoTotal)}",
-                              style: const TextStyle(fontSize: 10, color: AppColors.textSecondary)),
-                          ),
-                          if (cuenta.proximaCuota != null)
-                            Container(
-                              padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2),
-                              decoration: BoxDecoration(
-                                color: AppColors.statusOrange.withValues(alpha: 0.1),
-                                borderRadius: BorderRadius.circular(8),
-                                border: Border.all(
-                                    color: AppColors.statusOrange.withValues(alpha: 0.4),
-                                    width: 0.7),
-                              ),
-                              child: Row(mainAxisSize: MainAxisSize.min, children: [
-                                const Icon(Icons.event_outlined,
-                                    size: 11, color: AppColors.statusOrange),
-                                const SizedBox(width: 3),
-                                Text(
-                                  "Cuota ${cuenta.proximaCuota!.numero}: ${formatCurrency(cuenta.proximaCuota!.monto)} · ${cuenta.proximaCuota!.fecha}",
-                                  style: const TextStyle(
-                                      fontSize: 10, color: AppColors.statusOrange),
-                                ),
-                              ]),
-                            )
-                          else if (cuenta.cuotas.isNotEmpty && saldado)
-                            const Text("Todas las cuotas pagadas ✓",
-                                style: TextStyle(fontSize: 10, color: AppColors.statusGreen)),
-                        ]),
-                      ]),
-                    ),
-                  ),
-                );
-              },
-            ),
-          )),
-      ]),
+      body: VistaPerfilesCxp(
+        cuentas: _cuentas.map(CuentaCxp.proveedor).toList(),
+        esProveedor: true,
+        cargando: _cargando,
+        onRecargar: _cargar,
+      ),
       floatingActionButton: puedeEditar
           ? FloatingActionButton.extended(
               onPressed: _crearCuenta,
@@ -24199,7 +23932,10 @@ class _DetalleCuentaProveedorState extends State<DetalleCuentaProveedor> {
     // deuda que en la base no existe.
     final montoAnterior  = cuenta.montoTotal;
     final notasAnteriores = cuenta.notas;
-    final visibles = cuenta.notasVisibles;
+    // Sin la marca del saldo apartado pero conservando las marcas de
+    // adjunto `[[comp:N]]`: con `notasVisibles` se perdía el enlace
+    // entre cada factura y su foto/PDF.
+    final visibles = cuenta.notas.replaceAll(_reFavorApartado, '').trim();
     final linea = lineaNotaAumento(res);
     cuenta.montoTotal = res.nuevoMontoTotal;
     cuenta.notas = visibles.isEmpty ? linea : '$visibles\n$linea';

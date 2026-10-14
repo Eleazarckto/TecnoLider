@@ -12,6 +12,17 @@
 //
 // La app siempre manda además `cuenta_id`, y lista por cuenta_id para
 // traer de una todos los comprobantes relacionados con esa cuenta.
+//
+// `ambito` separa de qué módulo es la cuenta. Hace falta porque los ids
+// se repiten entre tablas (la cuenta por cobrar 5 y la cuenta por pagar
+// 5 son cosas distintas):
+//   'cuentas_cobrar'           → cuentas por cobrar (valor por defecto)
+//   'cuentas_pagar'            → cuentas por pagar a personas
+//   'cuentas_pagar_proveedor'  → cuentas por pagar a proveedores
+// En cuentas por pagar además se usa entidad_tipo 'factura' (la factura
+// con la que se abrió la cuenta); el enlace de cada adjunto con una
+// factura agregada o con un pago lo guarda la app en `notas` con la
+// marca [[comp:N]].
 
 require_once __DIR__ . '/../lib/comprobantes.php';
 
@@ -39,8 +50,12 @@ if ($metodo === 'POST') {
     $archivo   = (string)(
         $body['imagen_base64'] ?? $body['archivo'] ?? $body['base64'] ?? '');
 
-    if ($tipo === '')    json_error('Falta entidad_tipo', 400);
-    if ($archivo === '') json_error('No se recibió el archivo', 400);
+    if ($tipo === '') {
+        json_response(['ok' => false, 'error' => 'Falta entidad_tipo'], 400);
+    }
+    if ($archivo === '') {
+        json_response(['ok' => false, 'error' => 'No se recibió el archivo'], 400);
+    }
 
     // Solo formatos que la app sabe abrir.
     if (!in_array($ext, ['jpg', 'jpeg', 'png', 'pdf', 'webp'], true)) {
@@ -51,7 +66,10 @@ if ($metodo === 'POST') {
     // que este tope solo frena casos raros (un PDF pesado, por ejemplo)
     // que reventarían el LONGTEXT o el límite de POST de PHP.
     if (strlen($archivo) > 8 * 1024 * 1024) {
-        json_error('El archivo es demasiado grande. Máximo 8 MB.', 413);
+        // 400 + ok:false: la app trata cualquier otro código como un
+        // error genérico y no muestra este mensaje.
+        json_response(['ok' => false,
+            'error' => 'El archivo es demasiado grande. Máximo 8 MB.'], 400);
     }
 
     asegurar_tabla_comprobantes();
@@ -83,6 +101,10 @@ if ($metodo === 'GET') {
     $entidadId = (int) get_param('entidad_id', 0);
     $cuentaId  = (int) get_param('cuenta_id', 0);
     $id        = get_param('id');
+    // Sin `ambito` se asume cuentas por cobrar: es lo que manda (sin
+    // decirlo) la versión de la app que ya está instalada, y así no le
+    // aparecen los adjuntos de una cuenta por pagar con el mismo id.
+    $ambito    = (string) get_param('ambito', 'cuentas_cobrar');
 
     // Si la tabla todavía no existe, no hay nada que listar. Devolvemos
     // vacío en vez de un error 500: para la app es lo mismo que una
@@ -103,9 +125,9 @@ if ($metodo === 'GET') {
         // separa después por entidad_tipo.
         $stmt = db()->prepare(
             "SELECT $COLUMNAS FROM comprobantes
-             WHERE cuenta_id = ? ORDER BY id DESC"
+             WHERE cuenta_id = ? AND ambito = ? ORDER BY id DESC"
         );
-        $stmt->execute([$cuentaId]);
+        $stmt->execute([$cuentaId, $ambito]);
         json_response($stmt->fetchAll());
     }
 
@@ -113,15 +135,16 @@ if ($metodo === 'GET') {
         if ($tipo !== null) {
             $stmt = db()->prepare(
                 "SELECT $COLUMNAS FROM comprobantes
-                 WHERE entidad_tipo = ? AND entidad_id = ? ORDER BY id DESC"
+                 WHERE entidad_tipo = ? AND entidad_id = ? AND ambito = ?
+                 ORDER BY id DESC"
             );
-            $stmt->execute([$tipo, $entidadId]);
+            $stmt->execute([$tipo, $entidadId, $ambito]);
         } else {
             $stmt = db()->prepare(
                 "SELECT $COLUMNAS FROM comprobantes
-                 WHERE entidad_id = ? ORDER BY id DESC"
+                 WHERE entidad_id = ? AND ambito = ? ORDER BY id DESC"
             );
-            $stmt->execute([$entidadId]);
+            $stmt->execute([$entidadId, $ambito]);
         }
         json_response($stmt->fetchAll());
     }
