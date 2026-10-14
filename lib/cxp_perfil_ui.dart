@@ -81,7 +81,7 @@ class CuentaCxp {
       proveedor?.saldoRestante ?? persona!.saldoRestante;
   double get saldoFavor => proveedor?.saldoFavor ?? persona!.saldoFavor;
   CuotaCobrar? get proximaCuota =>
-      proveedor?.proximaCuota ?? persona!.proximaCuota;
+      esProveedor ? proveedor!.proximaCuota : persona!.proximaCuota;
 
   /// Cabecera completa (incluye `notas`, que guarda el saldo apartado:
   /// todo PUT debe llevarla o se pierde).
