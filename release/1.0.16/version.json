@@ -1,0 +1,14 @@
+{
+  "android": {
+    "version": "1.0.16",
+    "url": "https://sistemasceccato.com/tecnolider/updates/tecnolider-1.0.16.apk",
+    "obligatoria": false,
+    "notas": "Auditoria de facturas con botones Pago recibido / Auditoria correcta y verificacion automatica; factura sin % de inicial y sin el monto financiado erroneo; precios de referencia y unidades financiadas/contado en el reporte. Listas: orden de columnas al exportar, sin % de inicial, cuotas por modelo, imagen sin franjas negras, precios que se actualizan y productos agregados que ya no se quitan. Inventario: ingreso directo a la tienda elegida, exportar por categoria/marca, vendedores atados a su tienda. Costos: equilibrio por tienda, ganancia real y diferencial cambiario, flujo de caja, nomina con usuarios, sin cargos financieros; panel con $ y Bs separados. Cuentas por pagar: un perfil por proveedor, adjuntos foto/PDF y saldo a favor total. Billetera semanal, pago por lote a financiadora, calculadora y cobro de servicio tecnico con reporte aparte."
+  },
+  "windows": {
+    "version": "1.0.16",
+    "url": "https://sistemasceccato.com/tecnolider/updates/tecnolider-windows-1.0.16.zip",
+    "obligatoria": false,
+    "notas": "Auditoria de facturas con botones Pago recibido / Auditoria correcta y verificacion automatica; factura sin % de inicial y sin el monto financiado erroneo; precios de referencia y unidades financiadas/contado en el reporte. Listas: orden de columnas al exportar, sin % de inicial, cuotas por modelo, imagen sin franjas negras, precios que se actualizan y productos agregados que ya no se quitan. Inventario: ingreso directo a la tienda elegida, exportar por categoria/marca, vendedores atados a su tienda. Costos: equilibrio por tienda, ganancia real y diferencial cambiario, flujo de caja, nomina con usuarios, sin cargos financieros; panel con $ y Bs separados. Cuentas por pagar: un perfil por proveedor, adjuntos foto/PDF y saldo a favor total. Billetera semanal, pago por lote a financiadora, calculadora y cobro de servicio tecnico con reporte aparte."
+  }
+}
