@@ -28,6 +28,7 @@ import 'package:share_plus/share_plus.dart';
 import 'descarga.dart';
 import 'cuenta_financiadora.dart';
 import 'cxp_perfil.dart';
+import 'finanzas_tienda.dart';
 // ── Impresión térmica directa (sin drivers) ─────────
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 import 'package:usb_serial/usb_serial.dart';
@@ -58,6 +59,10 @@ part 'billetera_semanal.dart';
 part 'calculadora_rapida.dart';
 part 'servicio_tecnico_cobros.dart';
 part 'pago_lote_financiadora.dart';
+
+// Apartados nuevos de Costos y Finanzas (equilibrio, ganancia real,
+// flujo de caja, gastos y nómina).
+part 'costos_finanzas_vistas.dart';
 
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -92,7 +97,7 @@ part 'pago_lote_financiadora.dart';
 /// IMPORTANTE: subí este número CADA VEZ que compiles una versión
 /// nueva. Debe coincidir con el "version" del version.json del
 /// servidor. Formato: "MAYOR.MENOR.PARCHE".
-const String kAppVersion = "1.0.15";
+const String kAppVersion = "1.0.16";
 
 /// URL del archivo version.json en el servidor.
 /// Se descarga con http.get limpio, SIN cabeceras de autenticación.
@@ -45291,6 +45296,12 @@ class _VentanaPanelAdminState extends State<VentanaPanelAdmin>
     with SingleTickerProviderStateMixin {
   late TabController _tabs;
 
+  // Ventas del mes SEPARADAS por moneda. Antes se sumaba el campo
+  // `total` de cada factura, que mezcla Bs con $ ("Ventas del mes
+  // 4,215,829" era casi todo bolívares mostrados como dólares).
+  //   · _ventasMesUsd: cobrado en divisas · _ventasMesBs: en bolívares
+  //   · _totalVentasMes: todo en $ (Bs a la tasa guardada en cada pago)
+  double _ventasMesUsd = 0, _ventasMesBs = 0;
   double _totalVentasMes = 0, _totalCostoInventario = 0, _totalVentaInventario = 0;
   double _totalCxCobrar = 0, _totalCxPagar = 0, _totalComisionesMes = 0;
   int _totalProductos = 0, _totalImeis = 0, _totalImeisVendidos = 0;
@@ -45345,14 +45356,21 @@ class _VentanaPanelAdminState extends State<VentanaPanelAdmin>
       final rawComis    = ((results[7] as List?) ?? []);
 
       // ── Ventas ────────────────────────────────────────────
-      _totalVentasMes = 0;
+      _totalVentasMes = 0; _ventasMesUsd = 0; _ventasMesBs = 0;
       final Map<String,double> porVendedor = {};
       final Map<String,int>    cantPorVendedor = {};
       for (var f in rawFacturas) {
-        final total = double.tryParse(f['total'].toString()) ?? 0;
+        // Equivalente en $ (Bs ÷ tasa de cada pago): el ranking y el
+        // total ya no suman bolívares como si fueran dólares.
+        final mon = totalesPagosPorMoneda((f['pagos'] as List?) ?? const []);
+        final total = mon.equivUsd;
         try {
           final fecha = parseFecha(f['fecha'] ?? '');
-          if (fecha.month == now.month && fecha.year == now.year) _totalVentasMes += total;
+          if (fecha.month == now.month && fecha.year == now.year) {
+            _totalVentasMes += total;
+            _ventasMesUsd += mon.usd;
+            _ventasMesBs += mon.bs;
+          }
         } catch (_) {}
         final vend = f['vendedor']?.toString() ?? 'Sin vendedor';
         porVendedor[vend] = (porVendedor[vend] ?? 0) + total;
@@ -45372,11 +45390,18 @@ class _VentanaPanelAdminState extends State<VentanaPanelAdmin>
       _totalImeis = rawImeis.length;
       _totalImeisVendidos = rawImeis.where((i) => (i['vendido'] ?? 0) == 1).length;
       _totalCostoInventario = 0; _totalVentaInventario = 0;
+      // Un producto con IMEI tiene una fila POR TIENDA en `productos`,
+      // pero sus IMEIs se buscan por código: se contaban una vez por
+      // cada fila y el valor del inventario salía duplicado.
+      final codigosConImeiContados = <String>{};
       for (var p in rawProds) {
         final costo = double.tryParse(p['precio_costo'].toString()) ?? 0;
         final venta = double.tryParse(p['precio_venta'].toString()) ?? 0;
-        final stockReal = p['categoria'] == 'Telefono'
-            ? rawImeis.where((i) => i['producto_codigo'] == p['codigo'] && (i['vendido']??0)==0).length
+        final usaImei = p['categoria'] == 'Telefono' ||
+            CategoriasProductos.usaIMEI(p['categoria']?.toString());
+        if (usaImei && !codigosConImeiContados.add(p['codigo'].toString())) continue;
+        final stockReal = usaImei
+            ? rawImeis.where((i) => i['producto_codigo'] == p['codigo'] && (i['vendido']??0).toString() != '1').length
             : (int.tryParse(p['stock_manual'].toString()) ?? 0);
         _totalCostoInventario += costo * stockReal;
         _totalVentaInventario += venta * stockReal;
@@ -45410,10 +45435,11 @@ class _VentanaPanelAdminState extends State<VentanaPanelAdmin>
           // Usar tryParse para evitar crash en fecha_inicio vacía
           final fi = DateTime.tryParse(h['fecha_inicio']?.toString() ?? '') ?? DateTime(2000);
           if (fi.month == now.month && fi.year == now.year) {
-            final tasa = double.tryParse(h['tasa'].toString()) ?? 1;
+            // En $: totalPagar() ya está en dólares. Antes se multiplicaba
+            // por la tasa (quedaba en Bs) y se mostraba con "$".
             for (var d in ((h['detalle'] as List?) ?? [])) {
               final r = ResumenComision.fromMap(d);
-              _totalComisionesMes += r.totalPagar() * tasa;
+              _totalComisionesMes += r.totalPagar();
             }
           }
         } catch (_) {}
@@ -45548,7 +45574,8 @@ class _VentanaPanelAdminState extends State<VentanaPanelAdmin>
         ),
         // KPI Cards fila 1
         Row(children: [
-          Expanded(child: _kpiCard("Ventas del Mes", formatCurrency(_totalVentasMes), Icons.point_of_sale, AppColors.primaryBlue)),
+          Expanded(child: _kpiCard("Ventas del Mes", "≈ ${formatCurrency(_totalVentasMes)}", Icons.point_of_sale, AppColors.primaryBlue,
+              sub: "Divisas: ${formatCurrency(_ventasMesUsd)}\nBolívares: ${formatBolivares(_ventasMesBs)}\n(≈ \$: Bs a la tasa de cada pago)")),
           const SizedBox(width: 12),
           Expanded(child: _kpiCard("Por Cobrar", formatCurrency(_totalCxCobrar), Icons.account_balance_wallet, Colors.orange)),
         ]),
@@ -45556,7 +45583,8 @@ class _VentanaPanelAdminState extends State<VentanaPanelAdmin>
         Row(children: [
           Expanded(child: _kpiCard("Por Pagar", formatCurrency(_totalCxPagar), Icons.payments_outlined, Colors.red)),
           const SizedBox(width: 12),
-          Expanded(child: _kpiCard("Ganancia Proyectada", formatCurrency(gananciaProyectada), Icons.trending_up, Colors.green)),
+          Expanded(child: _kpiCard("Ganancia Proyectada", formatCurrency(gananciaProyectada), Icons.trending_up, Colors.green,
+              sub: "Inventario actual: precio de venta − costo (en \$)")),
         ]),
         const SizedBox(height: 12),
         Row(children: [
@@ -45591,7 +45619,7 @@ class _VentanaPanelAdminState extends State<VentanaPanelAdmin>
             const SizedBox(height: 8),
             const Divider(),
             Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
-              const Text("Flujo Neto:", style: TextStyle(fontWeight: FontWeight.bold)),
+              const Text("Por cobrar − por pagar (\$):", style: TextStyle(fontWeight: FontWeight.bold)),
               Text(
                 "${formatCurrency((_totalCxCobrar - _totalCxPagar))}",
                 style: TextStyle(
@@ -45622,7 +45650,7 @@ class _VentanaPanelAdminState extends State<VentanaPanelAdmin>
     );
   }
 
-  Widget _kpiCard(String titulo, String valor, IconData icon, Color color) {
+  Widget _kpiCard(String titulo, String valor, IconData icon, Color color, {String? sub}) {
     return Card(
       elevation: 3,
       child: Padding(padding: const EdgeInsets.all(16), child: Column(
@@ -45634,7 +45662,12 @@ class _VentanaPanelAdminState extends State<VentanaPanelAdmin>
             Expanded(child: Text(titulo, style: const TextStyle(fontSize: 11, color: Colors.grey))),
           ]),
           const SizedBox(height: 8),
-          Text(valor, style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: color)),
+          FittedBox(fit: BoxFit.scaleDown, alignment: Alignment.centerLeft,
+            child: Text(valor, style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: color))),
+          if (sub != null) ...[
+            const SizedBox(height: 4),
+            Text(sub, style: const TextStyle(fontSize: 10, color: Colors.grey)),
+          ],
         ],
       )),
     );
@@ -45695,11 +45728,22 @@ class _VentanaPanelAdminState extends State<VentanaPanelAdmin>
                   Text("Vendedor: ${f['vendedor'] ?? '-'} | Tienda: ${f['tienda'] ?? '-'}"),
                   Text("Fecha: ${f['fecha'] ?? '-'} | Factura: ${f['nro_factura'] ?? '-'}"),
                 ]),
-                trailing: Column(mainAxisAlignment: MainAxisAlignment.center, children: [
-                  Text(formatCurrency(double.tryParse(f['total'].toString()) ?? 0),
-                    style: const TextStyle(fontWeight: FontWeight.bold,
-                      color: AppColors.primaryBlue, fontSize: 15)),
-                ]),
+                trailing: Builder(builder: (_) {
+                  // El `total` de la factura mezcla Bs con $: se muestra
+                  // cada moneda por separado.
+                  final mon = totalesPagosPorMoneda((f['pagos'] as List?) ?? const []);
+                  return Column(mainAxisAlignment: MainAxisAlignment.center,
+                      crossAxisAlignment: CrossAxisAlignment.end, children: [
+                    if (mon.usd > 0 || mon.bs == 0)
+                      Text(formatCurrency(mon.usd),
+                        style: const TextStyle(fontWeight: FontWeight.bold,
+                          color: AppColors.primaryBlue, fontSize: 14)),
+                    if (mon.bs > 0)
+                      Text(formatBolivares(mon.bs),
+                        style: const TextStyle(fontWeight: FontWeight.bold,
+                          color: Colors.blueGrey, fontSize: 13)),
+                  ]);
+                }),
               ),
             );
           }),
@@ -45711,12 +45755,14 @@ class _VentanaPanelAdminState extends State<VentanaPanelAdmin>
           child: Padding(padding: const EdgeInsets.all(20), child: Row(
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
-              const Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                Text("VENTAS MES ACTUAL", style: TextStyle(color: Colors.white70, fontSize: 12)),
-                Text("Monto total facturado", style: TextStyle(color: Colors.white60, fontSize: 11)),
-              ]),
-              Text("${formatCurrency(_totalVentasMes)}",
-                style: const TextStyle(color: Colors.white, fontSize: 26, fontWeight: FontWeight.bold)),
+              Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                const Text("VENTAS MES ACTUAL", style: TextStyle(color: Colors.white70, fontSize: 12)),
+                Text("Divisas: ${formatCurrency(_ventasMesUsd)}", style: const TextStyle(color: Colors.white, fontSize: 13)),
+                Text("Bolívares: ${formatBolivares(_ventasMesBs)}", style: const TextStyle(color: Colors.white, fontSize: 13)),
+                const Text("Total ≈ en \$ (Bs a la tasa de cada pago)", style: TextStyle(color: Colors.white60, fontSize: 11)),
+              ])),
+              FittedBox(child: Text("≈ ${formatCurrency(_totalVentasMes)}",
+                style: const TextStyle(color: Colors.white, fontSize: 26, fontWeight: FontWeight.bold))),
             ],
           )),
         ),
@@ -45785,7 +45831,7 @@ class _VentanaPanelAdminState extends State<VentanaPanelAdmin>
         const Text("Rendimiento del Equipo",
           style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
         const SizedBox(height: 4),
-        const Text("Ranking por monto total vendido",
+        const Text("Ranking por monto vendido (en \$; los Bs se convierten a la tasa de cada pago)",
           style: TextStyle(color: Colors.grey, fontSize: 12)),
         const SizedBox(height: 16),
         if (_topVendedores.isEmpty)
@@ -45835,7 +45881,7 @@ class _VentanaPanelAdminState extends State<VentanaPanelAdmin>
                       style: TextStyle(
                         fontWeight: FontWeight.bold, fontSize: 15,
                         color: i == 0 ? Colors.amber[700] : AppColors.primaryBlue)),
-                    const Text("total vendido",
+                    const Text("≈ total vendido",
                       style: TextStyle(fontSize: 10,
                         color: AppColors.textSecondary)),
                   ]),
@@ -48846,8 +48892,9 @@ class _VentanaConfiguracionState extends State<VentanaConfiguracion>
 //  Visible solo para: Administrador, Gerente, Dueño
 //  Recrea las hojas del modelo financiero Excel:
 //  Inventarios · Compras · Ventas · Nómina · Gastos ·
-//  Punto de Equilibrio · Resultados · Otros Ingresos/Egresos ·
-//  Carga Financiera · Flujo de Caja
+//  Equilibrio por tienda · Ganancia real (diferencial cambiario) ·
+//  Resultados · Flujo de Caja (los apartados nuevos viven en
+//  costos_finanzas_vistas.dart; "Carga Financiera" se quitó)
 // ============================================================
 
 // ── Modelos de datos ─────────────────────────────────────────
@@ -48923,8 +48970,10 @@ class ItemVentasCF {
   double cantidad;
   double tasaDia;
   double precioUnitario;
+  /// Tienda de la factura (para poder ver las ventas por tienda).
+  String tienda;
 
-  ItemVentasCF({this.fecha, this.producto = '', this.cantidad = 0, this.tasaDia = 0, this.precioUnitario = 0});
+  ItemVentasCF({this.fecha, this.producto = '', this.cantidad = 0, this.tasaDia = 0, this.precioUnitario = 0, this.tienda = ''});
 
   double get totalVentaUsd => cantidad * precioUnitario;
   double get totalVentaBs => totalVentaUsd * tasaDia;
@@ -49043,13 +49092,16 @@ class _VentanaCostosFinanzasState extends State<VentanaCostosFinanzas>
   // ── Otros ingresos / egresos ──
   final List<ItemOtroIngresoEgresoCF> _otrosMovimientos = [];
 
-  // ── Carga financiera ──
-  double _capitalPrestamo = 0;
-  double _tasaInteresPct = 12;
-  double _plazoAnios = 1;
+  // ── Datos compartidos por Equilibrio / Ganancia real / Flujo /
+  // Gastos / Nómina (ver costos_finanzas_vistas.dart). La pestaña de
+  // "Carga financiera" (préstamos) se quitó: el dueño no la usa y no
+  // guardaba nada en el servidor.
+  final _DatosFinanzasCF _datosCF = _DatosFinanzasCF();
 
-  // ── Flujo ──
-  final List<ItemFlujoCF> _flujo = [];
+  // ── Ventas entre dos fechas (pestaña Ventas) ──
+  // null = las del mes seleccionado arriba.
+  DateTime? _ventasDesde, _ventasHasta;
+  final List<ItemVentasCF> _ventasRango = [];
 
   // ── Mes/año en análisis ────────────────────────────────────
   // Toda la información cargada automáticamente (inventario, ventas
@@ -49071,10 +49123,8 @@ class _VentanaCostosFinanzasState extends State<VentanaCostosFinanzas>
     // Iniciar tasa BCV
     _tasaBinanceCompras = ConfigSistema.tasaCambio;
     _tasaBinanceVentas = ConfigSistema.tasaCambio;
-    // Pre-cargar un mes de flujo vacío
-    for (final m in ['Enero','Febrero','Marzo','Abril','Mayo','Junio','Julio','Agosto','Septiembre','Octubre','Noviembre','Diciembre']) {
-      _flujo.add(ItemFlujoCF(mes: m));
-    }
+    // El botón "Agregar fila" solo aplica a algunas pestañas.
+    _tabs.addListener(() { if (mounted) setState(() {}); });
     // Mes/año actual
     final now = DateTime.now();
     _mesSel = now.month;
@@ -49088,6 +49138,7 @@ class _VentanaCostosFinanzasState extends State<VentanaCostosFinanzas>
   @override
   void dispose() {
     _tabs.dispose();
+    _datosCF.dispose();
     super.dispose();
   }
 
@@ -49102,13 +49153,16 @@ class _VentanaCostosFinanzasState extends State<VentanaCostosFinanzas>
       _tasaBinanceVentas = ConfigSistema.tasaCambio;
       _tasaBinanceCompras = ConfigSistema.tasaCambio;
 
-      // 2) Cargar productos, facturas, IMEIs y COMPRAS en paralelo
-      final results = await Future.wait([
-        _Api.get('productos'),
-        _Api.get('facturas'),
-        _Api.get('stock_imei'),
-        _Api.get('compras'),
-      ]);
+      // 2) Cargar productos, facturas, IMEIs y COMPRAS en paralelo.
+      // Se descargan una sola vez en _datosCF, que también alimenta
+      // los apartados de Equilibrio, Ganancia real y Flujo de caja.
+      await _datosCF.cargar(forzar: true);
+      final results = [
+        _datosCF.productosRaw,
+        _datosCF.facturasRaw,
+        _datosCF.imeisRaw,
+        _datosCF.comprasRaw,
+      ];
       final prods = ((results[0] as List?) ?? [])
           .map((m) => Producto.fromMap(m as Map<String, dynamic>))
           .toList();
@@ -49164,31 +49218,11 @@ class _VentanaCostosFinanzasState extends State<VentanaCostosFinanzas>
       // Cada equipo / item de cada factura del mes es una línea de
       // venta. El precio de venta se toma del INVENTARIO ACTUAL del
       // producto (no del histórico de la factura) como pidió el user.
-      _ventas.clear();
-      for (final fac in facturasMes) {
-        final fecha = parseFechaFlexible(fac.fecha);
-        for (final eq in fac.equipos) {
-          _ventas.add(ItemVentasCF(
-            fecha: fecha,
-            producto: eq.producto.nombre.isEmpty
-                ? eq.producto.codigo : eq.producto.nombre,
-            cantidad: 1,
-            tasaDia: _tasaBinanceVentas,
-            precioUnitario:
-                prodPorCodigo[eq.producto.codigo]?.precioVenta
-                    ?? eq.producto.precioVenta,
-          ));
-        }
-        for (final p in fac.itemsSinImei) {
-          _ventas.add(ItemVentasCF(
-            fecha: fecha,
-            producto: p.nombre.isEmpty ? p.codigo : p.nombre,
-            cantidad: 1,
-            tasaDia: _tasaBinanceVentas,
-            precioUnitario:
-                prodPorCodigo[p.codigo]?.precioVenta ?? p.precioVenta,
-          ));
-        }
+      _ventas
+        ..clear()
+        ..addAll(_lineasDeVenta(facturasMes, prodPorCodigo));
+      if (_ventasDesde != null && _ventasHasta != null) {
+        _aplicarRangoVentas(_ventasDesde!, _ventasHasta!);
       }
 
       // ─── INVENTARIO ─────────────────────────────────────────
@@ -49252,6 +49286,9 @@ class _VentanaCostosFinanzasState extends State<VentanaCostosFinanzas>
 
       // ─── NÓMINA (comisiones por vendedor) ───────────────────
       await _cargarNominaDesdeComisiones(facturasMes);
+
+      // ─── GASTOS GUARDADOS → Resultados ──────────────────────
+      _sincronizarGastosResultados();
 
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(
@@ -49485,6 +49522,82 @@ class _VentanaCostosFinanzasState extends State<VentanaCostosFinanzas>
     }
   }
 
+  /// Una línea por equipo / artículo vendido. El precio es el de
+  /// CONTADO del inventario actual (no el cobrado en la factura).
+  List<ItemVentasCF> _lineasDeVenta(Iterable<FacturaModel> facturas,
+      Map<String, Producto> prodPorCodigo) {
+    final r = <ItemVentasCF>[];
+    for (final fac in facturas) {
+      final fecha = parseFechaFlexible(fac.fecha);
+      for (final p in [
+        for (final eq in fac.equipos) eq.producto,
+        ...fac.itemsSinImei,
+      ]) {
+        r.add(ItemVentasCF(
+          fecha: fecha,
+          producto: p.nombre.isEmpty ? p.codigo : p.nombre,
+          cantidad: 1,
+          tasaDia: _tasaBinanceVentas,
+          precioUnitario: prodPorCodigo[p.codigo]?.precioVenta ?? p.precioVenta,
+          tienda: fac.tienda,
+        ));
+      }
+    }
+    return r;
+  }
+
+  /// Ventas entre dos fechas (el dueño quiere pedirlas por rango, no
+  /// solo por mes). Usa las facturas ya descargadas en _datosCF.
+  void _aplicarRangoVentas(DateTime desde, DateTime hasta) {
+    _ventasDesde = desde;
+    _ventasHasta = hasta;
+    _ventasRango
+      ..clear()
+      ..addAll(_lineasDeVenta(
+          _datosCF.facturas.where((f) {
+            final d = parseFechaFlexible(f.fecha);
+            return d != null && enRangoCF(d, desde, hasta);
+          }),
+          _datosCF.productos));
+  }
+
+  /// Lista que muestra la pestaña Ventas: la del rango si el usuario
+  /// eligió uno, si no la del mes.
+  List<ItemVentasCF> get _ventasVisibles =>
+      _ventasDesde != null ? _ventasRango : _ventas;
+
+  /// Lleva los gastos guardados del mes a las listas que usa el Estado
+  /// de Resultados (antes los gastos se escribían a mano y se perdían
+  /// al salir de la pantalla).
+  ///   Administrativo + Gastos fijos → Gastos de administración
+  ///   Operación → Gastos de operación · Inversión → Gastos de inversión
+  ///   Otros → Otros egresos
+  void _sincronizarGastosResultados() {
+    _gastosAdmin.clear();
+    _gastosOperacion.clear();
+    _gastosInversion.clear();
+    _otrosMovimientos.clear();
+    for (final g in _datosCF.gastosEntre(DateTime(_anioSel, _mesSel, 1),
+        DateTime(_anioSel, _mesSel + 1, 0))) {
+      final item = ItemGastoCF(concepto: g.concepto, monto: g.montoUsd);
+      switch (g.categoria) {
+        case 'Administrativo':
+        case 'Gastos fijos':
+          _gastosAdmin.add(item);
+          break;
+        case 'Operación':
+          _gastosOperacion.add(item);
+          break;
+        case 'Inversión':
+          _gastosInversion.add(item);
+          break;
+        default:
+          _otrosMovimientos.add(ItemOtroIngresoEgresoCF(
+              concepto: g.concepto, monto: g.montoUsd, esIngreso: false));
+      }
+    }
+  }
+
   /// Genera y comparte un reporte Excel del mes (Resumen + Ventas +
   /// Inventario + Nómina). Útil al cierre de mes.
   Future<void> _generarReporteFinDeMes() async {
@@ -49602,33 +49715,6 @@ class _VentanaCostosFinanzasState extends State<VentanaCostosFinanzas>
   double get _utilidadNeta => _utilidadOperativa + _otrosIngresos - _otrosEgresos;
   double get _totalNomina => _nomina.fold(0, (s, n) => s + n.total);
 
-  // Punto de equilibrio
-  double get _precioPromedioVenta {
-    if (_ventas.isEmpty) return 0;
-    final totalCantidad = _ventas.fold(0.0, (s, v) => s + v.cantidad);
-    return totalCantidad == 0 ? 0 : _totalVentasUsd / totalCantidad;
-  }
-  double get _costoVariableUnitario {
-    if (_compras.isEmpty) return 0;
-    final totalCantidad = _compras.fold(0.0, (s, c) => s + c.cantidad);
-    return totalCantidad == 0 ? 0 : _compras.fold(0.0, (s, c) => s + c.totalCompraUsd) / totalCantidad;
-  }
-  double get _peUnidades {
-    final margen = _precioPromedioVenta - _costoVariableUnitario;
-    return margen == 0 ? 0 : _totalGastosAdmin / margen;
-  }
-  double get _peFinanciero => _peUnidades * _precioPromedioVenta;
-
-  // Carga financiera PMT
-  double get _cuotaMes {
-    if (_capitalPrestamo <= 0 || _tasaInteresPct <= 0 || _plazoAnios <= 0) return 0;
-    final r = _tasaInteresPct / 100 / 12;
-    final n = _plazoAnios * 12;
-    return _capitalPrestamo * r * _pow(1 + r, n) / (_pow(1 + r, n) - 1);
-  }
-
-  double _pow(double base, double exp) => math.pow(base, exp).toDouble();
-
   // ── Helpers UI ───────────────────────────────────────────
   Widget _cardTitulo(String titulo, IconData icon, Color color, Widget child) {
     return Card(
@@ -49649,16 +49735,6 @@ class _VentanaCostosFinanzasState extends State<VentanaCostosFinanzas>
           ]),
         ),
         Padding(padding: const EdgeInsets.all(12), child: child),
-      ]),
-    );
-  }
-
-  Widget _fila(String label, String valor, {Color? color}) {
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 4),
-      child: Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
-        Expanded(child: Text(label, style: const TextStyle(fontSize: 12, color: Colors.grey))),
-        Text(valor, style: TextStyle(fontWeight: FontWeight.bold, fontSize: 12, color: color)),
       ]),
     );
   }
@@ -49789,6 +49865,8 @@ class _VentanaCostosFinanzasState extends State<VentanaCostosFinanzas>
                 ),
               ),
               // ── TabBar con las 9 secciones ──────────────────
+              // (Se quitó "Carga Fin." — préstamos — por pedido del
+              // dueño; se agregó "Ganancia real".)
               TabBar(
                 controller: _tabs,
                 labelColor: Colors.white,
@@ -49801,9 +49879,9 @@ class _VentanaCostosFinanzasState extends State<VentanaCostosFinanzas>
                   Tab(icon: Icon(Icons.point_of_sale_outlined, size: 18), text: "Ventas"),
                   Tab(icon: Icon(Icons.people_outline, size: 18), text: "Nómina"),
                   Tab(icon: Icon(Icons.receipt_long_outlined, size: 18), text: "Gastos"),
-                  Tab(icon: Icon(Icons.balance_outlined, size: 18), text: "P. Equilibrio"),
+                  Tab(icon: Icon(Icons.balance_outlined, size: 18), text: "Equilibrio"),
+                  Tab(icon: Icon(Icons.currency_exchange, size: 18), text: "Ganancia real"),
                   Tab(icon: Icon(Icons.bar_chart_outlined, size: 18), text: "Resultados"),
-                  Tab(icon: Icon(Icons.account_balance_outlined, size: 18), text: "Carga Fin."),
                   Tab(icon: Icon(Icons.waterfall_chart_outlined, size: 18), text: "Flujo Caja"),
                 ],
               ),
@@ -49816,13 +49894,22 @@ class _VentanaCostosFinanzasState extends State<VentanaCostosFinanzas>
         _tabCompras(),
         _tabVentas(),
         _tabNomina(),
-        _tabGastos(),
-        _tabPuntoEquilibrio(),
+        _PanelGastosCF(datos: _datosCF, anio: _anioSel, mes: _mesSel,
+            onCambio: () => setState(_sincronizarGastosResultados)),
+        _PanelEquilibrioCF(datos: _datosCF,
+            desde: DateTime(_anioSel, _mesSel, 1),
+            hasta: DateTime(_anioSel, _mesSel + 1, 0)),
+        _PanelGananciaRealCF(datos: _datosCF,
+            desde: DateTime(_anioSel, _mesSel, 1),
+            hasta: DateTime(_anioSel, _mesSel + 1, 0)),
         _tabResultados(),
-        _tabCargaFinanciera(),
-        _tabFlujoCaja(),
+        _PanelFlujoCajaCF(datos: _datosCF,
+            desde: DateTime(_anioSel, _mesSel, 1),
+            hasta: DateTime(_anioSel, _mesSel + 1, 0)),
       ]),
-      floatingActionButton: FloatingActionButton.extended(
+      // "Agregar fila" solo tiene sentido en Inventario, Compras y
+      // Ventas; los demás apartados tienen sus propios botones.
+      floatingActionButton: _tabs.index > 2 ? null : FloatingActionButton.extended(
         backgroundColor: const Color(0xFF1E3A5F),
         icon: const Icon(Icons.add, color: Colors.white),
         label: const Text("Agregar fila", style: TextStyle(color: Colors.white)),
@@ -49841,12 +49928,9 @@ class _VentanaCostosFinanzasState extends State<VentanaCostosFinanzas>
         _crearCompraEnBD();
         break;
       case 2:
-        setState(() => _ventas.add(ItemVentasCF(
+        setState(() => _ventasVisibles.add(ItemVentasCF(
             fecha: DateTime.now(), tasaDia: _tasaBinanceVentas)));
         break;
-      case 3: setState(() => _nomina.add(ItemNominaCF())); break;
-      case 4: setState(() => _gastosAdmin.add(ItemGastoCF())); break;
-      case 7: break;
       default: break;
     }
   }
@@ -50033,6 +50117,13 @@ class _VentanaCostosFinanzasState extends State<VentanaCostosFinanzas>
     return SingleChildScrollView(
       padding: const EdgeInsets.all(12),
       child: Column(children: [
+        _cfAyuda(
+            "¿Para qué sirve Compras? Aquí anotas la mercancía que le "
+            "compras a tus proveedores en el mes (producto, cantidad y precio "
+            "unitario). Con eso la pestaña Inventario suma esas unidades y "
+            "calcula el costo promedio de compra. Es solo un registro para el "
+            "análisis: NO mueve dinero ni crea cuentas por pagar. El nombre "
+            "del producto debe escribirse igual que en el inventario."),
         _cardTitulo("Configuración", Icons.settings, Colors.grey, Row(children: [
           Expanded(child: _inputNum("Tasa Binance del período", _tasaBinanceCompras, (v) => setState(() => _tasaBinanceCompras = v))),
         ])),
@@ -50099,12 +50190,48 @@ class _VentanaCostosFinanzasState extends State<VentanaCostosFinanzas>
 
   // ── TAB VENTAS ─────────────────────────────────────────
   Widget _tabVentas() {
-    final totalUsd = _totalVentasUsd;
-    final totalBs = _totalVentasBs;
+    final ventas = _ventasVisibles;
+    final totalUsd = ventas.fold(0.0, (s, v) => s + v.totalVentaUsd);
+    final totalBs = ventas.fold(0.0, (s, v) => s + v.totalVentaBs);
 
     return SingleChildScrollView(
       padding: const EdgeInsets.all(12),
       child: Column(children: [
+        _cfAyuda(
+            "Ventas = cada equipo o artículo facturado, valorado a su precio "
+            "de CONTADO del inventario (no lo cobrado). Sirve para el Estado "
+            "de Resultados del mes. Para ver otras fechas usa \"Desde / hasta\"; "
+            "para el dinero que entró de verdad mira Flujo de caja, y para la "
+            "ganancia por financiamiento, Ganancia real."),
+        Align(
+          alignment: Alignment.centerLeft,
+          child: Wrap(spacing: 8, runSpacing: 6,
+              crossAxisAlignment: WrapCrossAlignment.center, children: [
+            _CfSelectorRango(
+              desde: _ventasDesde ?? DateTime(_anioSel, _mesSel, 1),
+              hasta: _ventasHasta ?? DateTime(_anioSel, _mesSel + 1, 0),
+              onCambio: (a, b) => setState(() => _aplicarRangoVentas(a, b)),
+            ),
+            if (_ventasDesde != null)
+              TextButton.icon(
+                icon: const Icon(Icons.close, size: 16),
+                label: Text("Volver al mes (${_nombresMes[_mesSel-1]})"),
+                onPressed: () => setState(() {
+                  _ventasDesde = null;
+                  _ventasHasta = null;
+                  _ventasRango.clear();
+                }),
+              ),
+          ]),
+        ),
+        if (_ventasDesde != null)
+          Padding(
+            padding: const EdgeInsets.only(top: 4),
+            child: Text(
+                "Mostrando ventas del ${_cfFecha(_ventasDesde!)} al ${_cfFecha(_ventasHasta!)} "
+                "(el Estado de Resultados sigue usando el mes seleccionado).",
+                style: const TextStyle(fontSize: 11, color: AppColors.textSecondary)),
+          ),
         _cardTitulo("Configuración", Icons.settings, Colors.grey, Row(children: [
           Expanded(child: _inputNum("Tasa Binance del período", _tasaBinanceVentas, (v) => setState(() => _tasaBinanceVentas = v))),
         ])),
@@ -50124,19 +50251,21 @@ class _VentanaCostosFinanzasState extends State<VentanaCostosFinanzas>
               dataTextStyle: const TextStyle(fontSize: 11),
               columns: const [
                 DataColumn(label: Text("Fecha")),
+                DataColumn(label: Text("Tienda")),
                 DataColumn(label: Text("Producto")),
                 DataColumn(label: Text("Cantidad")),
                 DataColumn(label: Text("Tasa Día")),
-                DataColumn(label: Text("P.Unitario")),
+                DataColumn(label: Text("P.Contado")),
                 DataColumn(label: Text("Total \$")),
                 DataColumn(label: Text("Total Bs")),
                 DataColumn(label: Text("Acc.")),
               ],
-              rows: _ventas.asMap().entries.map((e) {
+              rows: ventas.asMap().entries.map((e) {
                 final v = e.value;
                 final idx = e.key;
                 return DataRow(cells: [
                   DataCell(_editableCell(_formatFecha(v.fecha), (x) {})),
+                  DataCell(Text(v.tienda)),
                   DataCell(_editableCell(v.producto, (x) => setState(() => v.producto = x))),
                   DataCell(_numCell(v.cantidad, (x) => setState(() => v.cantidad = x))),
                   DataCell(_numCell(v.tasaDia, (x) => setState(() => v.tasaDia = x))),
@@ -50144,25 +50273,57 @@ class _VentanaCostosFinanzasState extends State<VentanaCostosFinanzas>
                   DataCell(Text(v.totalVentaUsd.toStringAsFixed(2), style: const TextStyle(color: Colors.green))),
                   DataCell(Text(v.totalVentaBs.toStringAsFixed(2), style: const TextStyle(color: Colors.blueGrey))),
                   DataCell(IconButton(icon: const Icon(Icons.delete_outline, color: Colors.red, size: 18),
-                    onPressed: () => setState(() => _ventas.removeAt(idx)))),
+                    onPressed: () => setState(() => ventas.removeAt(idx)))),
                 ]);
               }).toList(),
             ),
           ),
-          if (_ventas.isEmpty)
-            const Padding(padding: EdgeInsets.all(24), child: Center(child: Text("Sin registros. Presiona + para agregar.", style: TextStyle(color: Colors.grey)))),
+          if (ventas.isEmpty)
+            const Padding(padding: EdgeInsets.all(24), child: Center(child: Text("Sin ventas en el período.", style: TextStyle(color: Colors.grey)))),
         ])),
       ]),
     );
   }
 
   // ── TAB NÓMINA ─────────────────────────────────────────
+  // Arriba: empleados (elegidos de los usuarios) y pagos con registro
+  // de quién pagó y cuándo. Abajo, plegada: la tabla de costo laboral
+  // estimado (aportes de ley) que ya existía.
   Widget _tabNomina() {
-    return SingleChildScrollView(
-      padding: const EdgeInsets.all(12),
+    return _PanelNominaCF(
+      datos: _datosCF,
+      anio: _anioSel,
+      mes: _mesSel,
+      onCambio: () => setState(() {}),
+      pie: Card(
+        margin: const EdgeInsets.symmetric(vertical: 6),
+        child: ExpansionTile(
+          title: const Text("Costo laboral estimado (aportes de ley)",
+              style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600)),
+          subtitle: const Text(
+              "Cálculo de referencia: comisiones del mes + IVSS, INCES, "
+              "BANAVIH, vacaciones, utilidades... No registra pagos.",
+              style: TextStyle(fontSize: 11)),
+          children: [_tablaCostoLaboral()],
+        ),
+      ),
+    );
+  }
+
+  Widget _tablaCostoLaboral() {
+    return Padding(
+      padding: const EdgeInsets.all(8),
       child: Column(children: [
-        _cardTitulo("Costos de Personal", Icons.people, Colors.purple, Column(children: [
-          _kpiMini("Total Nómina", "\$${_totalNomina.toStringAsFixed(2)}", Colors.purple),
+        Column(children: [
+          Row(children: [
+            Expanded(child: _kpiMini("Total Nómina", "\$${_totalNomina.toStringAsFixed(2)}", Colors.purple)),
+            const SizedBox(width: 8),
+            TextButton.icon(
+              icon: const Icon(Icons.add),
+              label: const Text("Agregar fila"),
+              onPressed: () => setState(() => _nomina.add(ItemNominaCF())),
+            ),
+          ]),
           const SizedBox(height: 12),
           SingleChildScrollView(
             scrollDirection: Axis.horizontal,
@@ -50192,7 +50353,10 @@ class _VentanaCostosFinanzasState extends State<VentanaCostosFinanzas>
                 final idx = e.key;
                 return DataRow(cells: [
                   DataCell(_editableCell(n.cargo, (v) => setState(() => n.cargo = v))),
-                  DataCell(_numCell(n.cantidad, (v) => setState(() => n.cantidad = v))),
+                  // Cantidad de personas: entero, celda angosta.
+                  DataCell(_CeldaNumerica(value: n.cantidad,
+                      onChanged: (v) => setState(() => n.cantidad = v),
+                      width: 50, fontSize: 10, decimales: 0)),
                   DataCell(_numCell(n.sueldo, (v) => setState(() => n.sueldo = v))),
                   DataCell(Text(n.totalSueldo.toStringAsFixed(2), style: const TextStyle(color: Colors.black54))),
                   DataCell(Text(n.totalIvss.toStringAsFixed(2), style: const TextStyle(color: Colors.black54))),
@@ -50211,121 +50375,8 @@ class _VentanaCostosFinanzasState extends State<VentanaCostosFinanzas>
             ),
           ),
           if (_nomina.isEmpty)
-            const Padding(padding: EdgeInsets.all(24), child: Center(child: Text("Sin registros. Presiona + para agregar.", style: TextStyle(color: Colors.grey)))),
-        ])),
-      ]),
-    );
-  }
-
-  // ── TAB GASTOS ─────────────────────────────────────────
-  Widget _tabGastos() {
-    return SingleChildScrollView(
-      padding: const EdgeInsets.all(12),
-      child: Column(children: [
-        // KPIs
-        Row(children: [
-          Expanded(child: _kpiMini("Gastos Admin", "\$${_totalGastosAdmin.toStringAsFixed(2)}", AppColors.brandBlue)),
-          const SizedBox(width: 6),
-          Expanded(child: _kpiMini("Gastos Operación", "\$${_totalGastosOper.toStringAsFixed(2)}", Colors.deepOrange)),
-          const SizedBox(width: 6),
-          Expanded(child: _kpiMini("Gastos Inversión", "\$${_totalGastosInv.toStringAsFixed(2)}", Colors.brown)),
+            const Padding(padding: EdgeInsets.all(24), child: Center(child: Text("Sin registros. Presiona Agregar fila.", style: TextStyle(color: Colors.grey)))),
         ]),
-        const SizedBox(height: 8),
-        // Administración
-        _seccionGastos("Gastos de Administración", Icons.admin_panel_settings, AppColors.brandBlue, _gastosAdmin),
-        // Operación
-        _seccionGastos("Gastos de Operación", Icons.settings, Colors.deepOrange, _gastosOperacion),
-        // Inversión
-        _seccionGastos("Gastos de Inversión", Icons.trending_up, Colors.brown, _gastosInversion),
-        // Otros ingresos/egresos
-        _cardTitulo("Otros Ingresos / Egresos", Icons.compare_arrows, Colors.teal, Column(children: [
-          ..._otrosMovimientos.asMap().entries.map((e) {
-            final o = e.value;
-            final idx = e.key;
-            return Padding(
-              padding: const EdgeInsets.only(bottom: 8),
-              child: Row(children: [
-                Expanded(flex: 3, child: _editableCell(o.concepto, (v) => setState(() => o.concepto = v))),
-                const SizedBox(width: 6),
-                Expanded(flex: 2, child: _numCell(o.monto, (v) => setState(() => o.monto = v))),
-                const SizedBox(width: 6),
-                ToggleButtons(
-                  isSelected: [o.esIngreso, !o.esIngreso],
-                  onPressed: (i) => setState(() => o.esIngreso = i == 0),
-                  borderRadius: BorderRadius.circular(6),
-                  selectedColor: Colors.white,
-                  fillColor: o.esIngreso ? Colors.green : Colors.red,
-                  constraints: const BoxConstraints(minWidth: 50, minHeight: 32),
-                  children: const [Text("Ing.", style: TextStyle(fontSize: 11)), Text("Egr.", style: TextStyle(fontSize: 11))],
-                ),
-                IconButton(icon: const Icon(Icons.delete_outline, color: Colors.red, size: 18),
-                  onPressed: () => setState(() => _otrosMovimientos.removeAt(idx))),
-              ]),
-            );
-          }),
-          TextButton.icon(
-            icon: const Icon(Icons.add),
-            label: const Text("Agregar"),
-            onPressed: () => setState(() => _otrosMovimientos.add(ItemOtroIngresoEgresoCF())),
-          ),
-        ])),
-      ]),
-    );
-  }
-
-  Widget _seccionGastos(String titulo, IconData icon, Color color, List<ItemGastoCF> lista) {
-    return _cardTitulo(titulo, icon, color, Column(children: [
-      ...(lista.asMap().entries.map((e) {
-        final g = e.value;
-        final idx = e.key;
-        return Padding(
-          padding: const EdgeInsets.only(bottom: 6),
-          child: Row(children: [
-            Expanded(flex: 3, child: _editableCell(g.concepto, (v) => setState(() => g.concepto = v))),
-            const SizedBox(width: 8),
-            Expanded(flex: 2, child: _numCell(g.monto, (v) => setState(() => g.monto = v))),
-            IconButton(icon: const Icon(Icons.delete_outline, color: Colors.red, size: 18),
-              onPressed: () => setState(() => lista.removeAt(idx))),
-          ]),
-        );
-      }).toList()),
-      TextButton.icon(
-        icon: const Icon(Icons.add),
-        label: const Text("Agregar concepto"),
-        onPressed: () => setState(() => lista.add(ItemGastoCF())),
-      ),
-    ]));
-  }
-
-  // ── TAB PUNTO DE EQUILIBRIO ────────────────────────────
-  Widget _tabPuntoEquilibrio() {
-    return SingleChildScrollView(
-      padding: const EdgeInsets.all(16),
-      child: Column(children: [
-        _cardTitulo("Punto de Equilibrio", Icons.balance, Colors.deepPurple, Column(children: [
-          _fila("Ventas Totales", "\$${_totalVentasUsd.toStringAsFixed(2)}"),
-          _fila("Costos Variables (Gastos Oper.)", "\$${_totalGastosOper.toStringAsFixed(2)}"),
-          _fila("Costo Variable Unitario", "\$${_costoVariableUnitario.toStringAsFixed(4)}"),
-          _fila("Costos Fijos (Gastos Admin)", "\$${_totalGastosAdmin.toStringAsFixed(2)}"),
-          _fila("Precio Unitario Prom. Venta", "\$${_precioPromedioVenta.toStringAsFixed(4)}"),
-          _fila("Costo Unitario Prom. Compra", "\$${_costoVariableUnitario.toStringAsFixed(4)}"),
-          const Divider(),
-          _fila("P. de Equilibrio en Unidades", _peUnidades.toStringAsFixed(2), color: Colors.deepPurple),
-          _fila("P. de Equilibrio Financiero", "\$${_peFinanciero.toStringAsFixed(2)}", color: Colors.deepPurple),
-        ])),
-        const SizedBox(height: 12),
-        _cardTitulo("Interpretación", Icons.info_outline, Colors.blueGrey, Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(
-              _peUnidades <= 0
-                ? "No se puede calcular. Ingrese datos en Ventas y Gastos."
-                : "Debe vender al menos ${_peUnidades.toStringAsFixed(0)} unidades "
-                  "(\$${_peFinanciero.toStringAsFixed(2)}) para cubrir todos los costos fijos.",
-              style: const TextStyle(fontSize: 13),
-            ),
-          ],
-        )),
       ]),
     );
   }
@@ -50339,6 +50390,11 @@ class _VentanaCostosFinanzasState extends State<VentanaCostosFinanzas>
     return SingleChildScrollView(
       padding: const EdgeInsets.all(16),
       child: Column(children: [
+        _cfAyuda(
+            "Estado de Resultados del mes: ventas a precio de contado − costo "
+            "de lo vendido = utilidad bruta; menos los gastos guardados en "
+            "Gastos (Administrativo y Gastos fijos van como administración, "
+            "\"Otros\" como otros egresos) = utilidad neta. Montos en \$."),
         _cardTitulo("Estado de Resultados", Icons.bar_chart, AppColors.brandBlue, Column(children: [
           _filaResultado("INGRESOS POR VENTAS", _totalVentasUsd, _totalVentasBs, 100, Colors.green),
           const Divider(),
@@ -50389,164 +50445,6 @@ class _VentanaCostosFinanzasState extends State<VentanaCostosFinanzas>
     );
   }
 
-  // ── TAB CARGA FINANCIERA ───────────────────────────────
-  Widget _tabCargaFinanciera() {
-    final totalPagado = _cuotaMes * _plazoAnios * 12;
-    final intereses = totalPagado - _capitalPrestamo;
-
-    return SingleChildScrollView(
-      padding: const EdgeInsets.all(16),
-      child: Column(children: [
-        _cardTitulo("Parámetros del Préstamo", Icons.account_balance, Colors.brown, Column(children: [
-          _inputNum("Capital del préstamo (\$)", _capitalPrestamo, (v) => setState(() => _capitalPrestamo = v)),
-          _inputNum("Tasa de interés anual (%)", _tasaInteresPct, (v) => setState(() => _tasaInteresPct = v)),
-          _inputNum("Plazo en años", _plazoAnios, (v) => setState(() => _plazoAnios = v)),
-        ])),
-        _cardTitulo("Resumen", Icons.calculate, Colors.brown, Column(children: [
-          _fila("Cuota mensual", "\$${_cuotaMes.toStringAsFixed(2)}", color: Colors.brown),
-          _fila("Total pagado", "\$${totalPagado.toStringAsFixed(2)}"),
-          _fila("Intereses totales", "\$${intereses.toStringAsFixed(2)}", color: Colors.red),
-        ])),
-        if (_capitalPrestamo > 0)
-          _cardTitulo("Tabla de Amortización", Icons.table_chart, Colors.brown, SingleChildScrollView(
-            scrollDirection: Axis.horizontal,
-            child: DataTable(
-              headingRowColor: WidgetStateProperty.all(Colors.brown[50]),
-              columnSpacing: 10,
-              headingTextStyle: const TextStyle(fontSize: 11, fontWeight: FontWeight.bold, color: Colors.brown),
-              dataTextStyle: const TextStyle(fontSize: 11),
-              columns: const [
-                DataColumn(label: Text("Mes")),
-                DataColumn(label: Text("Saldo Capital")),
-                DataColumn(label: Text("Amortiz.")),
-                DataColumn(label: Text("Intereses")),
-                DataColumn(label: Text("Mensualidad")),
-              ],
-              rows: _capitalPrestamo <= 0 || _plazoAnios <= 0 || _tasaInteresPct <= 0
-                ? []
-                : List.generate((_plazoAnios * 12).toInt().clamp(0, 600), (i) {
-                final mes = i + 1;
-                final r = _tasaInteresPct / 100 / 12;
-                final n = _plazoAnios * 12;
-                final denominador = _pow(1 + r, n) - 1;
-                final saldoAnterior = (denominador == 0 || i == 0)
-                    ? _capitalPrestamo
-                    : _capitalPrestamo * (_pow(1 + r, n) - _pow(1 + r, i.toDouble())) / denominador;
-                final interesMes = saldoAnterior * r;
-                final amortizacion = _cuotaMes - interesMes;
-                return DataRow(cells: [
-                  DataCell(Text("$mes")),
-                  DataCell(Text("\$${saldoAnterior.toStringAsFixed(2)}")),
-                  DataCell(Text("\$${amortizacion.toStringAsFixed(2)}", style: const TextStyle(color: Colors.green))),
-                  DataCell(Text("\$${interesMes.toStringAsFixed(2)}", style: const TextStyle(color: Colors.red))),
-                  DataCell(Text("\$${_cuotaMes.toStringAsFixed(2)}", style: const TextStyle(fontWeight: FontWeight.bold))),
-                ]);
-              }),
-            ),
-          )),
-      ]),
-    );
-  }
-
-  // ── TAB FLUJO DE CAJA ──────────────────────────────────
-  Widget _tabFlujoCaja() {
-    return SingleChildScrollView(
-      padding: const EdgeInsets.all(12),
-      child: Column(children: [
-        _cardTitulo("Flujo de Caja - 12 Meses", Icons.waterfall_chart, AppColors.brandBlue, Column(children: [
-          SingleChildScrollView(
-            scrollDirection: Axis.horizontal,
-            child: DataTable(
-              headingRowColor: WidgetStateProperty.all(AppColors.brandBlue.withValues(alpha: 0.08)),
-              columnSpacing: 10,
-              headingTextStyle: const TextStyle(fontSize: 10, fontWeight: FontWeight.bold, color: AppColors.brandBlue),
-              dataTextStyle: const TextStyle(fontSize: 10),
-              columns: const [
-                DataColumn(label: Text("Mes")),
-                DataColumn(label: Text("Ing.\nVentas")),
-                DataColumn(label: Text("Costo\nVentas")),
-                DataColumn(label: Text("Gtos.\nAdmin")),
-                DataColumn(label: Text("Gtos.\nOper")),
-                DataColumn(label: Text("Gtos.\nInv")),
-                DataColumn(label: Text("Flujo\nOperat.")),
-                DataColumn(label: Text("Carga\nFinanc.")),
-                DataColumn(label: Text("Otros\nIngs")),
-                DataColumn(label: Text("Otros\nEgrs")),
-                DataColumn(label: Text("Flujo\nNeto")),
-                DataColumn(label: Text("Saldo\nInicial")),
-                DataColumn(label: Text("Saldo\nFinal")),
-              ],
-              rows: _flujo.asMap().entries.map((e) {
-                final f = e.value;
-                final idx = e.key;
-                // El mes activo es el mes actual del sistema
-                final _mesesEsp = ['Enero','Febrero','Marzo','Abril','Mayo','Junio',
-                  'Julio','Agosto','Septiembre','Octubre','Noviembre','Diciembre'];
-                final mesActualNombre = _mesesEsp[DateTime.now().month - 1];
-                final esMesActivo = f.mes == mesActualNombre;
-                final ingV = esMesActivo ? _totalVentasUsd : f.ingresoVentas;
-                final costoV = esMesActivo ? _costoVentas : f.costoVentas;
-                final gAdmin = esMesActivo ? _totalGastosAdmin : f.gastosAdmin;
-                final gOper = esMesActivo ? _totalGastosOper : f.gastosOperacion;
-                final gInv = esMesActivo ? _totalGastosInv : f.gastosInversion;
-                final cFin = esMesActivo ? _cuotaMes : f.cargaFinanciera;
-                final otIngr = esMesActivo ? _otrosIngresos : f.otrosIngresos;
-                final otEgr = esMesActivo ? _otrosEgresos : f.otrosEgresos;
-                final flujoOp = ingV - (costoV + gAdmin + gOper + gInv);
-                final flujoN = flujoOp - cFin + (otIngr - otEgr);
-                final saldoF = f.saldoInicial + flujoN;
-                // Saldo inicial editable por el usuario
-                return DataRow(
-                  color: esMesActivo ? WidgetStateProperty.all(AppColors.brandBlue.withOpacity(0.05)) : null,
-                  cells: [
-                    DataCell(Text(f.mes, style: esMesActivo ? const TextStyle(fontWeight: FontWeight.bold, color: AppColors.brandBlue) : null)),
-                    DataCell(esMesActivo
-                      ? Text("\$${ingV.toStringAsFixed(0)}", style: const TextStyle(color: AppColors.brandBlue, fontWeight: FontWeight.bold))
-                      : _numCellCompact(f.ingresoVentas, (v) => setState(() => f.ingresoVentas = v))),
-                    DataCell(esMesActivo
-                      ? Text("\$${costoV.toStringAsFixed(0)}", style: const TextStyle(color: AppColors.brandBlue, fontWeight: FontWeight.bold))
-                      : _numCellCompact(f.costoVentas, (v) => setState(() => f.costoVentas = v))),
-                    DataCell(esMesActivo
-                      ? Text("\$${gAdmin.toStringAsFixed(0)}", style: const TextStyle(color: AppColors.brandBlue, fontWeight: FontWeight.bold))
-                      : _numCellCompact(f.gastosAdmin, (v) => setState(() => f.gastosAdmin = v))),
-                    DataCell(esMesActivo
-                      ? Text("\$${gOper.toStringAsFixed(0)}", style: const TextStyle(color: AppColors.brandBlue, fontWeight: FontWeight.bold))
-                      : _numCellCompact(f.gastosOperacion, (v) => setState(() => f.gastosOperacion = v))),
-                    DataCell(esMesActivo
-                      ? Text("\$${gInv.toStringAsFixed(0)}", style: const TextStyle(color: AppColors.brandBlue, fontWeight: FontWeight.bold))
-                      : _numCellCompact(f.gastosInversion, (v) => setState(() => f.gastosInversion = v))),
-                    DataCell(Text("\$${flujoOp.toStringAsFixed(0)}", style: TextStyle(color: flujoOp >= 0 ? Colors.green : Colors.red, fontWeight: FontWeight.bold))),
-                    DataCell(esMesActivo
-                      ? Text("\$${cFin.toStringAsFixed(0)}", style: const TextStyle(color: AppColors.brandBlue, fontWeight: FontWeight.bold))
-                      : _numCellCompact(f.cargaFinanciera, (v) => setState(() => f.cargaFinanciera = v))),
-                    DataCell(esMesActivo
-                      ? Text("\$${otIngr.toStringAsFixed(0)}", style: const TextStyle(color: AppColors.brandBlue, fontWeight: FontWeight.bold))
-                      : _numCellCompact(f.otrosIngresos, (v) => setState(() => f.otrosIngresos = v))),
-                    DataCell(esMesActivo
-                      ? Text("\$${otEgr.toStringAsFixed(0)}", style: const TextStyle(color: AppColors.brandBlue, fontWeight: FontWeight.bold))
-                      : _numCellCompact(f.otrosEgresos, (v) => setState(() => f.otrosEgresos = v))),
-                    DataCell(Text("\$${flujoN.toStringAsFixed(0)}", style: TextStyle(color: flujoN >= 0 ? Colors.green[800] : Colors.red[800], fontWeight: FontWeight.bold))),
-                    DataCell(_numCellCompact(f.saldoInicial, (v) => setState(() => f.saldoInicial = v))),
-                    DataCell(Text("\$${saldoF.toStringAsFixed(0)}", style: TextStyle(color: saldoF >= 0 ? AppColors.brandBlue : Colors.red, fontWeight: FontWeight.bold))),
-                  ],
-                );
-              }).toList(),
-            ),
-          ),
-          const SizedBox(height: 8),
-          Builder(builder: (_) {
-            final _mesesEsp2 = ['Enero','Febrero','Marzo','Abril','Mayo','Junio',
-              'Julio','Agosto','Septiembre','Octubre','Noviembre','Diciembre'];
-            final mesNombre = _mesesEsp2[DateTime.now().month - 1];
-            return Text(
-              "Nota: El mes activo ($mesNombre) se calcula automáticamente desde los módulos.",
-              style: const TextStyle(fontSize: 11, color: Colors.grey));
-          }),
-        ])),
-      ]),
-    );
-  }
-
   // ── Helpers de celdas editables ───────────────────────
   Widget _editableCell(String value, Function(String) onChanged) {
     return _CeldaTexto(value: value, onChanged: onChanged);
@@ -50554,11 +50452,6 @@ class _VentanaCostosFinanzasState extends State<VentanaCostosFinanzas>
 
   Widget _numCell(double value, Function(double) onChanged) {
     return _CeldaNumerica(value: value, onChanged: onChanged);
-  }
-
-  Widget _numCellCompact(double value, Function(double) onChanged) {
-    return _CeldaNumerica(value: value, onChanged: onChanged,
-        width: 60, fontSize: 10, decimales: 0);
   }
 
   Widget _kpiMini(String label, String value, Color color) {
