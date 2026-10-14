@@ -52,6 +52,8 @@ part 'cxp_perfil_ui.dart';
 
 part 'auditoria_facturas.dart';
 
+part 'listas_precios_extra.dart';
+
 
 // ═══════════════════════════════════════════════════════════════════════
 //  SISTEMA DE ACTUALIZACIÓN OTA (Android + Windows)
@@ -7587,6 +7589,7 @@ Future<void> cargarStockParaListas({bool forzar = false}) async {
       }
     }
     _IndiceStockListas.invalidar();
+    if (traerProd) ultimaCargaCatalogoListas = DateTime.now();
   } catch (e) {
     debugPrint('[ListasPrecios] No se pudo cargar el stock: $e');
   }
@@ -7667,11 +7670,15 @@ int recalcularItemPorCambioDePrecio(
     for (final t in tasas) {
       final defViejo =
           precioPorDefectoEnLista(lista, anterior.precioVenta, tasa: t);
-      if ((actual - defViejo).abs() > tolerancia) continue;
       final defNuevo =
           precioPorDefectoEnLista(lista, nuevo.precioVenta, tasa: t);
-      if ((defNuevo - actual).abs() > 0.0001) {
-        it.preciosPorColumna[col.nombre] = defNuevo;
+      // Igual al defecto, o el defecto retocado a mano (redondeado):
+      // sigue al precio del producto. Un precio especial → null.
+      final nuevoValor = precioManualSegunDefecto(actual, defViejo, defNuevo,
+          tolerancia: tolerancia);
+      if (nuevoValor == null) continue;
+      if ((nuevoValor - actual).abs() > 0.0001) {
+        it.preciosPorColumna[col.nombre] = nuevoValor;
         cambios++;
       }
       break;
@@ -7711,6 +7718,17 @@ Future<int> actualizarListasPorCambioDePrecio(
   final cambioCosto =
       (anterior.precioCosto - nuevo.precioCosto).abs() > 0.0001;
   if (!cambioVenta && !cambioCosto) return 0;
+  // El catálogo en memoria pasa a tener el precio nuevo YA: si no, la
+  // pantalla de la lista (o el siguiente cambio de precio) recalcula
+  // las columnas con función con el precio viejo y las pisa.
+  sincronizarPrecioEnCatalogo(anterior, nuevo);
+  // En cola: dos cambios seguidos no se pisan entre sí.
+  return _enColaListasPorPrecio(
+      () => _actualizarListasPorCambioDePrecio(anterior, nuevo));
+}
+
+Future<int> _actualizarListasPorCambioDePrecio(
+    Producto anterior, Producto nuevo) async {
   try {
     // `ListaPrecio.fromMap` descarta los items cuyo producto no está en
     // el catálogo: sin catálogo cargado se perderían al guardar.
@@ -32922,12 +32940,6 @@ class _VentanaConsultaRapidaPreciosState
     _cargarDatos();
   }
 
-  /// % con a lo sumo un decimal ("40", "37.5").
-  static String _pctTexto(double v) {
-    final r = (v * 10).roundToDouble() / 10;
-    return r % 1 == 0 ? r.toStringAsFixed(0) : r.toStringAsFixed(1);
-  }
-
   /// Columnas de precio reales de [l] (sin las virtuales __x__).
   static List<ColumnaPrecio> _columnasReales(ListaPrecio l) => l.columnas
       .where((c) => !FormulaColumna.esNombreVirtual(c.nombre))
@@ -33667,7 +33679,6 @@ class _VentanaConsultaRapidaPreciosState
                                             "${(pr['varias_columnas'] as bool) ? '${pr['columna']} · ' : ''}"
                                             "${pr['financiadora'] ?? 'Financiamiento'} · "
                                             "Inicial ${moneda == 'Bs' ? '${(pr['inicial'] as double).toStringAsFixed(2)} Bs' : '\$${(pr['inicial'] as double).toStringAsFixed(2)}'}"
-                                            " (${_pctTexto(pr['inicial_pct'] as double)}%)"
                                             "${(pr['tiene_cuotas'] as bool) ? ' · ${pr['n_cuotas']} cuotas de ${moneda == 'Bs' ? '${(pr['cuota'] as double).toStringAsFixed(2)} Bs' : '\$${(pr['cuota'] as double).toStringAsFixed(2)}'}' : ' · sin cuotas'}",
                                             style: const TextStyle(
                                                 fontSize: 10,
@@ -34016,6 +34027,20 @@ class _VentanaListasPreciosState extends State<VentanaListasPrecios> {
         ));
         agregados++;
       }
+    }
+
+    // Productos agregados A MANO que no entran en el filtro de la lista
+    // (ej. televisores y aires agregados a la lista de teléfonos): se
+    // conservan mientras sigan en el catálogo. Antes "Actualizar" los
+    // descartaba por categoría/marca y parecía que se quitaban solos.
+    final enCatalogo = {for (final p in catalogoGlobal) p.codigo};
+    for (final it in lista.items) {
+      final c = it.producto.codigo;
+      if (codigosVistos.contains(c) || !enCatalogo.contains(c)) continue;
+      codigosVistos.add(c);
+      it.stockDisponible = stockGlobalDeProducto(it.producto);
+      nuevaListaItems.add(it);
+      preservados++;
     }
 
     // Reemplazar la lista — esto AUTOMÁTICAMENTE elimina productos
@@ -35301,9 +35326,19 @@ class _DetalleListaPrecioState extends State<DetalleListaPrecio> {
       // por si el servidor devolvio las columnas sin su funcion.
       await _restaurarFormulasDeCache();
       if (!mounted) return;
-      // Stock real para ocultar los agotados (sólo carga lo que falte).
-      await cargarStockParaListas();
+      // Stock real para ocultar los agotados. El catálogo se trae
+      // fresco si tiene más de 30 s: las funciones de columna calculan
+      // desde el precio de venta del producto y, con un catálogo viejo
+      // (precio cambiado en otro equipo), al abrir la lista se
+      // recalculaban con el precio VIEJO y se guardaban, deshaciendo
+      // la actualización por cambio de precio.
+      await cargarStockParaListas(
+          forzar: DateTime.now()
+                  .difference(ultimaCargaCatalogoListas)
+                  .inSeconds >
+              30);
       if (!mounted) return;
+      refrescarProductosDeLista(widget.lista);
       setState(() => _cargandoStock = false);
       // Aplicar las funciones automaticas con los datos ya cargados
       if (widget.lista.items.isNotEmpty && widget.lista.tieneFormulas) {
@@ -35518,6 +35553,9 @@ class _DetalleListaPrecioState extends State<DetalleListaPrecio> {
   Future<void> _sincronizarConBackend() async {
     if (!mounted) return;
     if (_guardandoBackend) return;
+    // Con el selector de productos abierto no se trae nada del
+    // servidor: pisaría los productos recién agregados.
+    if (_selectorAbierto) return;
     if (_debouncePersistir?.isActive ?? false) return;
     // Margen de 8s después de la última edición local
     if (DateTime.now().difference(_ultimaEdicionLocal).inSeconds < 8) {
@@ -36308,6 +36346,30 @@ class _DetalleListaPrecioState extends State<DetalleListaPrecio> {
               _editarColumnaCompleta(col);
             },
           ),
+          // ── Orden de las columnas ──
+          // Define el orden en pantalla, en el PDF y en la imagen. La
+          // primera columna es el precio base y queda fija.
+          if (!esPrimera) ...[
+            ListTile(
+              leading: const Icon(Icons.arrow_back),
+              title: const Text('Mover a la izquierda'),
+              enabled: widget.lista.columnas.indexOf(col) > 1,
+              onTap: () {
+                Navigator.pop(ctx);
+                _moverColumna(col, -1);
+              },
+            ),
+            ListTile(
+              leading: const Icon(Icons.arrow_forward),
+              title: const Text('Mover a la derecha'),
+              enabled: widget.lista.columnas.indexOf(col) <
+                  widget.lista.columnas.length - 1,
+              onTap: () {
+                Navigator.pop(ctx);
+                _moverColumna(col, 1);
+              },
+            ),
+          ],
           ListTile(
             leading: const Icon(Icons.drive_file_rename_outline),
             title: const Text('Renombrar columna'),
@@ -36335,6 +36397,97 @@ class _DetalleListaPrecioState extends State<DetalleListaPrecio> {
         ]),
       ),
     );
+  }
+
+  /// true mientras está abierta la pantalla "Agregar productos".
+  bool _selectorAbierto = false;
+
+  /// Abre "Agregar productos" y GUARDA cada producto agregado. Ver
+  /// `SelectorProductosLista.onCambio`.
+  Future<void> _abrirSelectorProductos() async {
+    final antes = widget.lista.items.map((i) => i.producto.codigo).toSet();
+    _selectorAbierto = true;
+    try {
+      await Navigator.push(
+          context,
+          MaterialPageRoute(
+              builder: (_) => SelectorProductosLista(
+                  lista: widget.lista, onCambio: _persistirLista)));
+    } finally {
+      _selectorAbierto = false;
+    }
+    if (!mounted) return;
+    final nuevos = widget.lista.items
+        .where((i) => !antes.contains(i.producto.codigo))
+        .toList();
+    setState(() {
+      // Si alguno de los agregados está agotado, se muestran los
+      // agotados para que el admin lo vea en el editor (si no,
+      // parecía que se había borrado).
+      if (nuevos.any((i) => stockVivoDeItem(i) <= 0)) {
+        _mostrarAgotados = true;
+      }
+    });
+    if (nuevos.isNotEmpty) _persistirLista();
+  }
+
+  /// Cambia el orden de [col] (ver `moverColumnaLista`) y guarda. El
+  /// servidor devuelve las columnas en el orden en que se guardaron, así
+  /// que el orden nuevo vale para todos los equipos y para exportar.
+  void _moverColumna(ColumnaPrecio col, int delta) {
+    final i = widget.lista.columnas.indexOf(col);
+    var movida = false;
+    setState(() => movida = moverColumnaLista(widget.lista, i, delta));
+    if (movida) _persistirLista();
+  }
+
+  /// Pide el N° de cuotas de UN modelo de la lista (nivel 1). Sale en
+  /// la pantalla, la consulta rápida, el PDF y la imagen. Para varios
+  /// modelos o una marca entera está el botón "Inicial y cuotas por
+  /// marca o modelo" de la barra.
+  Future<void> _editarCuotasProducto(ItemListaPrecio item) async {
+    final lista = widget.lista;
+    final ctrl = TextEditingController(
+        text: item.cuotasOverride?.toString() ?? '');
+    final r = await showDialog<({bool ok, int? n})>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Cuotas de este modelo'),
+        content: Column(mainAxisSize: MainAxisSize.min, children: [
+          Text(item.producto.nombre,
+              style: const TextStyle(fontWeight: FontWeight.bold)),
+          const SizedBox(height: 10),
+          TextField(
+            controller: ctrl,
+            autofocus: true,
+            keyboardType: TextInputType.number,
+            decoration: InputDecoration(
+              labelText: 'N° de cuotas (nivel 1)',
+              hintText: 'Vacío = las de la lista (${lista.numeroCuotas})',
+              border: const OutlineInputBorder(),
+              isDense: true,
+            ),
+          ),
+        ]),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text('Cancelar')),
+          if (item.cuotasOverride != null)
+            TextButton(
+                onPressed: () => Navigator.pop(ctx, (ok: true, n: null)),
+                child: const Text('Usar las de la lista')),
+          ElevatedButton(
+              onPressed: () => Navigator.pop(
+                  ctx, (ok: true, n: int.tryParse(ctrl.text.trim()))),
+              child: const Text('Guardar')),
+        ],
+      ),
+    );
+    if (r == null || !r.ok || !mounted) return;
+    var cambio = false;
+    setState(() => cambio = fijarCuotasDeItem(lista, item, r.n));
+    if (cambio) _persistirLista();
   }
 
   /// Abre el editor de función para una columna existente y aplica el
@@ -37379,8 +37532,8 @@ class _DetalleListaPrecioState extends State<DetalleListaPrecio> {
                         style: const TextStyle(fontSize: 11)),
                   ),
                   const Text(
-                      'Siempre se incluyen la inicial (monto y %), el '
-                      'número de cuotas y el monto de cada cuota.',
+                      'Siempre se incluyen la inicial (monto, nivel 1), '
+                      'el número de cuotas y el monto de cada cuota.',
                       style: TextStyle(
                           fontSize: 11, color: AppColors.textSecondary)),
                 ],
@@ -37457,19 +37610,28 @@ class _DetalleListaPrecioState extends State<DetalleListaPrecio> {
     String monto(double v) =>
         '$moneda ${_redondearExport(v, modo).toStringAsFixed(decimales)}';
 
-    // Columnas reales (las virtuales __x__ son internas).
-    final columnas = lista.columnas
-        .where((c) => !FormulaColumna.esNombreVirtual(c.nombre))
-        .toList();
     final mostrarColumnas = !esFinanc || incluirColumnas;
+    // Orden de las columnas del documento: el MISMO de la pantalla y
+    // del orden que el admin definió en la lista. Antes el bloque de
+    // financiamiento (inicial/cuotas) iba al final, después de TODAS
+    // las columnas, así que el documento salía "reordenado" respecto
+    // de la pantalla. Ver `ordenColumnasExport`.
+    final orden = ordenColumnasExport(lista, incluirColumnas: mostrarColumnas);
 
     final headers = <String>['Producto'];
-    if (mostrarColumnas) headers.addAll(columnas.map((c) => c.nombre));
-    if (esFinanc) {
-      headers.add('Inicial');
-      if (lista.tieneCuotas) {
-        headers.add('Cuotas');
-        headers.add('Monto cuota');
+    for (final c in orden) {
+      switch (c) {
+        case '__inicial__':
+          headers.add('Inicial');
+          break;
+        case '__n_cuotas__':
+          headers.add('Cuotas');
+          break;
+        case '__monto_cuota__':
+          headers.add('Monto cuota');
+          break;
+        default:
+          headers.add(c);
       }
     }
 
@@ -37480,20 +37642,24 @@ class _DetalleListaPrecioState extends State<DetalleListaPrecio> {
       final filasMarca = <List<String>>[];
       for (final item in entry.value) {
         final fila = <String>[_nombreParaDocumento(item.producto)];
-        if (mostrarColumnas) {
-          for (final col in columnas) {
-            fila.add(monto(item.preciosPorColumna[col.nombre] ?? 0));
-          }
-        }
-        if (esFinanc) {
-          final base = lista.precioBaseDe(item);
-          final inicial = lista.inicialDe(item, base);
-          fila.add('${monto(inicial)} '
-              '(${_fmtPct(lista.pctInicialEfectivo(item))}%)');
-          if (lista.tieneCuotas) {
-            final n = lista.cuotasDe(item);
-            fila.add('$n cuota${n == 1 ? '' : 's'}');
-            fila.add(monto(lista.cuotaDe(item, base)));
+        final base = lista.precioBaseDe(item);
+        for (final c in orden) {
+          switch (c) {
+            case '__inicial__':
+              // Sólo el monto (calculado para el nivel 1): el % de
+              // inicial ya no se muestra porque Krece tiene 4 niveles y
+              // un % fijo confundía a los clientes de otro nivel.
+              fila.add(monto(lista.inicialDe(item, base)));
+              break;
+            case '__n_cuotas__':
+              final n = lista.cuotasDe(item);
+              fila.add('$n cuota${n == 1 ? '' : 's'}');
+              break;
+            case '__monto_cuota__':
+              fila.add(monto(lista.cuotaDe(item, base)));
+              break;
+            default:
+              fila.add(monto(item.preciosPorColumna[c] ?? 0));
           }
         }
         filasMarca.add(fila);
@@ -37505,16 +37671,14 @@ class _DetalleListaPrecioState extends State<DetalleListaPrecio> {
   }
 
   /// Resumen de las condiciones de financiamiento para el encabezado
-  /// ("Inicial 40% · 6 cuotas · recargo 20%").
+  /// ("6 cuotas · recargo 20%"; sin % de inicial, ver abajo).
   String _condicionesFinanciamiento() {
     final l = widget.lista;
     final conStock = l.itemsConStock;
-    final pcts = conStock.map((it) => _fmtPct(l.pctInicialEfectivo(it))).toSet();
-    final partes = <String>[
-      pcts.length <= 1
-          ? 'Inicial ${pcts.isEmpty ? _fmtPct(l.porcentajeInicial) : pcts.first}%'
-          : 'Inicial según modelo',
-    ];
+    // Sin el % de inicial: Krece tiene 4 niveles y la lista se arma
+    // para el nivel 1; anunciar "Inicial 30%" confundía a clientes de
+    // otro nivel. Sólo se anuncia el número de cuotas.
+    final partes = <String>[];
     if (l.tieneCuotas) {
       final ns = conStock.map(l.cuotasDe).toSet();
       partes.add(ns.length <= 1
@@ -37775,12 +37939,21 @@ class _DetalleListaPrecioState extends State<DetalleListaPrecio> {
       // Una sola página con el alto justo del contenido. El ancho
       // crece con la cantidad de columnas para que no se aprieten.
       final ancho = nCols > 6 ? 820.0 : (nCols > 4 ? 680.0 : 560.0);
+      // Fondo BLANCO explícito y sin márgenes de página (el margen va
+      // como relleno dentro del fondo): lo que el PDF no pinta sale
+      // transparente al rasterizar y WhatsApp lo muestra NEGRO (las
+      // franjas negras en las filas sin color). Ver
+      // `aplanarSobreBlanco`.
       pdf.addPage(pw.Page(
-        pageFormat: PdfPageFormat(ancho, double.infinity, marginAll: 18),
-        build: (ctx) => pw.Column(
-          mainAxisSize: pw.MainAxisSize.min,
-          crossAxisAlignment: pw.CrossAxisAlignment.stretch,
-          children: contenido,
+        pageFormat: PdfPageFormat(ancho, double.infinity, marginAll: 0),
+        build: (ctx) => pw.Container(
+          color: PdfColors.white,
+          padding: const pw.EdgeInsets.all(18),
+          child: pw.Column(
+            mainAxisSize: pw.MainAxisSize.min,
+            crossAxisAlignment: pw.CrossAxisAlignment.stretch,
+            children: contenido,
+          ),
         ),
       ));
     } else {
@@ -37909,7 +38082,11 @@ class _DetalleListaPrecioState extends State<DetalleListaPrecio> {
 
       Uint8List? png;
       await for (final pagina in Printing.raster(pdfBytes, pages: [0], dpi: dpi)) {
-        png = await pagina.toPng();
+        // El rasterizador parte de un lienzo transparente: se aplana
+        // sobre blanco para que ningún visor muestre franjas negras.
+        final pixeles = pagina.pixels;
+        aplanarSobreBlanco(pixeles);
+        png = await PdfRaster(pagina.width, pagina.height, pixeles).toPng();
         break;
       }
       if (png == null) throw Exception('No se pudo generar la imagen');
@@ -38081,9 +38258,7 @@ class _DetalleListaPrecioState extends State<DetalleListaPrecio> {
             IconButton(
               icon: const Icon(Icons.add_shopping_cart),
               tooltip: "Agregar productos manualmente",
-              onPressed: () => Navigator.push(context,
-                MaterialPageRoute(builder: (_) => SelectorProductosLista(lista: widget.lista)))
-                .then((_) => setState(() {}))),
+              onPressed: _abrirSelectorProductos),
             IconButton(
               icon: const Icon(Icons.sync),
               tooltip: "Re-poblar automáticamente",
@@ -38501,8 +38676,9 @@ class _DetalleListaPrecioState extends State<DetalleListaPrecio> {
           Expanded(flex: 2, child: _CeldaConEtiqueta(
             etiqueta: inicialEsManual
                 ? '✎ Inicial'
-                : 'Inicial '
-                  '${widget.lista.pctInicialDe(item).toStringAsFixed(0)}%'
+                // Sin el %: Krece tiene 4 niveles y el % fijo
+                // confundía (la lista se arma para el nivel 1).
+                : 'Inicial'
                   '${item.pctInicialOverride != null ? " ●" : ""}',
             colorEtiqueta: inicialEsManual
                 ? AppColors.statusOrange
@@ -38577,6 +38753,22 @@ class _DetalleListaPrecioState extends State<DetalleListaPrecio> {
                         _persistirLista(); // sincronizar con backend
                       },
                     )),
+                    // N° de cuotas propio de ESTE modelo (ej. algunos
+                    // Samsung van a 8 cuotas en el nivel 1 y otros no).
+                    InkWell(
+                      onTap: () => _editarCuotasProducto(item),
+                      child: Tooltip(
+                        message: 'N° de cuotas de este modelo',
+                        child: Padding(
+                          padding: const EdgeInsets.symmetric(horizontal: 2),
+                          child: Icon(Icons.format_list_numbered,
+                              size: 14,
+                              color: item.cuotasOverride != null
+                                  ? AppColors.royalBlue
+                                  : Colors.grey),
+                        ),
+                      ),
+                    ),
                     if (cuotaEsManual)
                       InkWell(
                         onTap: () {
@@ -38757,7 +38949,12 @@ class _CeldaConEtiqueta extends StatelessWidget {
 // ============================================================
 class SelectorProductosLista extends StatefulWidget {
   final ListaPrecio lista;
-  const SelectorProductosLista({super.key, required this.lista});
+  /// Se llama cada vez que se agrega un producto, para que la pantalla
+  /// de la lista lo GUARDE en el servidor. Antes el producto sólo
+  /// quedaba en memoria y la sincronización periódica (cada 15 s) traía
+  /// la versión del servidor sin él: "se agregaba y se quitaba solo".
+  final VoidCallback? onCambio;
+  const SelectorProductosLista({super.key, required this.lista, this.onCambio});
   @override State<SelectorProductosLista> createState() => _SelectorProductosListaState();
 }
 
@@ -38771,7 +38968,11 @@ class _SelectorProductosListaState extends State<SelectorProductosLista> {
 
   @override
   Widget build(BuildContext context) {
+    // El catálogo trae una fila por tienda del mismo código: cada
+    // producto se ofrece una sola vez (antes salía repetido).
+    final vistos = <String>{};
     final filtrados = catalogoGlobal.where((p) {
+      if (!vistos.add(p.codigo)) return false;
       final catOk = _categoriaFiltro == "Todos" || p.categoria == _categoriaFiltro;
       final busqOk = _busqueda.isEmpty ||
           p.nombre.toLowerCase().contains(_busqueda.toLowerCase()) ||
@@ -38796,7 +38997,9 @@ class _SelectorProductosListaState extends State<SelectorProductosLista> {
               onChanged: (v) => setState(() => _busqueda = v)),
             const SizedBox(height: 8),
             SingleChildScrollView(scrollDirection: Axis.horizontal,
-              child: Row(children: ["Todos","Telefono","Accesorio","Televisor","Linea Blanca","Linea"].map((cat) =>
+              // Categorías configuradas en el sistema (antes era una
+              // lista fija y las categorías nuevas no aparecían).
+              child: Row(children: ["Todos", ...CategoriasProductos.lista].map((cat) =>
                 Padding(padding: const EdgeInsets.only(right: 6),
                   child: ChoiceChip(
                     label: Text(cat),
@@ -38811,9 +39014,9 @@ class _SelectorProductosListaState extends State<SelectorProductosLista> {
           itemBuilder: (ctx, i) {
             final p = filtrados[i];
             final yaEsta = widget.lista.items.any((it) => it.producto.codigo == p.codigo);
-            final stock = CategoriasProductos.usaIMEI(p.categoria)
-                ? stockImeiGlobal.where((im) => im.producto.codigo == p.codigo && !im.vendido).length
-                : p.stockManual;
+            // Stock global (todas las tiendas + variantes): el mismo
+            // que decide si el producto sale en la lista.
+            final stock = stockGlobalDeProducto(p);
             return ListTile(
               leading: CircleAvatar(
                 backgroundColor: yaEsta ? Colors.green.withValues(alpha: 0.15) : Colors.grey[100],
@@ -38826,9 +39029,11 @@ class _SelectorProductosListaState extends State<SelectorProductosLista> {
                 "${formatCurrency(p.precioVenta)}",
                 style: const TextStyle(fontWeight: FontWeight.bold, color: AppColors.primaryBlue)),
               onTap: yaEsta ? null : () {
-                final precioBase = widget.lista.esEnBolivares
-                    ? (p.precioVenta * widget.lista.tasaDelDia)
-                    : p.precioVenta;
+                // Mismo precio por defecto que al poblar la lista
+                // (venta + % adicional, × tasa en Bs). Antes ignoraba
+                // el % adicional.
+                final precioBase =
+                    precioPorDefectoEnLista(widget.lista, p.precioVenta);
                 setState(() {
                   widget.lista.items.add(ItemListaPrecio(
                     producto: p,
@@ -38836,10 +39041,20 @@ class _SelectorProductosListaState extends State<SelectorProductosLista> {
                     preciosPorColumna: { for (var col in widget.lista.columnas) col.nombre: precioBase }));
                   widget.lista.aplicarFormulas();
                 });
+                widget.onCambio?.call();
+                // Un producto agotado queda en la lista pero no sale en
+                // el PDF, la imagen ni la consulta rápida: se avisa para
+                // que no parezca que "desapareció".
                 ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-                  content: Text("✅ ${p.nombre} agregado"),
-                  backgroundColor: AppColors.statusGreen,
-                  duration: const Duration(seconds: 1)));
+                  content: Text(stock > 0
+                      ? "✅ ${p.nombre} agregado"
+                      : "✅ ${p.nombre} agregado, pero está AGOTADO: queda "
+                        "guardado en la lista y no sale en PDF, imagen ni "
+                        "consulta rápida hasta que tenga stock"),
+                  backgroundColor: stock > 0
+                      ? AppColors.statusGreen
+                      : AppColors.statusOrange,
+                  duration: Duration(seconds: stock > 0 ? 1 : 4)));
               },
             );
           },
