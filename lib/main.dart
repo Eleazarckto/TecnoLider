@@ -38538,13 +38538,16 @@ class _DetalleListaPrecioState extends State<DetalleListaPrecio> {
                   padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
                   child: Row(children: [
                     const Expanded(flex: 3, child: Text("PRODUCTO", style: TextStyle(fontSize: 10, fontWeight: FontWeight.bold, color: Colors.grey))),
-                    const SizedBox(width: 4),
-                    const Text("STOCK", style: TextStyle(fontSize: 10, fontWeight: FontWeight.bold, color: Colors.grey)),
+                    // Mismos anchos y separaciones que _buildItemRow, para
+                    // que cada título caiga encima de su celda.
+                    const SizedBox(width: 8),
                     if (widget.lista.esFinanciamiento) ...[
                       const Expanded(flex: 2, child: Text("BASE", textAlign: TextAlign.right,
                         style: TextStyle(fontSize: 10, fontWeight: FontWeight.bold, color: AppColors.primaryBlue))),
+                      const SizedBox(width: 4),
                       const Expanded(flex: 2, child: Text("INICIAL", textAlign: TextAlign.right,
                         style: TextStyle(fontSize: 10, fontWeight: FontWeight.bold, color: Colors.orange))),
+                      const SizedBox(width: 4),
                       const Expanded(flex: 2, child: Text("CUOTA", textAlign: TextAlign.right,
                         style: TextStyle(fontSize: 10, fontWeight: FontWeight.bold, color: AppColors.royalBlue))),
                       // Columnas EXTRA de una lista de financiamiento.
@@ -38557,6 +38560,11 @@ class _DetalleListaPrecioState extends State<DetalleListaPrecio> {
                           widget.lista.columnas.skip(1), esAdmin),
                     ] else
                       ..._encabezadosColumnas(widget.lista.columnas, esAdmin),
+                    // El stock va DESPUÉS de los precios, como en cada fila.
+                    const SizedBox(width: 8),
+                    const SizedBox(width: 56, child: Text("STOCK", textAlign: TextAlign.center,
+                        style: TextStyle(fontSize: 10, fontWeight: FontWeight.bold, color: Colors.grey))),
+                    const SizedBox(width: 4),
                     if (esAdmin) const SizedBox(width: 32),
                   ]),
                 ),
@@ -38602,8 +38610,11 @@ class _DetalleListaPrecioState extends State<DetalleListaPrecio> {
   List<Widget> _encabezadosColumnas(
       Iterable<ColumnaPrecio> columnas, bool esAdmin) {
     return columnas
-        .map((col) => Expanded(
-              flex: 2,
+        // Ancho fijo de 90 + 3 a cada lado, igual que _celdasColumnas.
+        .map((col) => Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 3),
+              child: SizedBox(
+              width: 90,
               child: GestureDetector(
                 onTap: esAdmin ? () => _menuColumna(col) : null,
                 child: Column(
@@ -38635,7 +38646,7 @@ class _DetalleListaPrecioState extends State<DetalleListaPrecio> {
                   ],
                 ),
               ),
-            ))
+            )))
         .toList();
   }
 
