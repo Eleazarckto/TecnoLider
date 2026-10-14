@@ -44,6 +44,7 @@ import 'package:mailer/smtp_server.dart' as smtp;
 // en pubspec.yaml y configurar el canal en AndroidManifest (permiso
 // POST_NOTIFICATIONS en Android 13+ ya se solicita en PermisosApp).
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
+part 'inventario_tiendas.dart';
 
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -9153,6 +9154,9 @@ class _LoginPageState extends State<LoginPage> with SingleTickerProviderStateMix
       } else {
         usuarioSesion = Usuario.fromMap(raw);
       }
+      // Tienda de la ficha del usuario, ANTES de que se pise con la que
+      // se elige abajo: es la única en la que un vendedor puede facturar.
+      tiendaAsignadaSesion = usuarioSesion?.tienda.trim() ?? '';
 
       // ── Guardar sesión persistente ──
       // Próxima vez que se abra la app, hará auto-login con estas
@@ -9189,7 +9193,24 @@ class _LoginPageState extends State<LoginPage> with SingleTickerProviderStateMix
       // directo a Ventas. Si no, se muestra como antes para no romper
       // el flujo en sesiones donde la preferencia no se cargó.
       String? tiendaSeleccionada = _tiendaSeleccionada;
-      if (tiendaSeleccionada != null &&
+      // Vendedor (y demás roles de tienda) con tienda asignada: entra
+      // siempre a la suya, elija lo que elija en el login. Puede
+      // consultar el inventario de las otras, pero no facturar ahí.
+      final tiendaForzada = tiendaForzadaParaLogin(
+        rol: usuarioSesion?.rol ?? '',
+        tiendaAsignada: tiendaAsignadaSesion,
+        tiendas: ConfigSistema.tiendas,
+      );
+      if (tiendaForzada != null) {
+        if (tiendaSeleccionada != null && tiendaSeleccionada != tiendaForzada) {
+          ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+            content: Text('Tu usuario está asignado a "$tiendaForzada". '
+                'Se abrió esa tienda.'),
+            backgroundColor: AppColors.statusOrange,
+            duration: const Duration(seconds: 5)));
+        }
+        tiendaSeleccionada = tiendaForzada;
+      } else if (tiendaSeleccionada != null &&
           ConfigSistema.tiendas.contains(tiendaSeleccionada)) {
         // Validamos que la tienda elegida exista en la lista actual
         // (la lista se actualiza en `cargarTodosLosDatos`).
@@ -24708,6 +24729,14 @@ class _VentanaInventarioState extends State<VentanaInventario> {
     return r == 'Dueño';
   }
 
+  /// Tienda de la sesión (la elegida/forzada en el login).
+  String get _miTienda => (usuarioSesion?.tienda ?? '').trim();
+
+  /// true si el usuario está CONSULTANDO otra tienda: ve su inventario
+  /// (útil cuando aquí no hay stock) pero no puede tocar nada de ella.
+  bool get _soloConsulta =>
+      !_puedeVerTodas && _tiendaFiltro.trim() != _miTienda;
+
   @override
   void initState() {
     super.initState();
@@ -24951,6 +24980,7 @@ class _VentanaInventarioState extends State<VentanaInventario> {
   /// es de otra tienda, ni en "Todas" cuando el código tiene varias
   /// filas (no se sabría cuál tocar: se hace desde el desglose).
   bool _stockEditableEnLista(Producto p) {
+    if (_soloConsulta) return false;
     if (CategoriasProductos.usaIMEI(p.categoria) || p.esSubproducto) {
       return false;
     }
@@ -25191,32 +25221,66 @@ class _VentanaInventarioState extends State<VentanaInventario> {
           res.ok ? AppColors.statusGreen : AppColors.statusRed));
   }
 
-  /// Exporta el inventario a Excel.
+  /// Exporta el inventario a Excel o PDF.
   ///
   /// Antes bajaba TODO el inventario de una tienda y había que
-  /// filtrar el Excel a mano. Ahora el diálogo pide las dos cosas que
-  /// hacían falta: de qué tienda y de qué categoría. La tienda sólo
-  /// se puede elegir si el usuario ve más de una; el resto exporta la
-  /// suya, pero igual puede elegir categoría.
+  /// filtrar el Excel a mano. El diálogo pide de qué tienda y, además
+  /// de la categoría, la marca, el modelo y un texto libre (p.ej.
+  /// "forro" dentro de Accesorios), para que el dueño vea rápido si
+  /// tiene que pedir más de algo. La tienda sólo se puede elegir si el
+  /// usuario ve más de una; el resto exporta la suya.
   Future<void> _exportarInventario() async {
+    // Sólo productos principales (las variantes se suman al padre).
+    final base = _productos.where((p) => p.productoPadreCodigo.isEmpty).toList();
     // Categorías presentes en el inventario cargado, más las
     // configuradas en el sistema (por si alguna todavía no tiene
     // productos, para que el usuario no la busque sin encontrarla).
-    final categorias = <String>{
-      ..._productos
-          .where((p) => p.productoPadreCodigo.isEmpty)
-          .map((p) => p.categoria)
-          .where((c) => c.trim().isNotEmpty),
-      ...CategoriasProductos.lista,
-    }.toList()
-      ..sort();
+    final categorias = valoresDistintos(
+        [...base, ...CategoriasProductos.lista.map((c) => Producto(
+            codigo: '', nombre: '', categoria: c, marca: '', modelo: '',
+            tipo: '', precioCosto: 0, precioVenta: 0))],
+        (p) => p.categoria);
 
     String tiendaSel = _tiendaFiltro;   // '' = todas
     String categoriaSel = '';           // '' = todas
+    String marcaSel = '';
+    String modeloSel = '';
+    String formato = 'excel';
+    final textoCtrl = TextEditingController();
 
     final confirmado = await showDialog<bool>(
       context: context,
-      builder: (ctx) => StatefulBuilder(builder: (ctx, setS) => AlertDialog(
+      builder: (ctx) => StatefulBuilder(builder: (ctx, setS) {
+        // Desplegables en cascada: las marcas son las de la categoría
+        // elegida y los modelos los de esa marca.
+        final enCategoria = base.where((p) => coincideFiltroExport(
+            p, FiltroExportInventario(categoria: categoriaSel)));
+        final marcas = valoresDistintos(enCategoria, (p) => p.marca);
+        final enMarca = enCategoria.where((p) => coincideFiltroExport(
+            p, FiltroExportInventario(marca: marcaSel)));
+        final modelos = valoresDistintos(
+            enMarca.where((p) => !esModeloVacio(p.modelo)), (p) => p.modelo);
+        if (!marcas.contains(marcaSel)) marcaSel = '';
+        if (!modelos.contains(modeloSel)) modeloSel = '';
+        DropdownButtonFormField<String> desplegable(String label, IconData icono,
+            String valor, List<String> opciones, String todos,
+            void Function(String) alCambiar) =>
+          DropdownButtonFormField<String>(
+            value: opciones.contains(valor) ? valor : '',
+            isExpanded: true,
+            decoration: InputDecoration(
+              labelText: label,
+              prefixIcon: Icon(icono),
+              border: const OutlineInputBorder(),
+              isDense: true,
+            ),
+            items: [
+              DropdownMenuItem(value: '', child: Text(todos)),
+              ...opciones.map((c) => DropdownMenuItem(value: c, child: Text(c))),
+            ],
+            onChanged: (v) => setS(() => alCambiar(v ?? '')),
+          );
+        return AlertDialog(
         title: const Row(children: [
           Icon(Icons.download_outlined, color: AppColors.brandBlue),
           SizedBox(width: 8),
@@ -25228,22 +25292,8 @@ class _VentanaInventarioState extends State<VentanaInventario> {
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 if (_puedeVerTodas) ...[
-                  DropdownButtonFormField<String>(
-                    value: _todasTiendas.contains(tiendaSel) ? tiendaSel : '',
-                    isExpanded: true,
-                    decoration: const InputDecoration(
-                      labelText: "Tienda",
-                      prefixIcon: Icon(Icons.store_outlined),
-                      border: OutlineInputBorder(),
-                    ),
-                    items: [
-                      const DropdownMenuItem(
-                          value: '', child: Text("Todas las tiendas")),
-                      ..._todasTiendas.map((t) =>
-                          DropdownMenuItem(value: t, child: Text(t))),
-                    ],
-                    onChanged: (v) => setS(() => tiendaSel = v ?? ''),
-                  ),
+                  desplegable("Tienda", Icons.store_outlined, tiendaSel,
+                      _todasTiendas, "Todas las tiendas", (v) => tiendaSel = v),
                   const SizedBox(height: 12),
                 ] else
                   Padding(
@@ -25255,23 +25305,37 @@ class _VentanaInventarioState extends State<VentanaInventario> {
                         style: const TextStyle(
                             fontSize: 12, color: AppColors.textSecondary)),
                   ),
-                DropdownButtonFormField<String>(
-                  value: categorias.contains(categoriaSel)
-                      ? categoriaSel
-                      : '',
-                  isExpanded: true,
+                desplegable("Categoría", Icons.category_outlined, categoriaSel,
+                    categorias, "Todas las categorías", (v) => categoriaSel = v),
+                const SizedBox(height: 12),
+                desplegable("Marca", Icons.business, marcaSel, marcas,
+                    "Todas las marcas", (v) => marcaSel = v),
+                if (modelos.isNotEmpty) ...[
+                  const SizedBox(height: 12),
+                  desplegable("Modelo", Icons.phone_android, modeloSel, modelos,
+                      "Todos los modelos", (v) => modeloSel = v),
+                ],
+                const SizedBox(height: 12),
+                TextField(
+                  controller: textoCtrl,
                   decoration: const InputDecoration(
-                    labelText: "Categoría",
-                    prefixIcon: Icon(Icons.category_outlined),
+                    labelText: "Nombre contiene (opcional)",
+                    hintText: "Ej: forro, cargador, iPhone 13",
+                    prefixIcon: Icon(Icons.search),
                     border: OutlineInputBorder(),
+                    isDense: true,
                   ),
-                  items: [
-                    const DropdownMenuItem(
-                        value: '', child: Text("Todas las categorías")),
-                    ...categorias.map((c) =>
-                        DropdownMenuItem(value: c, child: Text(c))),
+                ),
+                const SizedBox(height: 14),
+                SegmentedButton<String>(
+                  segments: const [
+                    ButtonSegment(value: 'excel', label: Text('Excel'),
+                        icon: Icon(Icons.table_chart_outlined)),
+                    ButtonSegment(value: 'pdf', label: Text('PDF'),
+                        icon: Icon(Icons.picture_as_pdf_outlined)),
                   ],
-                  onChanged: (v) => setS(() => categoriaSel = v ?? ''),
+                  selected: {formato},
+                  onSelectionChanged: (s) => setS(() => formato = s.first),
                 ),
               ]),
         ),
@@ -25285,54 +25349,27 @@ class _VentanaInventarioState extends State<VentanaInventario> {
             onPressed: () => Navigator.pop(ctx, true),
           ),
         ],
-      )),
+      );
+      }),
     );
+    final texto = textoCtrl.text;
+    textoCtrl.dispose();
     if (confirmado != true) return; // canceló
 
     final String tiendaExport = tiendaSel;
-    final String categoriaExport = categoriaSel;
+    final filtro = FiltroExportInventario(
+        categoria: categoriaSel, marca: marcaSel, modelo: modeloSel,
+        texto: texto);
 
     try {
-      // Calcular productos a exportar según la tienda elegida.
-      // Con IMEI: IMEIs ubicados en esa tienda. Sin IMEI: la fila de
-      // `productos` de esa tienda (ver más abajo).
-      final excel = Excel.createExcel();
-      excel.delete('Sheet1');
-      // Excel no acepta nombres de hoja de más de 31 caracteres ni
-      // con los signos : \\ / ? * [ ], así que se limpian.
-      final nombreHoja = _nombreHojaExcel(
-          tiendaExport.isEmpty ? 'Inventario' : tiendaExport,
-          categoriaExport);
-      final hoja = excel[nombreHoja];
-      hoja.appendRow([
-        TextCellValue('Código'),
-        TextCellValue('Producto'),
-        TextCellValue('Categoría'),
-        TextCellValue('Marca'),
-        TextCellValue('Modelo'),
-        TextCellValue('Stock'),
-        TextCellValue('Costo unit. USD'),
-        TextCellValue('Venta unit. USD'),
-        TextCellValue('Valor stock USD'),
-      ]);
-
-      double totalValor = 0;
-      // Recalcular stock por la tienda elegida (no por la del filtro)
-      // y dejar sólo la categoría pedida.
-      //
-      // ANTES: para los productos SIN IMEI (accesorios) se recorrían
-      // TODAS las filas de `productos` y se tomaba su `stock_manual`
-      // sin mirar `productos.tienda`. Como hay una fila por tienda, el
-      // Excel de "Sucursal X · Accesorios" traía el inventario de todas
-      // las tiendas (y el mismo código repetido una vez por tienda).
-      // AHORA: una línea por código, con el stock de ESA tienda
-      // exacta (IMEIs por ubicación, accesorios por `productos.tienda`,
-      // variantes sumadas). "Todas" = total global.
+      // Una línea por código, con el stock de ESA tienda exacta (IMEIs
+      // por ubicación, accesorios por `productos.tienda`, variantes
+      // sumadas). "Todas" = total global. Antes los accesorios salían
+      // repetidos una vez por tienda y con el stock de todas.
       final indice = IndiceStockTiendas.desde(_productos, _imeis);
       final yaExportados = <String>{};
-      for (final fila in _productos.where((p) =>
-          p.productoPadreCodigo.isEmpty &&
-          (categoriaExport.isEmpty || p.categoria == categoriaExport))) {
+      final filas = <FilaExportInventario>[];
+      for (final fila in base.where((p) => coincideFiltroExport(p, filtro))) {
         if (!yaExportados.add(fila.codigo)) continue; // una línea por código
         // Datos (nombre, precios) de la fila de esa tienda si existe.
         final p = (tiendaExport.isEmpty
@@ -25342,52 +25379,86 @@ class _VentanaInventarioState extends State<VentanaInventario> {
             fila;
         final int stock = indice.enTienda(p.codigo, tiendaExport);
         if (stock == 0) continue;
-        final valor = stock * p.precioCosto;
-        totalValor += valor;
-        hoja.appendRow([
-          TextCellValue(p.codigo),
-          TextCellValue(p.nombre),
-          TextCellValue(p.categoria),
-          TextCellValue(p.marca),
-          TextCellValue(p.modelo),
-          IntCellValue(stock),
-          DoubleCellValue(p.precioCosto),
-          DoubleCellValue(p.precioVenta),
-          DoubleCellValue(valor),
-        ]);
+        filas.add(FilaExportInventario(p, stock));
       }
-      hoja.appendRow([]);
-      hoja.appendRow([
-        TextCellValue(''),
-        TextCellValue('TOTAL'),
-        TextCellValue(''),
-        TextCellValue(''),
-        TextCellValue(''),
-        TextCellValue(''),
-        TextCellValue(''),
-        TextCellValue(''),
-        DoubleCellValue(totalValor),
-      ]);
+      filas.sort((a, b) => a.producto.nombre.toLowerCase()
+          .compareTo(b.producto.nombre.toLowerCase()));
 
-      final bytes = excel.encode();
-      if (bytes == null) throw 'No se pudo generar Excel';
       final etiqueta = tiendaExport.isEmpty ? 'todas'
           : tiendaExport.replaceAll(' ', '_');
-      final etiquetaCat = categoriaExport.isEmpty
+      final etiquetaFiltro = filtro.vacio
           ? ''
-          : '${categoriaExport.replaceAll(' ', '_')}_';
-      final nombre = 'Inventario_${etiqueta}_$etiquetaCat'
-          '${DateTime.now().millisecondsSinceEpoch}.xlsx';
-      await descargarArchivo(
-        Uint8List.fromList(bytes),
-        nombre,
-        'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-      );
+          : '${filtro.descripcion.replaceAll(RegExp(r'[^A-Za-z0-9áéíóúñÁÉÍÓÚÑ]+'), '_')}_';
+      final marcaTiempo = DateTime.now().millisecondsSinceEpoch;
+      String nombre;
+      if (formato == 'pdf') {
+        final bytes = await generarPdfInventario(
+            filas: filas, tienda: tiendaExport, filtro: filtro);
+        nombre = 'Inventario_${etiqueta}_$etiquetaFiltro$marcaTiempo.pdf';
+        await descargarArchivo(bytes, nombre, 'application/pdf');
+      } else {
+        final excel = Excel.createExcel();
+        excel.delete('Sheet1');
+        // Excel no acepta nombres de hoja de más de 31 caracteres ni
+        // con los signos : \\ / ? * [ ], así que se limpian.
+        final hoja = excel[_nombreHojaExcel(
+            tiendaExport.isEmpty ? 'Inventario' : tiendaExport,
+            filtro.descripcion.replaceAll('"', ''))];
+        hoja.appendRow([
+          TextCellValue('Código'),
+          TextCellValue('Producto'),
+          TextCellValue('Categoría'),
+          TextCellValue('Marca'),
+          TextCellValue('Modelo'),
+          TextCellValue('Stock'),
+          TextCellValue('Costo unit. USD'),
+          TextCellValue('Venta unit. USD'),
+          TextCellValue('Valor stock USD'),
+        ]);
+        double totalValor = 0;
+        int totalUnidades = 0;
+        for (final f in filas) {
+          final p = f.producto;
+          totalValor += f.valor;
+          totalUnidades += f.stock;
+          hoja.appendRow([
+            TextCellValue(p.codigo),
+            TextCellValue(p.nombre),
+            TextCellValue(p.categoria),
+            TextCellValue(p.marca),
+            TextCellValue(esModeloVacio(p.modelo) ? '' : p.modelo),
+            IntCellValue(f.stock),
+            DoubleCellValue(p.precioCosto),
+            DoubleCellValue(p.precioVenta),
+            DoubleCellValue(f.valor),
+          ]);
+        }
+        hoja.appendRow([]);
+        hoja.appendRow([
+          TextCellValue(''),
+          TextCellValue('TOTAL'),
+          TextCellValue(''),
+          TextCellValue(''),
+          TextCellValue(''),
+          IntCellValue(totalUnidades),
+          TextCellValue(''),
+          TextCellValue(''),
+          DoubleCellValue(totalValor),
+        ]);
+        final bytes = excel.encode();
+        if (bytes == null) throw 'No se pudo generar Excel';
+        nombre = 'Inventario_${etiqueta}_$etiquetaFiltro$marcaTiempo.xlsx';
+        await descargarArchivo(
+          Uint8List.fromList(bytes),
+          nombre,
+          'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        );
+      }
       if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(
           content: Text('✅ Inventario exportado '
               '(${tiendaExport.isEmpty ? "todas las tiendas" : tiendaExport}'
-              '${categoriaExport.isEmpty ? "" : " · $categoriaExport"}): '
-              '$nombre'),
+              '${filtro.vacio ? "" : " · ${filtro.descripcion}"}, '
+              '${filas.length} productos): $nombre'),
           backgroundColor: AppColors.statusGreen,
           duration: const Duration(seconds: 5)));
     } catch (e) {
@@ -25470,7 +25541,8 @@ class _VentanaInventarioState extends State<VentanaInventario> {
       appBar: AppBar(
         title: Text(_puedeVerTodas && _tiendaFiltro.isEmpty
             ? "Inventario General (Todas)"
-            : "Inventario · ${_tiendaFiltro.isEmpty ? '?' : _tiendaFiltro}"),
+            : "Inventario · ${_tiendaFiltro.isEmpty ? '?' : _tiendaFiltro}"
+              "${_soloConsulta ? ' (consulta)' : ''}"),
         actions: [
           // Selector de tienda — solo para roles que pueden ver todas
           if (_puedeVerTodas)
@@ -25489,8 +25561,30 @@ class _VentanaInventarioState extends State<VentanaInventario> {
                 ..._todasTiendas.map((t) => PopupMenuItem(
                     value: t, child: Text(t))),
               ],
+            )
+          else if (_todasTiendas.length > 1)
+            // Los demás roles pueden CONSULTAR otra tienda (p.ej. cuando
+            // aquí no hay stock), en modo sólo lectura.
+            PopupMenuButton<String>(
+              icon: const Icon(Icons.travel_explore),
+              tooltip: "Consultar inventario de otra tienda...",
+              onSelected: (v) {
+                setState(() {
+                  _tiendaFiltro = v;
+                  _recalcularStock();
+                });
+              },
+              itemBuilder: (_) => [
+                if (_miTienda.isNotEmpty)
+                  PopupMenuItem(
+                      value: _miTienda, child: Text("📍 $_miTienda (mi tienda)")),
+                const PopupMenuDivider(),
+                ..._todasTiendas.where((t) => t != _miTienda).map((t) =>
+                    PopupMenuItem(value: t, child: Text("$t (consulta)"))),
+              ],
             ),
           // Carga de mercancía en volumen (productos sin IMEI).
+          if (!_soloConsulta)
           IconButton(
             icon: const Icon(Icons.playlist_add),
             tooltip: "Ingreso rápido de stock",
@@ -25515,6 +25609,7 @@ class _VentanaInventarioState extends State<VentanaInventario> {
           // Abre una pantalla donde el usuario escanea o escribe los
           // IMEIs/códigos de los productos físicos en la tienda y el
           // sistema cuenta cuántos faltan vs el inventario teórico.
+          if (!_soloConsulta)
           IconButton(
               icon: const Icon(Icons.fact_check_outlined),
               tooltip: "Realizar inventario físico",
@@ -25873,7 +25968,7 @@ class _VentanaInventarioState extends State<VentanaInventario> {
                       // Si el producto sólo existe en OTRA tienda (se
                       // ve por la búsqueda, es informativo) no se edita
                       // desde aquí: la fila es de esa otra tienda.
-                      if (!esAjeno || _puedeVerTodas)
+                      if ((!esAjeno || _puedeVerTodas) && !_soloConsulta)
                       IconButton(
                         icon: const Icon(Icons.edit_outlined,
                           color: AppColors.primaryBlue, size: 20),
@@ -25887,7 +25982,7 @@ class _VentanaInventarioState extends State<VentanaInventario> {
 
                       // ── PUNTO 1: Botón eliminar producto ──────
                       // Solo roles con permiso (Maestro/Administrador/Dueño).
-                      if ((!esAjeno || _puedeVerTodas) &&
+                      if ((!esAjeno || _puedeVerTodas) && !_soloConsulta &&
                           (usuarioSesion?.rol == "Maestro" ||
                           usuarioSesion?.rol == "Administrador" ||
                           usuarioSesion?.rol == "Dueño")) ...[
@@ -25906,7 +26001,7 @@ class _VentanaInventarioState extends State<VentanaInventario> {
             ),
           )),
       ]),
-      floatingActionButton: FloatingActionButton.extended(
+      floatingActionButton: _soloConsulta ? null : FloatingActionButton.extended(
         onPressed: () async {
           // La tienda que el usuario está viendo se lleva al
           // formulario ya seleccionada: si el dueño está mirando
@@ -25946,7 +26041,17 @@ class _VentanaInventarioState extends State<VentanaInventario> {
 class _LineaIngresoStock {
   final Producto producto;
   int cantidad;
-  _LineaIngresoStock(this.producto, this.cantidad);
+  /// Tienda a la que entra ESTA línea. Cada línea guarda la suya, así
+  /// en una misma carga se pueden meter 10 en la principal y 10 en la
+  /// sucursal sin que todo termine en una sola.
+  final String tienda;
+  /// Stock que ya tiene el producto en esa tienda (0 si no tiene fila).
+  final int stockActual;
+  /// true si el producto todavía no existe en esa tienda: al guardar se
+  /// crea su fila con los mismos datos.
+  final bool nuevoEnTienda;
+  _LineaIngresoStock(this.producto, this.cantidad,
+      {this.tienda = '', this.stockActual = 0, this.nuevoEnTienda = false});
 }
 
 class VentanaIngresoStock extends StatefulWidget {
@@ -25975,8 +26080,14 @@ class _VentanaIngresoStockState extends State<VentanaIngresoStock> {
     return rol == 'Maestro' || rol == 'Dueño' || rol == 'Administrador';
   }
 
-  /// Catálogo de productos sin IMEI disponibles para cargar.
+  /// Catálogo de productos sin IMEI disponibles para cargar: UNA fila
+  /// por código (la de la tienda activa si existe). Ya no se excluyen
+  /// los productos de otras tiendas: se pueden cargar en ésta y se crea
+  /// su fila.
   List<Producto> _catalogo = [];
+  /// Todas las filas vivas (una por código y tienda), para decidir en
+  /// qué fila cae cada línea al guardar.
+  List<Producto> _todas = [];
   /// Líneas cargadas en esta sesión, la más reciente primero.
   final List<_LineaIngresoStock> _lineas = [];
   bool _cargando = true;
@@ -25988,6 +26099,12 @@ class _VentanaIngresoStockState extends State<VentanaIngresoStock> {
   void initState() {
     super.initState();
     _tienda = widget.tienda.trim();
+    // Desde "Todas las tiendas" no hay tienda: antes la carga caía en
+    // la primera fila del código (casi siempre la principal). Ahora se
+    // arranca en la tienda de la sesión y se ve arriba a cuál entra.
+    if (_tienda.isEmpty && ConfigSistema.tiendas.isNotEmpty) {
+      _tienda = (usuarioSesion?.tienda ?? '').trim();
+    }
     _cargarCatalogo();
   }
 
@@ -26006,16 +26123,11 @@ class _VentanaIngresoStockState extends State<VentanaIngresoStock> {
       final raw = await _Api.get('productos');
       final todos =
           ((raw as List?) ?? []).map((m) => Producto.fromMap(m)).toList();
-      final t = _tienda;
-      _catalogo = todos.where((p) {
-        // Sin IMEI: el stock es un contador y se puede ajustar acá.
-        if (CategoriasProductos.usaIMEI(p.categoria)) return false;
-        // Respetar la tienda: no se carga stock de otro local.
-        if (t.isNotEmpty && p.tienda.isNotEmpty && p.tienda != t) {
-          return false;
-        }
-        return true;
-      }).toList();
+      // Sin IMEI: el stock es un contador y se puede ajustar acá.
+      _todas = todos
+          .where((p) => !CategoriasProductos.usaIMEI(p.categoria))
+          .toList();
+      _recalcularCatalogo();
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(
@@ -26028,6 +26140,16 @@ class _VentanaIngresoStockState extends State<VentanaIngresoStock> {
         _focoCodigo.requestFocus();
       }
     }
+  }
+
+  /// Una fila por código, prefiriendo la de la tienda activa.
+  void _recalcularCatalogo() {
+    final porCodigo = <String, Producto>{};
+    for (final p in _todas) {
+      porCodigo.putIfAbsent(p.codigo,
+          () => filaProductoParaTienda(p.codigo, _tienda, productos: _todas) ?? p);
+    }
+    _catalogo = porCodigo.values.toList();
   }
 
   /// Busca por código exacto primero; si no hay, por coincidencia de
@@ -26065,12 +26187,20 @@ class _VentanaIngresoStockState extends State<VentanaIngresoStock> {
       // duplicar la fila — así escanear dos veces el mismo código
       // suma, que es lo que uno espera al descargar una caja.
       final existente = _lineas
-          .where((l) => l.producto.codigo == prod.codigo)
+          .where((l) => l.producto.codigo == prod.codigo && l.tienda == _tienda)
           .firstOrNull;
       if (existente != null) {
         existente.cantidad += cant;
       } else {
-        _lineas.insert(0, _LineaIngresoStock(prod, cant));
+        final filaAqui = _todas
+            .where((p) => p.codigo == prod.codigo && p.tienda.trim() == _tienda)
+            .firstOrNull;
+        final plan = planIngresoStock(
+            _todas.where((p) => p.codigo == prod.codigo).toList(), _tienda);
+        _lineas.insert(0, _LineaIngresoStock(prod, cant,
+            tienda: _tienda,
+            stockActual: filaAqui?.stockManual ?? 0,
+            nuevoEnTienda: plan.accion == AccionIngresoStock.crearFila));
       }
       _codigoCtrl.clear();
       _cantidadCtrl.text = '1';
@@ -26087,19 +26217,28 @@ class _VentanaIngresoStockState extends State<VentanaIngresoStock> {
     final navigator = Navigator.of(context);
     int ok = 0;
     final fallidos = <String>[];
+    final lineasFallidas = <_LineaIngresoStock>{};
     for (final linea in _lineas) {
-      // Si el producto todavía no tenía tienda (inventario general) y
-      // acá se está cargando en una tienda concreta, queda asignado a
-      // ella: es la única forma de que ese stock sea de ESE local y no
-      // aparezca como disponible en los otros.
-      if (_tienda.isNotEmpty && linea.producto.tienda.trim().isEmpty) {
-        linea.producto.tienda = _tienda;
-      }
-      final res = await ajustarStockManual(linea.producto, linea.cantidad);
+      // Cada línea entra en SU tienda: si el producto ya tiene fila ahí
+      // se suma; si sólo tiene la fila general vacía, se le asigna la
+      // tienda; y si no existe en esa tienda, se crea su fila con los
+      // mismos datos (ver `ingresarStockEnTienda`). Nunca se toca la
+      // fila de otra tienda: antes la mercancía de la sucursal caía en
+      // la principal y había que trasladarla a mano.
+      final res = await ingresarStockEnTienda(
+          linea.producto, linea.tienda, linea.cantidad, filas: _todas);
       if (res.ok) {
         ok++;
+        // Que la próxima línea del mismo código vea la fila nueva.
+        final nueva = catalogoGlobal.lastOrNull;
+        if (linea.nuevoEnTienda && nueva != null &&
+            nueva.codigo == linea.producto.codigo &&
+            nueva.tienda == linea.tienda && !_todas.contains(nueva)) {
+          _todas.add(nueva);
+        }
       } else {
-        fallidos.add('${linea.producto.nombre}: ${res.mensaje}');
+        lineasFallidas.add(linea);
+        fallidos.add(res.mensaje);
       }
     }
     if (!mounted) return;
@@ -26114,8 +26253,7 @@ class _VentanaIngresoStockState extends State<VentanaIngresoStock> {
     // Algo falló: dejamos la pantalla abierta con las líneas que no
     // se guardaron, para poder reintentar sin volver a escanear todo.
     setState(() {
-      _lineas.removeWhere((l) =>
-          !fallidos.any((f) => f.startsWith(l.producto.nombre)));
+      _lineas.removeWhere((l) => !lineasFallidas.contains(l));
     });
     messenger.showSnackBar(SnackBar(
       content: Text('$ok guardados, ${fallidos.length} con error. '
@@ -26145,15 +26283,13 @@ class _VentanaIngresoStockState extends State<VentanaIngresoStock> {
               tooltip: 'Cargar mercancía en otra tienda...',
               onSelected: (v) {
                 if (v == _tienda) return;
-                if (_lineas.isNotEmpty) {
-                  ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-                    content: Text('Guardá o quitá las líneas pendientes '
-                        'antes de cambiar de tienda'),
-                    backgroundColor: AppColors.statusOrange));
-                  return;
-                }
-                setState(() => _tienda = v);
-                _cargarCatalogo();
+                // Las líneas ya cargadas conservan su tienda: se puede
+                // repartir una misma caja entre varios locales.
+                setState(() {
+                  _tienda = v;
+                  _encontrado = null;
+                  _recalcularCatalogo();
+                });
               },
               itemBuilder: (_) => [
                 const PopupMenuItem(
@@ -26195,9 +26331,10 @@ class _VentanaIngresoStockState extends State<VentanaIngresoStock> {
                         const SizedBox(width: 6),
                         Expanded(
                           child: Text(
-                            'Esta mercancía entra en "$_tienda". Los '
-                            'productos que todavía no tengan tienda '
-                            'quedarán asignados a ella.',
+                            'Esta mercancía entra en "$_tienda". Si el '
+                            'producto todavía no existe en esta tienda se '
+                            'crea aquí con los mismos datos (no pasa por '
+                            'la principal).',
                             style: const TextStyle(
                                 fontSize: 11, color: AppColors.royalBlue),
                           ),
@@ -26324,8 +26461,10 @@ class _VentanaIngresoStockState extends State<VentanaIngresoStock> {
                                       fontSize: 14)),
                               subtitle: Text(
                                   '${l.producto.codigo} · '
-                                  'Stock actual ${l.producto.stockManual} '
-                                  '→ ${l.producto.stockManual + l.cantidad}',
+                                  '${nombreTiendaStock(l.tienda)}: '
+                                  '${l.stockActual} '
+                                  '→ ${(l.stockActual + l.cantidad).clamp(0, 999999)}'
+                                  '${l.nuevoEnTienda ? ' (nuevo en esta tienda)' : ''}',
                                   style: const TextStyle(fontSize: 11)),
                               trailing: IconButton(
                                 icon: const Icon(Icons.close,
@@ -27063,6 +27202,17 @@ class _FormularioProductoState extends State<FormularioProducto> {
   /// arreglo no se usa (las variantes se persisten directamente).
   final List<Producto> _variantesPendientes = [];
 
+  /// Al CREAR un producto sin IMEI, el dueño puede repartir la cantidad
+  /// inicial entre varias tiendas. Antes había un solo campo: si ponía
+  /// "10 en principal y 10 en sucursal" todo quedaba en una tienda y
+  /// había que hacer un traslado. Cada tienda con cantidad > 0 recibe
+  /// su propia fila (UNIQUE codigo+tienda) con los mismos datos.
+  bool _repartirEnTiendas = false;
+  final Map<String, TextEditingController> _cantPorTienda = {};
+
+  TextEditingController _ctrlCantTienda(String t) =>
+      _cantPorTienda.putIfAbsent(t, () => TextEditingController(text: '0'));
+
   // Marcas conocidas para el autocompletado
   static const _marcasSugeridas = [
     "Apple","Samsung","Xiaomi","Motorola","Huawei","OPPO","Vivo",
@@ -27105,6 +27255,9 @@ class _FormularioProductoState extends State<FormularioProducto> {
     _cod.dispose(); _nom.dispose(); _marca.dispose(); _modelo.dispose();
     _prov.dispose(); _pc.dispose(); _pv.dispose(); _cant.dispose();
     _imeiInput.dispose();
+    for (final c in _cantPorTienda.values) {
+      c.dispose();
+    }
     super.dispose();
   }
 
@@ -27572,6 +27725,30 @@ class _FormularioProductoState extends State<FormularioProducto> {
                 )).toList()),
             ],
           ] else ...[
+            if (!esEdicion && _puedeElegirCualquierTienda &&
+                ConfigSistema.tiendas.length > 1)
+              SwitchListTile(
+                contentPadding: EdgeInsets.zero,
+                value: _repartirEnTiendas,
+                onChanged: (v) => setState(() => _repartirEnTiendas = v),
+                title: const Text('Cargar cantidades en varias tiendas',
+                    style: TextStyle(fontSize: 14)),
+                subtitle: const Text(
+                    'Cada tienda recibe su stock directamente, sin traslados',
+                    style: TextStyle(fontSize: 11)),
+              ),
+            if (_repartirEnTiendas && !esEdicion)
+              ...ConfigSistema.tiendas.map((t) => Padding(
+                padding: const EdgeInsets.only(bottom: 8),
+                child: TextField(
+                  controller: _ctrlCantTienda(t),
+                  decoration: InputDecoration(
+                    labelText: 'Cantidad en $t',
+                    prefixIcon: const Icon(Icons.storefront_outlined),
+                    isDense: true),
+                  keyboardType: TextInputType.number),
+              ))
+            else
             TextField(
               controller: _cant,
               decoration: const InputDecoration(
@@ -28136,12 +28313,29 @@ class _FormularioProductoState extends State<FormularioProducto> {
         ? (_modelo.text.trim().isEmpty ? _nom.text.trim() : _modelo.text.trim())
         : "N/A";
 
+    // Reparto por tienda (sólo al crear, sin IMEI): la fila principal
+    // es la de la tienda elegida arriba; las demás tiendas con cantidad
+    // se crean después del POST principal.
+    final repartir = _repartirEnTiendas && !esEdicion && !esTelefono;
+    final cantidadesExtra = <String, int>{};
+    if (repartir) {
+      for (final t in ConfigSistema.tiendas) {
+        final n = int.tryParse(_ctrlCantTienda(t).text.trim()) ?? 0;
+        if (n > 0 && t != _tienda) cantidadesExtra[t] = n;
+      }
+    }
+    final stockPrincipal = repartir
+        ? (_tienda.isEmpty
+            ? 0
+            : int.tryParse(_ctrlCantTienda(_tienda).text.trim()) ?? 0)
+        : int.tryParse(_cant.text) ?? 0;
+
     final prod = Producto(
       codigo: _cod.text.trim(), nombre: _nom.text.trim(), tipo: _nom.text.trim(),
       categoria: _categoria, marca: marcaFinal, modelo: modeloFinal,
       precioCosto: double.tryParse(_pc.text) ?? 0,
       precioVenta: double.tryParse(_pv.text) ?? 0,
-      stockManual: int.tryParse(_cant.text) ?? 0,
+      stockManual: stockPrincipal,
       tienda: _tienda); // Asignación de tienda/ubicación
 
     try {
@@ -28149,10 +28343,22 @@ class _FormularioProductoState extends State<FormularioProducto> {
         // El backend usa `id` numérico como identificador, no el SKU
         // (campo `codigo`). Tenemos que resolver el id antes del PUT
         // — buscando la fila por su `codigo` en la lista de productos.
-        final raw = await _Api.get('productos');
-        final fila = (raw as List).cast<Map<String, dynamic>>().firstWhere(
-            (m) => m['codigo'] == widget.productoAEditar!.codigo,
-            orElse: () => <String, dynamic>{});
+        // Hay una fila por (codigo, tienda): se edita la fila EXACTA que
+        // se abrió (por id, o por código + tienda). Antes se tomaba la
+        // primera fila del código, que podía ser la de otra tienda, y se
+        // le pisaban el stock y la tienda con los de ésta.
+        final editado = widget.productoAEditar!;
+        Map<String, dynamic> fila = {};
+        if (editado.id != null) {
+          fila = {'id': editado.id};
+        } else {
+          final raw = await _Api.get('productos');
+          final filas = (raw as List).cast<Map<String, dynamic>>()
+              .where((m) => m['codigo'] == editado.codigo).toList();
+          fila = filas.where((m) =>
+                  (m['tienda'] ?? '').toString().trim() == editado.tienda.trim())
+              .firstOrNull ?? filas.firstOrNull ?? <String, dynamic>{};
+        }
         if (fila['id'] == null) {
           throw 'No se encontró el producto en la base de datos. '
                 'Refresca el inventario y vuelve a intentar.';
@@ -28182,6 +28388,21 @@ class _FormularioProductoState extends State<FormularioProducto> {
         }
       } else {
         await _Api.post('productos', prod.toMap());
+        // Las demás tiendas con cantidad: fila propia con los mismos
+        // datos (o revivida si existió y se borró).
+        final errores = <String>[];
+        for (final e in cantidadesExtra.entries) {
+          final (nueva, msg) =
+              await crearFilaProductoEnTienda(prod, e.key, e.value);
+          if (nueva == null) errores.add(msg);
+        }
+        if (errores.isNotEmpty && mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+            content: Text('Producto guardado, pero falló en '
+                '${errores.length} tienda(s): ${errores.first}'),
+            backgroundColor: AppColors.statusOrange,
+            duration: const Duration(seconds: 8)));
+        }
       }
 
       // ── Persistir variantes pendientes (solo en modo creación) ──
@@ -30771,6 +30992,15 @@ class _FormularioFacturaState extends State<FormularioFactura>
   }
 
   Future<void> _guardarFacturaInterno() async {
+    // Un vendedor sólo factura en su tienda asignada (el login ya lo
+    // fuerza; esto cubre cualquier otro camino a esta pantalla).
+    final motivoTienda = widget.facturaAEditar == null
+        ? motivoNoPuedeFacturarEnSesion(_tiendaVenta)
+        : null;
+    if (motivoTienda != null) {
+      _mostrarValidacion(motivoTienda);
+      return;
+    }
     // ── Validaciones completas antes de guardar ──────────────
     final clienteNombre = _cliente.text.trim();
     final clienteCedula = _cedula.text.trim();

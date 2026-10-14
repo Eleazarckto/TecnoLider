@@ -141,6 +141,9 @@ function get_endpoints(): array {
         'diagnostico_bd'            => 'diagnostico_bd.php',
         'stock_imei'                => 'stock_imei.php',
         'stock_disponible'          => 'stock_disponible.php',  // vista
+        // Ingreso de mercancía directo en una tienda: crea o revive la
+        // fila (codigo, tienda) en una transacción.
+        'stock_ingresar'            => 'stock_ingresar.php',
 
         // ── Clientes ─────────────────────────────────────────
         'clientes'                  => 'clientes.php',
