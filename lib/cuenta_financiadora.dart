@@ -245,3 +245,30 @@ List<PagoFinanciadora> aplicarPagosAEquipos(
   }
   return sinAplicar;
 }
+
+/// Reparte un pago de la financiadora entre VARIOS equipos (pago por
+/// lote). La financiadora paga el lote completo de una vez, así que en
+/// vez de registrar equipo por equipo se elige el grupo y el monto se
+/// distribuye en el orden recibido (los más viejos primero):
+///   · cada equipo recibe hasta su saldo pendiente;
+///   · si sobra dinero, el excedente va al último equipo (queda como
+///     sobrepago visible, igual que en [aplicarPagosAEquipos]);
+///   · si falta, los últimos quedan con abono parcial o en 0.
+/// Devuelve un monto por equipo (misma posición que [equipos]); la suma
+/// es exactamente [monto] redondeado a centavos.
+List<double> repartirPagoEntreEquipos(
+    List<EquipoFinanciado> equipos, double monto) {
+  final r = List<double>.filled(equipos.length, 0);
+  if (equipos.isEmpty) return r;
+  double resto = redondearCentavos(monto);
+  for (var i = 0; i < equipos.length && resto > 0.0001; i++) {
+    final saldo = equipos[i].saldo > 0 ? equipos[i].saldo : 0.0;
+    final aplicar = resto < saldo ? resto : saldo;
+    r[i] = redondearCentavos(aplicar);
+    resto = redondearCentavos(resto - aplicar);
+  }
+  if (resto > 0.0001) {
+    r[r.length - 1] = redondearCentavos(r.last + resto);
+  }
+  return r;
+}

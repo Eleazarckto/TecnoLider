@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/rendering.dart' show RenderRepaintBoundary;
-import 'package:flutter/services.dart' show Clipboard, ClipboardData;
+import 'package:flutter/services.dart' show Clipboard, ClipboardData, KeyDownEvent, KeyRepeatEvent, LogicalKeyboardKey;
 import 'dart:ui' show ImageByteFormat, PictureRecorder;
 import 'dart:io' show Platform, File, Directory, HttpClient, BytesBuilder, Process, IOSink, ProcessStartMode, exit;
 import 'dart:typed_data' show Uint8List;
@@ -53,6 +53,11 @@ part 'cxp_perfil_ui.dart';
 part 'auditoria_facturas.dart';
 
 part 'listas_precios_extra.dart';
+
+part 'billetera_semanal.dart';
+part 'calculadora_rapida.dart';
+part 'servicio_tecnico_cobros.dart';
+part 'pago_lote_financiadora.dart';
 
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -5086,6 +5091,15 @@ class ServicioTecnico {
   /// rayones, manchas o piezas faltantes al recibir el equipo.
   List<String> fotosRecepcion;
 
+  /// Tienda donde se recibió el servicio. La tabla `servicios` no tiene
+  /// columna de tienda: viaja en el bloque __META__ (clave `tienda`).
+  String tienda;
+
+  /// Cobros registrados (método, monto, tasa, referencia...). Viajan en
+  /// el bloque __META__ (clave `pagos`); ver servicio_tecnico_cobros.dart.
+  /// Si hay cobros, `abono` es la suma en USD de todos ellos.
+  List<PagoServicioTecnico> pagos;
+
   ServicioTecnico({
     this.id,
     required this.monto,
@@ -5113,7 +5127,10 @@ class ServicioTecnico {
     this.tecnico = '',
     this.estado = 'Recibido',
     List<String>? fotosRecepcion,
-  }) : fotosRecepcion = fotosRecepcion ?? [];
+    this.tienda = '',
+    List<PagoServicioTecnico>? pagos,
+  }) : fotosRecepcion = fotosRecepcion ?? [],
+       pagos = pagos ?? [];
 
   /// Alias retro-compatible con el campo "nota" original.
   /// Combina descripción + observación para la vista de lista.
@@ -5211,7 +5228,9 @@ class ServicioTecnico {
       // columna propia). Si el JSON META no lo tiene, queda en 0.
       costoRepuestos: double.tryParse(
         (meta['costoRepuestos'] ?? m['costo_repuestos'] ?? '0').toString()) ?? 0,
-      pagado: (m['pagado'] ?? 0) == 1 || m['pagado'] == true,
+      // _bn acepta 1 / "1" / true: MySQL suele devolver el entero como
+      // string y la comparación `== 1` lo daba por NO pagado.
+      pagado: _bn(m['pagado']) ?? false,
       fecha: DateTime.tryParse(m['fecha'] ?? '') ?? DateTime.now(),
 
       // Campos empaquetados en META (con fallback a columnas, por si
@@ -5258,6 +5277,8 @@ class ServicioTecnico {
           ? List<String>.from(
               (meta['fotos'] as List).map((e) => e.toString()))
           : <String>[],
+      tienda: _metaOrCol('tienda', ['tienda']),
+      pagos: PagoServicioTecnico.listaDesdeMeta(meta['pagos']),
     );
   }
 
@@ -5287,6 +5308,9 @@ class ServicioTecnico {
       // Fotos de recepción (lista de base64). Cada foto deja
       // constancia del estado del equipo al recibirlo.
       'fotos': fotosRecepcion,
+      // Tienda y cobros (ver servicio_tecnico_cobros.dart).
+      if (tienda.isNotEmpty) 'tienda': tienda,
+      if (pagos.isNotEmpty) 'pagos': pagos.map((p) => p.toMap()).toList(),
       'chk'       : {
         'chip'        : _bi(chip),
         'memoria'     : _bi(memoria),
@@ -15676,6 +15700,8 @@ class _VentasPrincipalState extends State<VentasPrincipal> {
           Text(usuarioSesion?.nombre ?? '', style: const TextStyle(fontSize: 11, color: Colors.white70)),
         ]),
         actions: [
+          // Calculadora rápida ($ ↔ Bs): para no salir de la app.
+          const BotonCalculadora(),
           const TasaBCVBadge(),
           const SizedBox(width: 4),
           IconButton(icon: const Icon(Icons.refresh), tooltip: "Actualizar", onPressed: _cargarFacturas),
@@ -16608,6 +16634,8 @@ class _VentasPrincipalState extends State<VentasPrincipal> {
       _itemDrawer(Icons.account_balance_wallet_outlined, "Mi Billetera de Comisiones", () =>
         Navigator.push(context, MaterialPageRoute(
             builder: (c) => const VentanaBilleteraComisiones()))),
+      _itemDrawer(Icons.calculate_outlined, "Calculadora", () =>
+        mostrarCalculadoraRapida(context)),
       // ── Historial de clientes (buscar cliente y ver sus compras) ──
       _itemDrawer(Icons.manage_search, "Historial de Clientes", () =>
         Navigator.push(context, MaterialPageRoute(
@@ -17481,6 +17509,14 @@ class _VentanaServicioTecnicoState extends State<VentanaServicioTecnico> {
       appBar: AppBar(
         title: const Text("Servicio Técnico"),
         actions: [
+          const BotonCalculadora(),
+          // Ingresos cobrados por servicio técnico (aparte de ventas).
+          IconButton(
+            icon: const Icon(Icons.point_of_sale),
+            tooltip: "Ingresos de servicio técnico",
+            onPressed: () => Navigator.push(context, MaterialPageRoute(
+              builder: (_) => VentanaIngresosServicioTecnico(servicios: _servicios))),
+          ),
           IconButton(
             icon: const Icon(Icons.assessment_outlined),
             tooltip: "Reporte de rentabilidad",
@@ -17661,16 +17697,17 @@ class _VentanaServicioTecnicoState extends State<VentanaServicioTecnico> {
                   Text("Resta: ${formatCurrency(s.resta)}",
                     style: const TextStyle(fontSize: 11, color: AppColors.statusRed)),
                 ],
-                if (s.pagado) ...[
+                // Estado del pago: pendiente / abonado / pagado.
+                ...[
                   const SizedBox(width: 8),
                   Container(
                     padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
                     decoration: BoxDecoration(
-                      color: AppColors.statusGreen.withValues(alpha: 0.15),
+                      color: colorEstadoPagoServicio(s.estadoPago).withValues(alpha: 0.15),
                       borderRadius: BorderRadius.circular(6)),
-                    child: const Text("PAGADO",
+                    child: Text(s.estadoPago.toUpperCase(),
                       style: TextStyle(fontSize: 9, fontWeight: FontWeight.bold,
-                        color: AppColors.statusGreen)),
+                        color: colorEstadoPagoServicio(s.estadoPago))),
                   ),
                 ],
                 const Spacer(),
@@ -17777,6 +17814,9 @@ class _FormularioServicioTecnicoState extends State<_FormularioServicioTecnico> 
   bool _guardando = false;
   /// Fotos del equipo al recibirlo (base64). Vacío por defecto.
   List<String> _fotosRecepcion = [];
+  /// Cobros con método de pago (ver servicio_tecnico_cobros.dart). Si
+  /// hay alguno, el abono deja de escribirse a mano: es su suma.
+  List<PagoServicioTecnico> _pagos = [];
 
   final List<String> _estados = ['Recibido', 'En reparación', 'Listo', 'Entregado'];
 
@@ -17838,6 +17878,28 @@ class _FormularioServicioTecnicoState extends State<_FormularioServicioTecnico> 
     _estado = _estados.contains(estadoCargado) ? estadoCargado : 'Recibido';
     // Cargar fotos existentes (al editar) o lista vacía
     _fotosRecepcion = List<String>.from(s?.fotosRecepcion ?? const <String>[]);
+    _pagos = List<PagoServicioTecnico>.from(s?.pagos ?? const <PagoServicioTecnico>[]);
+  }
+
+  /// Registra un cobro con método (Pago Móvil, efectivo...) desde el
+  /// formulario y deja el abono como la suma de los cobros.
+  Future<void> _agregarCobro() async {
+    final monto = double.tryParse(_montoCtrl.text.trim()) ?? 0;
+    final abonoManual = double.tryParse(_abonoCtrl.text.trim()) ?? 0;
+    // Un abono escrito a mano antes de usar cobros se conserva como
+    // cobro "sin detalle" para que la suma no lo pierda.
+    final base = _pagos.isEmpty && abonoManual > 0
+        ? [PagoServicioTecnico.legado(abonoManual, _fecha)]
+        : _pagos;
+    final cobrado = base.fold<double>(0, (t, p) => t + p.montoUsd);
+    final pago = await mostrarDialogoCobroServicio(context,
+        resta: (monto - cobrado).clamp(0, double.infinity).toDouble());
+    if (pago == null || !mounted) return;
+    setState(() {
+      _pagos = [...base, pago];
+      final suma = _pagos.fold<double>(0, (t, p) => t + p.montoUsd);
+      _abonoCtrl.text = suma.toStringAsFixed(2);
+    });
   }
 
   @override
@@ -17887,6 +17949,8 @@ class _FormularioServicioTecnicoState extends State<_FormularioServicioTecnico> 
               const SizedBox(width: 10),
               Expanded(child: TextFormField(
                 controller: _abonoCtrl,
+                // Con cobros registrados el abono es su suma (no se edita).
+                enabled: _pagos.isEmpty,
                 keyboardType: const TextInputType.numberWithOptions(decimal: true),
                 decoration: const InputDecoration(
                   labelText: "Abono",
@@ -17894,6 +17958,23 @@ class _FormularioServicioTecnicoState extends State<_FormularioServicioTecnico> 
                 onChanged: (_) => setState(() {}),
               )),
             ]),
+            // ── Cobros con método de pago (como una factura) ──
+            if (_pagos.isNotEmpty)
+              ..._pagos.map((p) => ListTile(
+                dense: true,
+                contentPadding: EdgeInsets.zero,
+                leading: const Icon(Icons.receipt_outlined, size: 18),
+                title: Text(p.descripcionCorta),
+                subtitle: Text(p.detalle, style: const TextStyle(fontSize: 11)),
+              )),
+            Align(
+              alignment: Alignment.centerLeft,
+              child: TextButton.icon(
+                onPressed: _agregarCobro,
+                icon: const Icon(Icons.point_of_sale, size: 18),
+                label: const Text("Registrar cobro con método de pago"),
+              ),
+            ),
             const SizedBox(height: 10),
             // ── Costo de repuestos (lo que GASTÓ el negocio) ──
             TextFormField(
@@ -17967,7 +18048,10 @@ class _FormularioServicioTecnicoState extends State<_FormularioServicioTecnico> 
             const SizedBox(height: 10),
             SwitchListTile(
               value: _pagado,
-              onChanged: (v) => setState(() => _pagado = v),
+              // Con cobros registrados, "pagado" sale de la suma.
+              onChanged: _pagos.isNotEmpty
+                  ? null
+                  : (v) => setState(() => _pagado = v),
               title: const Text("¿Está pagado completamente?"),
               activeColor: AppColors.statusGreen,
               contentPadding: EdgeInsets.zero,
@@ -18407,6 +18491,12 @@ class _FormularioServicioTecnicoState extends State<_FormularioServicioTecnico> 
       pagado = true;
       abonoFinal = monto;
     }
+    // Con cobros registrados, abono y "pagado" salen de su suma.
+    if (_pagos.isNotEmpty) {
+      abonoFinal = redondearCentavos(
+          _pagos.fold<double>(0, (t, p) => t + p.montoUsd));
+      pagado = monto > 0 && abonoFinal >= monto - 0.005;
+    }
 
     // Técnico: si queda vacío, usar el nombre del usuario de sesión
     String tecnico = _tecnicoCtrl.text.trim();
@@ -18446,6 +18536,10 @@ class _FormularioServicioTecnicoState extends State<_FormularioServicioTecnico> 
         tecnico: tecnico,
         estado: _estado,
         fotosRecepcion: _fotosRecepcion,
+        tienda: (widget.servicio?.tienda ?? '').isNotEmpty
+            ? widget.servicio!.tienda
+            : tiendaUsuarioActual(),
+        pagos: _pagos,
       );
 
       // Diagnóstico previo: calcular tamaño del payload.
@@ -18605,6 +18699,10 @@ class _FormularioServicioTecnicoState extends State<_FormularioServicioTecnico> 
         tecnico: tecnico,
         estado: _estado,
         fotosRecepcion: const [], // sin fotos
+        tienda: (widget.servicio?.tienda ?? '').isNotEmpty
+            ? widget.servicio!.tienda
+            : tiendaUsuarioActual(),
+        pagos: _pagos,
       );
       final payload = servicio.toMap();
       if (widget.servicio != null && widget.servicio!.id != null) {
@@ -18776,6 +18874,11 @@ class _DetalleServicioTecnicoState extends State<_DetalleServicioTecnico> {
               ],
             ]),
           ),
+          const SizedBox(height: 12),
+          // ── Cobros (método, tasa, referencia) + comprobante ──
+          SeccionCobrosServicio(
+            servicio: s,
+            onActualizado: (nuevo) => setState(() => s = nuevo)),
           const SizedBox(height: 20),
 
           // ── Cliente ──
@@ -39944,334 +40047,7 @@ class _VentanaComisionesState extends State<VentanaComisiones> {
 //     dentro de cada factura del reporte de ventas)
 //   - resumen: Map<String,dynamic>  (totales, contadores, etc.)
 // ──────────────────────────────────────────────────────────────
-// ════════════════════════════════════════════════════════════════════
-//  BILLETERA DE COMISIONES (perfil del usuario)
-// ════════════════════════════════════════════════════════════════════
-//  Muestra al vendedor, en tiempo real, cuánto lleva vendido en el
-//  período (mes en curso por defecto, con selector) y el acumulado de
-//  sus comisiones. NO tiene reglas propias: usa
-//  `_VentanaComisionesState.calcularComisiones` y
-//  `filtrarVentasPorRango`, las mismas que usa la ventana Comisiones al
-//  generar el pago, así ambos números siempre coinciden.
-//
-//  Se abre desde el menú ("Mi billetera de comisiones") para el usuario
-//  logueado, o desde Usuarios (botón de billetera) para ver la de otro.
-// ════════════════════════════════════════════════════════════════════
-class VentanaBilleteraComisiones extends StatefulWidget {
-  /// Usuario cuya billetera se muestra. null = el usuario logueado.
-  final Usuario? usuario;
-  const VentanaBilleteraComisiones({super.key, this.usuario});
-  @override
-  State<VentanaBilleteraComisiones> createState() =>
-      _VentanaBilleteraComisionesState();
-}
-
-class _VentanaBilleteraComisionesState
-    extends State<VentanaBilleteraComisiones> {
-  bool _cargando = true;
-  String? _error;
-  List<FacturaModel> _ventas = [];
-  late DateTime _mes; // primer día del mes seleccionado
-  DateTime? _actualizado;
-
-  Usuario? get _usuario => widget.usuario ?? usuarioSesion;
-
-  @override
-  void initState() {
-    super.initState();
-    final now = DateTime.now();
-    _mes = DateTime(now.year, now.month, 1);
-    _cargar();
-  }
-
-  /// Recarga ventas, usuarios y servicios desde el backend (refresco al
-  /// abrir y con el botón de recargar).
-  Future<void> _cargar() async {
-    setState(() { _cargando = true; _error = null; });
-    try {
-      // Usuarios frescos: el cálculo necesita `ganaComisiones` y el
-      // sueldo base actualizados.
-      try {
-        final rawU = await _Api.get('usuarios');
-        final todos = ((rawU as List?) ?? [])
-            .map((m) => Usuario.fromMap(m)).toList();
-        if (todos.isNotEmpty) {
-          usuariosSistema = UsuarioMaestro.ocultar<Usuario>(
-              todos, (u) => u.correo);
-        }
-      } catch (e) {
-        debugPrint('[Billetera] No se pudo refrescar usuarios: $e');
-      }
-      // Servicios técnicos (categoría de comisión por servicio).
-      try {
-        final rawS = await _Api.get('servicios');
-        serviciosGlobal = ((rawS as List?) ?? [])
-            .map((m) => ServicioTecnico.fromMap(m)).toList();
-      } catch (e) {
-        debugPrint('[Billetera] No se pudo refrescar servicios: $e');
-      }
-      _ventas = await _VentanaComisionesState._cargarVentasApi();
-      _actualizado = DateTime.now();
-    } catch (e) {
-      _error = e.toString();
-    } finally {
-      if (mounted) setState(() => _cargando = false);
-    }
-  }
-
-  DateTime get _finMes {
-    final ultimo = DateTime(_mes.year, _mes.month + 1, 0);
-    final hoy = DateTime.now();
-    final hoySinHora = DateTime(hoy.year, hoy.month, hoy.day);
-    return ultimo.isAfter(hoySinHora) ? hoySinHora : ultimo;
-  }
-
-  bool _esDelUsuario(String nombre) =>
-      nombre.trim().toLowerCase() ==
-      (_usuario?.nombre ?? '').trim().toLowerCase();
-
-  /// Resumen de comisión del usuario en [inicio, fin] usando las MISMAS
-  /// reglas de la ventana Comisiones. null si no generó nada.
-  ResumenComision? _resumen(DateTime inicio, DateTime fin) {
-    final ventas = _VentanaComisionesState.filtrarVentasPorRango(
-        _ventas, inicio, fin);
-    final todos = _VentanaComisionesState.calcularComisiones(ventas,
-        fechaInicio: inicio, fechaFin: fin);
-    for (final r in todos) {
-      if (_esDelUsuario(r.vendedor)) return r;
-    }
-    return null;
-  }
-
-  /// Lo vendido por el usuario en el rango: productos cuyo vendedor
-  /// asignado es él (mismo criterio de atribución que las comisiones).
-  ({int unidades, double monto, int facturas}) _vendido(
-      DateTime inicio, DateTime fin) {
-    final ventas = _VentanaComisionesState.filtrarVentasPorRango(
-        _ventas, inicio, fin);
-    int unidades = 0, facturas = 0;
-    double monto = 0;
-    for (final v in ventas) {
-      bool participa = false;
-      for (final e in v.equipos) {
-        if (_esDelUsuario(v.vendedorDeEquipo(e.imei))) {
-          unidades++; monto += e.producto.precioVenta; participa = true;
-        }
-      }
-      for (final p in v.itemsSinImei) {
-        if (_esDelUsuario(v.vendedorDeItem(p.codigo))) {
-          unidades++; monto += p.precioVenta; participa = true;
-        }
-      }
-      if (participa) facturas++;
-    }
-    return (unidades: unidades, monto: monto, facturas: facturas);
-  }
-
-  static const _meses = ['Enero', 'Febrero', 'Marzo', 'Abril', 'Mayo',
-    'Junio', 'Julio', 'Agosto', 'Septiembre', 'Octubre', 'Noviembre',
-    'Diciembre'];
-
-  @override
-  Widget build(BuildContext context) {
-    final u = _usuario;
-    final hoy = DateTime.now();
-    final esMesActual = _mes.year == hoy.year && _mes.month == hoy.month;
-    return Scaffold(
-      appBar: AppBar(
-        title: Text(widget.usuario == null
-            ? 'Mi billetera de comisiones'
-            : 'Billetera — ${u?.nombre ?? ''}'),
-        actions: [
-          IconButton(
-            tooltip: 'Recargar',
-            icon: const Icon(Icons.refresh),
-            onPressed: _cargando ? null : _cargar),
-        ],
-      ),
-      body: u == null
-          ? const Center(child: Text('No hay un usuario en sesión.'))
-          : _cargando
-              ? const Center(child: CircularProgressIndicator())
-              : _error != null
-                  ? Center(child: Padding(
-                      padding: const EdgeInsets.all(24),
-                      child: Text('Error al cargar: $_error',
-                        style: const TextStyle(color: AppColors.statusRed))))
-                  : RefreshIndicator(
-                      onRefresh: _cargar,
-                      child: _contenido(u, esMesActual)),
-    );
-  }
-
-  Widget _contenido(Usuario u, bool esMesActual) {
-    final inicio = _mes;
-    final fin = _finMes;
-    final r = _resumen(inicio, fin);
-    final vendido = _vendido(inicio, fin);
-    final inicioAnio = DateTime(_mes.year, 1, 1);
-    final rAnio = _resumen(inicioAnio, fin);
-    final tasa = ConfigSistema.tasaCambio;
-
-    return ListView(padding: const EdgeInsets.all(14), children: [
-      // ── Selector de mes ──
-      Row(children: [
-        IconButton(
-          tooltip: 'Mes anterior',
-          icon: const Icon(Icons.chevron_left),
-          onPressed: () => setState(() =>
-              _mes = DateTime(_mes.year, _mes.month - 1, 1))),
-        Expanded(child: Text(
-          '${_meses[_mes.month - 1]} ${_mes.year}'
-          '${esMesActual ? ' (en curso)' : ''}',
-          textAlign: TextAlign.center,
-          style: const TextStyle(fontWeight: FontWeight.w800, fontSize: 16))),
-        IconButton(
-          tooltip: 'Mes siguiente',
-          icon: const Icon(Icons.chevron_right),
-          onPressed: esMesActual ? null : () => setState(() =>
-              _mes = DateTime(_mes.year, _mes.month + 1, 1))),
-      ]),
-      if (!u.ganaComisiones)
-        Container(
-          margin: const EdgeInsets.only(bottom: 10),
-          padding: const EdgeInsets.all(10),
-          decoration: BoxDecoration(
-            color: AppColors.statusOrange.withValues(alpha: 0.12),
-            borderRadius: BorderRadius.circular(8)),
-          child: const Text(
-            'Este usuario está configurado para NO generar comisiones.',
-            style: TextStyle(color: AppColors.statusOrange,
-              fontWeight: FontWeight.w600)),
-        ),
-      // ── Tarjeta principal: comisión acumulada del período ──
-      Container(
-        padding: const EdgeInsets.all(18),
-        decoration: BoxDecoration(
-          gradient: const LinearGradient(
-            colors: [AppColors.brandBlue, AppColors.brandBlueDark]),
-          borderRadius: BorderRadius.circular(16),
-        ),
-        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-          Row(children: [
-            const Icon(Icons.account_balance_wallet, color: Colors.white),
-            const SizedBox(width: 8),
-            Expanded(child: Text(u.nombre,
-              style: const TextStyle(color: Colors.white,
-                fontWeight: FontWeight.w800, fontSize: 15))),
-          ]),
-          const SizedBox(height: 12),
-          const Text('Comisiones acumuladas del mes',
-            style: TextStyle(color: Colors.white70, fontSize: 12)),
-          Text(formatCurrency(r?.totalComision ?? 0),
-            style: const TextStyle(color: AppColors.brandYellow,
-              fontWeight: FontWeight.w900, fontSize: 30)),
-          if (tasa > 0)
-            Text('≈ ${formatCurrency((r?.totalComision ?? 0) * tasa, symbol: 'Bs ')}',
-              style: const TextStyle(color: Colors.white70, fontSize: 12)),
-          const SizedBox(height: 10),
-          Text('Base ${formatCurrency(r?.base ?? 0)}  ·  '
-               'Total estimado a cobrar ${formatCurrency(r?.totalPagar() ?? 0)}',
-            style: const TextStyle(color: Colors.white, fontSize: 12)),
-        ]),
-      ),
-      const SizedBox(height: 12),
-      // ── Vendido en el período ──
-      Row(children: [
-        Expanded(child: _kpi('Vendido (precio lista)',
-            formatCurrency(vendido.monto), Icons.shopping_bag_outlined,
-            AppColors.brandBlue)),
-        const SizedBox(width: 8),
-        Expanded(child: _kpi('Productos',
-            '${vendido.unidades}', Icons.phone_android, AppColors.statusGreen)),
-        const SizedBox(width: 8),
-        Expanded(child: _kpi('Facturas',
-            '${vendido.facturas}', Icons.receipt_long, AppColors.statusOrange)),
-      ]),
-      const SizedBox(height: 12),
-      // ── Desglose por categoría ──
-      Card(child: Padding(
-        padding: const EdgeInsets.all(12),
-        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-          const Text('Desglose de comisiones del mes',
-            style: TextStyle(fontWeight: FontWeight.w800)),
-          const Divider(),
-          if (r == null || r.totalComision.abs() < 0.005)
-            const Padding(
-              padding: EdgeInsets.symmetric(vertical: 8),
-              child: Text('Aún no hay comisiones en este período.',
-                style: TextStyle(color: AppColors.textSecondary)))
-          else ...[
-            ...r.conteos.entries.where((e) => e.value > 0).map((e) {
-              final tarifa = r.tarifasUsadas[e.key] ?? 0;
-              return ListTile(
-                dense: true,
-                contentPadding: EdgeInsets.zero,
-                title: Text(r.nombresCategorias[e.key] ?? e.key),
-                subtitle: Text('${e.value} × ${formatCurrency(tarifa)}'),
-                trailing: Text(formatCurrency(e.value * tarifa),
-                  style: const TextStyle(fontWeight: FontWeight.w700)),
-              );
-            }),
-            if (r.comisionWeppa.abs() > 0.005)
-              ListTile(
-                dense: true,
-                contentPadding: EdgeInsets.zero,
-                title: const Text('Comisión Weppa (%)'),
-                trailing: Text(formatCurrency(r.comisionWeppa),
-                  style: const TextStyle(fontWeight: FontWeight.w700)),
-              ),
-            if (r.ajusteComisionUSD.abs() > 0.005)
-              ListTile(
-                dense: true,
-                contentPadding: EdgeInsets.zero,
-                title: const Text('Ajustes'),
-                trailing: Text(formatCurrency(r.ajusteComisionUSD),
-                  style: const TextStyle(fontWeight: FontWeight.w700)),
-              ),
-          ],
-        ]),
-      )),
-      const SizedBox(height: 8),
-      // ── Acumulado del año ──
-      Card(child: ListTile(
-        leading: const Icon(Icons.calendar_month, color: AppColors.brandBlue),
-        title: Text('Acumulado ${_mes.year} (hasta ${_meses[_mes.month - 1]})'),
-        subtitle: const Text('Comisiones sin incluir la base'),
-        trailing: Text(formatCurrency(rAnio?.totalComision ?? 0),
-          style: const TextStyle(fontWeight: FontWeight.w900, fontSize: 16,
-            color: AppColors.brandBlueDark)),
-      )),
-      const SizedBox(height: 8),
-      Text(
-        'Montos estimados con las reglas vigentes de Comisiones. '
-        'El pago final lo genera Administración.'
-        '${_actualizado != null ? '\nActualizado: ${_actualizado!.hour.toString().padLeft(2, '0')}:${_actualizado!.minute.toString().padLeft(2, '0')}' : ''}',
-        textAlign: TextAlign.center,
-        style: const TextStyle(color: AppColors.textSecondary, fontSize: 11)),
-    ]);
-  }
-
-  Widget _kpi(String label, String valor, IconData icon, Color color) {
-    return Container(
-      padding: const EdgeInsets.all(10),
-      decoration: BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: AppColors.surfaceGrey),
-      ),
-      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-        Icon(icon, color: color, size: 20),
-        const SizedBox(height: 4),
-        FittedBox(fit: BoxFit.scaleDown, child: Text(valor,
-          style: TextStyle(fontWeight: FontWeight.w900, color: color,
-            fontSize: 16))),
-        Text(label, style: const TextStyle(
-          color: AppColors.textSecondary, fontSize: 11)),
-      ]),
-    );
-  }
-}
+// La Billetera de comisiones (vista semanal) vive en lib/billetera_semanal.dart.
 
 // ════════════════════════════════════════════════════════════════════
 //  HISTORIAL DE CLIENTES
@@ -55189,6 +54965,16 @@ class _VentanaReporteFinanciadoraState extends State<VentanaReporteFinanciadora>
                   foregroundColor: AppColors.brandBlue,
                   side: const BorderSide(color: AppColors.brandBlue),
                 ),
+              ),
+              // Pago del lote completo repartido entre varios equipos
+              // (ver lib/pago_lote_financiadora.dart).
+              ElevatedButton.icon(
+                onPressed: () => _registrarPagoLote(financiadora),
+                icon: const Icon(Icons.playlist_add_check, size: 18),
+                label: const Text('Pago por lote'),
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: AppColors.brandBlue,
+                  foregroundColor: Colors.white),
               ),
               OutlinedButton.icon(
                 onPressed: equipos.isEmpty
