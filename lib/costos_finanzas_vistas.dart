@@ -57,6 +57,166 @@ List<dynamic> _cfListaJson(dynamic v) {
   }
 }
 
+/// Valor de `configuracion` ya decodificado (viene como texto JSON del
+/// servidor, o como mapa/lista en las pruebas). null si no es JSON.
+dynamic _cfDecodificar(dynamic v) {
+  if (v == null || v is Map || v is List) return v;
+  try {
+    return jsonDecode(v.toString());
+  } catch (_) {
+    return null;
+  }
+}
+
+/// Listas de precios crudas del servidor → (nombre, financiadora,
+/// código → primer precio), que es lo que usa
+/// [precioEnListaFinanciadora].
+List<({String nombre, String financiadora, Map<String, double> precios})>
+    _cfListasDesdeRaw(List<dynamic>? raw) {
+  final r =
+      <({String nombre, String financiadora, Map<String, double> precios})>[];
+  for (final l in raw ?? const []) {
+    if (l is! Map) continue;
+    final precios = <String, double>{};
+    for (final it in (l['items'] as List? ?? [])) {
+      if (it is! Map) continue;
+      final vals = it['valores'] as List? ?? [];
+      if (vals.isEmpty || vals.first is! Map) continue;
+      final p =
+          double.tryParse((vals.first as Map)['precio']?.toString() ?? '');
+      if (p != null && p > 0) {
+        precios[(it['producto_codigo'] ?? '').toString()] = p;
+      }
+    }
+    r.add((
+      nombre: (l['nombre'] ?? '').toString(),
+      financiadora: (l['financiadora'] ?? '').toString(),
+      precios: precios,
+    ));
+  }
+  return r;
+}
+
+// ── Historial de precios y foto de precios de cada factura ─────────
+//  (lógica en lib/historial_precios.dart). Al cambiar un precio se
+//  guarda el ANTERIOR con su vigencia; al facturar, los precios y tasas
+//  de ese momento. Así una venta vieja no cambia de ganancia cuando el
+//  dueño actualiza el precio del producto.
+
+/// Guarda en `configuracion` el precio ANTERIOR de un producto cuando
+/// cambia su costo o su precio de venta. Es el ÚNICO lugar que escribe
+/// el historial: lo llama todo el que cambie precios de un producto.
+///
+/// Corre en la misma cola que la actualización de listas por cambio de
+/// precio y ANTES que ella, para leer el precio que cada lista tenía
+/// antes de recalcularse. Un fallo solo se registra en el log: nunca
+/// impide guardar el producto.
+Future<void> registrarCambioDePrecio(Producto anterior, Producto nuevo) {
+  final cambio = (anterior.precioVenta - nuevo.precioVenta).abs() > 0.0001 ||
+      (anterior.precioCosto - nuevo.precioCosto).abs() > 0.0001;
+  if (!cambio || anterior.codigo.trim().isEmpty) return Future.value();
+  final momento = DateTime.now();
+  final usuario = usuarioSesion?.nombre ?? '';
+  return _enColaListasPorPrecio(() async {
+    try {
+      final listas = <PrecioListaCF>[];
+      try {
+        final raw = await _Api.get('listas_precios');
+        for (final l in _cfListasDesdeRaw(raw is List ? raw : null)) {
+          final p = l.precios[anterior.codigo];
+          if (p == null) continue;
+          listas.add(PrecioListaCF(
+              lista: l.nombre, financiadora: l.financiadora, precio: p));
+        }
+      } catch (e) {
+        debugPrint('[HistorialPrecios] listas: $e');
+      }
+      final clave = claveHistorialPrecio(anterior.codigo);
+      final cfg = await _Api.get('configuracion');
+      final actual = cfg is Map ? _cfDecodificar(cfg[clave]) : null;
+      final hist = agregarCambioPrecio(
+          actual,
+          CambioPrecioCF(
+            vigenteHasta: momento,
+            costo: anterior.precioCosto,
+            venta: anterior.precioVenta,
+            listas: listas,
+            usuario: usuario,
+          ));
+      await _Api.post('configuracion', {clave: jsonEncode(hist)});
+    } catch (e) {
+      debugPrint('[HistorialPrecios] ${anterior.codigo}: $e');
+    }
+  });
+}
+
+/// Guarda la foto de precios y tasas de una factura recién creada
+/// (`snap_fac_<nro>`). Si falla no pasa nada: la factura ya está
+/// guardada y finanzas cae al historial de precios.
+Future<void> guardarFotoPreciosFactura(FacturaModel f) async {
+  try {
+    final ahora = DateTime.now();
+    final fin = f.pagos
+        .map((p) => _finNormCF(p.financiadora))
+        .firstWhere((x) => x.isNotEmpty, orElse: () => '');
+    final lista = f.pagos
+        .map((p) => p.nombreLista ?? '')
+        .firstWhere((x) => x.isNotEmpty, orElse: () => '');
+    var listas =
+        <({String nombre, String financiadora, Map<String, double> precios})>[];
+    double divisa = 0;
+    try {
+      final res = await Future.wait([
+        fin.isEmpty
+            ? Future<dynamic>.value(null)
+            : _Api.get('listas_precios'),
+        _Api.get('configuracion'),
+      ]);
+      listas = _cfListasDesdeRaw(res[0] is List ? res[0] as List : null);
+      final cfg = res[1];
+      if (cfg is Map) {
+        final mes = _cfDecodificar(cfg[claveTasasDiaMes(ahora.year, ahora.month)]);
+        if (mes is Map) {
+          divisa = RegistroTasaDia.fromJson(mes[fechaIsoCF(ahora)]).divisa;
+        }
+      }
+    } catch (e) {
+      debugPrint('[FotoPrecios] lectura: $e');
+    }
+    ItemSnapshotCF item(Producto p, String imei) {
+      // El precio del catálogo (contado en divisa), no el de la línea
+      // de la factura, que puede venir de una lista o con descuento.
+      final cat = filaProductoParaTienda(p.codigo, f.tienda) ?? p;
+      return ItemSnapshotCF(
+        codigo: p.codigo,
+        imei: imei,
+        costo: cat.precioCosto,
+        venta: cat.precioVenta,
+        precioFinanciadora: fin.isEmpty
+            ? null
+            : precioEnListaFinanciadora(listas, fin, p.codigo,
+                nombreLista: lista),
+      );
+    }
+
+    final foto = SnapshotFacturaCF(
+      momento: ahora,
+      tasaBcv: ConfigSistema.tasaCambio,
+      tasaDivisa: divisa,
+      financiadora: fin,
+      lista: lista,
+      items: [
+        for (final e in f.equipos) item(e.producto, e.imei),
+        for (final p in f.itemsSinImei) item(p, ''),
+      ],
+    );
+    await _Api.post('configuracion',
+        {claveSnapshotFactura(f.nroFactura): jsonEncode(foto.toJson())});
+  } catch (e) {
+    debugPrint('[FotoPrecios] ${f.nroFactura}: $e');
+  }
+}
+
 // ── Datos compartidos por los apartados ─────────────────────────────
 /// Carga UNA vez lo que necesitan los apartados de finanzas (facturas,
 /// productos, IMEIs, listas, pagos de financiadoras, cuentas por pagar
@@ -71,29 +231,30 @@ class _DatosFinanzasCF extends ChangeNotifier {
   final Map<String, Producto> productos = {};
   final Map<String, String> tiendaPorFacturaId = {};
   final Map<String, String> tiendaPorNroFactura = {};
+  /// Fecha y hora de creación de cada factura (`creado_en`), para saber
+  /// qué precio estaba vigente en el momento exacto de la venta.
+  final Map<String, DateTime> momentoPorNro = {};
   List<({String nombre, String financiadora, Map<String, double> precios})>
       listas = [];
   List<dynamic> pagosFinanciadora = [];
   List<dynamic> cuentasPagar = [];
   Map<String, dynamic> config = {};
+  /// BCV de cada día según la tabla `tasa_bcv` ("AAAA-MM-DD" → tasa).
+  Map<String, double> bcvTabla = {};
 
+  /// Historial de precios por código y foto de precios por factura
+  /// (leídos de `configuracion`).
+  final Map<String, List<CambioPrecioCF>> _historial = {};
+  final Map<String, SnapshotFacturaCF> _fotos = {};
+
+  /// Tasa BCV actual (referencia del flujo de caja).
   double tasaBcv = ConfigSistema.tasaCambio;
-  double tasaDivisa = ConfigSistema.tasaBinance > 0
-      ? ConfigSistema.tasaBinance
-      : ConfigSistema.tasaCambio;
 
   bool cargando = false;
   String? error;
   DateTime? cargadoEn;
   Future<void>? _enCurso;
-
-  TasasCF get tasas => TasasCF(tasaBcv: tasaBcv, tasaDivisa: tasaDivisa);
-
-  void cambiarTasas({double? bcv, double? divisa}) {
-    if (bcv != null && bcv > 0) tasaBcv = bcv;
-    if (divisa != null && divisa > 0) tasaDivisa = divisa;
-    notifyListeners();
-  }
+  TasasPorDia? _tasasCache;
 
   Future<void> cargar({bool forzar = false}) {
     if (!forzar && cargadoEn != null) return Future.value();
@@ -118,6 +279,7 @@ class _DatosFinanzasCF extends ChangeNotifier {
         opcional('pagos_financiadora'),
         opcional('cuentas_pagar'),
         opcional('configuracion'),
+        opcional('tasa_bcv'),
       ]);
       productosRaw = (res[0] as List?) ?? [];
       facturasRaw = (res[1] as List?) ?? [];
@@ -126,6 +288,8 @@ class _DatosFinanzasCF extends ChangeNotifier {
       pagosFinanciadora = (res[5] as List?) ?? [];
       cuentasPagar = (res[6] as List?) ?? [];
       config = res[7] is Map ? Map<String, dynamic>.from(res[7] as Map) : {};
+      bcvTabla = _bcvDesdeTabla(res[8]);
+      tasaBcv = ConfigSistema.tasaCambio;
 
       final prods = productosRaw
           .map((m) => Producto.fromMap(m as Map<String, dynamic>))
@@ -140,39 +304,25 @@ class _DatosFinanzasCF extends ChangeNotifier {
           .map((i) => ImeiRegistro.fromMap(i as Map<String, dynamic>))
           .toList();
 
-      listas = [];
-      for (final l in ((res[4] as List?) ?? [])) {
-        if (l is! Map) continue;
-        final precios = <String, double>{};
-        for (final it in (l['items'] as List? ?? [])) {
-          if (it is! Map) continue;
-          final vals = it['valores'] as List? ?? [];
-          if (vals.isEmpty || vals.first is! Map) continue;
-          final p = double.tryParse(
-              (vals.first as Map)['precio']?.toString() ?? '');
-          if (p != null && p > 0) {
-            precios[(it['producto_codigo'] ?? '').toString()] = p;
-          }
-        }
-        listas.add((
-          nombre: (l['nombre'] ?? '').toString(),
-          financiadora: (l['financiadora'] ?? '').toString(),
-          precios: precios,
-        ));
-      }
+      listas = _cfListasDesdeRaw(res[4] as List?);
+      _leerPreciosGuardados();
 
       facturas.clear();
       facturasCF.clear();
       tiendaPorFacturaId.clear();
       tiendaPorNroFactura.clear();
+      momentoPorNro.clear();
       for (final m in facturasRaw) {
         final mp = m as Map<String, dynamic>;
         final f = construirFacturaModelDesdeJson(mp);
+        final creado = DateTime.tryParse((mp['creado_en'] ?? '').toString());
+        if (creado != null) momentoPorNro[f.nroFactura] = creado;
         facturas.add(f);
         facturasCF.add(_aFacturaCF(f));
         tiendaPorFacturaId[(mp['id'] ?? '').toString()] = f.tienda;
         tiendaPorNroFactura[f.nroFactura] = f.tienda;
       }
+      _tasasCache = null;
       cargadoEn = DateTime.now();
     } catch (e) {
       error = e.toString();
@@ -182,6 +332,70 @@ class _DatosFinanzasCF extends ChangeNotifier {
       notifyListeners();
     }
   }
+
+  /// Filas de la tabla `tasa_bcv` → BCV por día. Se toleran distintos
+  /// nombres de columna porque la tabla no está en el esquema conocido.
+  static Map<String, double> _bcvDesdeTabla(dynamic raw) {
+    final r = <String, double>{};
+    if (raw is! List) return r;
+    for (final x in raw) {
+      if (x is! Map) continue;
+      final f = parseFechaCF((x['fecha'] ??
+              x['fecha_actualizacion'] ??
+              x['creado_en'] ??
+              '')
+          .toString());
+      final v = double.tryParse(
+              (x['valor'] ?? x['tasa'] ?? x['tasa_bcv'] ?? x['monto'] ?? '')
+                  .toString()) ??
+          0;
+      if (f != null && v > 0) r[fechaIsoCF(f)] = v;
+    }
+    return r;
+  }
+
+  /// Lee de `configuracion` el historial de precios (`hist_precio_*`) y
+  /// las fotos de precios de las facturas (`snap_fac_*`).
+  void _leerPreciosGuardados() {
+    _historial.clear();
+    _fotos.clear();
+    for (final e in config.entries) {
+      if (e.key.startsWith('hist_precio_')) {
+        final h = leerHistorialPrecio(_cfDecodificar(e.value));
+        if (h.isNotEmpty) {
+          _historial[e.key.substring('hist_precio_'.length)] = h;
+        }
+      } else if (e.key.startsWith('snap_fac_')) {
+        final v = _cfDecodificar(e.value);
+        if (v is Map) {
+          _fotos[e.key.substring('snap_fac_'.length)] =
+              SnapshotFacturaCF.fromJson(v);
+        }
+      }
+    }
+  }
+
+  /// Precio de contado y costo de un producto en una venta: los de la
+  /// foto de la factura; si no hay, los vigentes en ese momento según
+  /// el historial; y si no hay historial, los actuales del catálogo.
+  PreciosVigentesCF preciosDeVenta(
+      String nroFactura, String codigo, String imei, DateTime momento,
+      {Producto? respaldo}) {
+    final foto = _fotos[nroFactura]?.item(codigo, imei);
+    if (foto != null) {
+      return PreciosVigentesCF(
+          costo: foto.costo, venta: foto.venta, origen: origenPrecioFactura);
+    }
+    final cat = productos[codigo] ?? respaldo;
+    return preciosVigentesEn(_historial[codigo] ?? const [], momento,
+        costoActual: cat?.precioCosto ?? 0,
+        ventaActual: cat?.precioVenta ?? 0);
+  }
+
+  /// Momento de la venta: la hora de creación si se conoce; si no, el
+  /// inicio del día de la factura.
+  DateTime momentoDe(String nroFactura, DateTime fecha) =>
+      momentoPorNro[nroFactura] ?? fecha;
 
   FacturaCF _aFacturaCF(FacturaModel f) {
     final pagos = [
@@ -200,24 +414,46 @@ class _DatosFinanzasCF extends ChangeNotifier {
     final lista = f.pagos
         .map((p) => p.nombreLista ?? '')
         .firstWhere((x) => x.isNotEmpty, orElse: () => '');
+    final fecha = parseFechaFlexible(f.fecha) ?? DateTime(2000);
+    final momento = momentoDe(f.nroFactura, fecha);
+    final foto = _fotos[f.nroFactura];
     EquipoVendidoCF eq(Producto p, String imei) {
-      final cat = productos[p.codigo] ?? p;
+      final pr = preciosDeVenta(f.nroFactura, p.codigo, imei, momento,
+          respaldo: p);
+      double? pf;
+      if (fin.isNotEmpty) {
+        // Precio de la lista de la financiadora: el de la foto de la
+        // factura; si no, el que la lista tenía antes del siguiente
+        // cambio de precio; si no, el de la lista actual.
+        pf = foto?.item(p.codigo, imei)?.precioFinanciadora;
+        if (pf == null && pr.listas != null) {
+          pf = precioEnListaFinanciadora([
+            for (final l in pr.listas!)
+              (
+                nombre: l.lista,
+                financiadora: l.financiadora,
+                precios: {p.codigo: l.precio},
+              ),
+          ], fin, p.codigo, nombreLista: lista);
+        }
+        pf ??= precioEnListaFinanciadora(listas, fin, p.codigo,
+            nombreLista: lista);
+      }
       return EquipoVendidoCF(
         codigo: p.codigo,
         imei: imei,
-        costo: cat.precioCosto,
-        precioContado: cat.precioVenta,
-        precioFinanciadora: fin.isEmpty
-            ? null
-            : precioEnListaFinanciadora(listas, fin, p.codigo,
-                nombreLista: lista),
+        nombre: p.nombre.isEmpty ? p.codigo : p.nombre,
+        costo: pr.costo,
+        precioContado: pr.venta,
+        precioFinanciadora: pf,
+        origenPrecio: pr.origen,
       );
     }
 
     return FacturaCF(
       nroFactura: f.nroFactura,
       tienda: f.tienda,
-      fecha: parseFechaFlexible(f.fecha) ?? DateTime(2000),
+      fecha: fecha,
       equipos: [
         for (final e in f.equipos) eq(e.producto, e.imei),
         for (final p in f.itemsSinImei) eq(p, ''),
@@ -226,13 +462,50 @@ class _DatosFinanzasCF extends ChangeNotifier {
     );
   }
 
-  /// Ventas del período analizadas con las tasas actuales.
+  /// Tasas de cada día: las cargadas a mano (`cf_tasas_dia_*`), la
+  /// tabla BCV y las tasas con que se cobró cada día.
+  TasasPorDia get tasasPorDia => _tasasCache ??= TasasPorDia(
+        manuales: TasasPorDia.leerManuales(config, _cfDecodificar),
+        bcvTabla: bcvTabla,
+        bcvVentas: {
+          ...bcvDeLasVentas(facturasCF),
+          // La foto de la factura guarda la BCV con que se facturó.
+          for (final e in _fotos.entries)
+            if (e.value.tasaBcv > 0) fechaIsoCF(e.value.momento): e.value.tasaBcv,
+        },
+        bcvActual: ConfigSistema.tasaCambio,
+        divisaSugeridaHoy: ConfigSistema.tasaBinance,
+      );
+
+  /// Ventas del período, cada una con las tasas de SU día.
   List<VentaAnalizada> ventasAnalizadas(DateTime desde, DateTime hasta) {
-    final t = tasas;
-    return [
-      for (final f in facturasCF)
-        if (enRangoCF(f.fecha, desde, hasta)) analizarFactura(f, t),
-    ];
+    final t = tasasPorDia;
+    return analizarFacturas(
+        facturasCF.where((f) => enRangoCF(f.fecha, desde, hasta)),
+        (d) => t.resolver(d).tasas);
+  }
+
+  /// Guarda (o borra, con 0) las tasas cargadas a mano para un día.
+  Future<void> guardarTasaDia(DateTime dia,
+      {required double divisa, required double bcv}) async {
+    final clave = claveTasasDiaMes(dia.year, dia.month);
+    final raw = await _Api.get('configuracion');
+    final fresco = raw is Map ? Map<String, dynamic>.from(raw) : config;
+    final actual = _cfDecodificar(fresco[clave]);
+    final mapa = actual is Map
+        ? Map<String, dynamic>.from(actual)
+        : <String, dynamic>{};
+    final reg = RegistroTasaDia(divisa: divisa, bcv: bcv).toJson();
+    if (reg.isEmpty) {
+      mapa.remove(fechaIsoCF(dia));
+    } else {
+      mapa[fechaIsoCF(dia)] = reg;
+    }
+    final txt = jsonEncode(mapa);
+    await _Api.post('configuracion', {clave: txt});
+    config = fresco..[clave] = txt;
+    _tasasCache = null;
+    notifyListeners();
   }
 
   /// Todos los registros JSON guardados bajo claves con [prefijo].
@@ -283,6 +556,8 @@ class _DatosFinanzasCF extends ChangeNotifier {
     final txt = jsonEncode(nuevo);
     await _Api.post('configuracion', {clave: txt});
     config = fresco..[clave] = txt;
+    // Lo releído puede traer tasas del día cargadas en otro equipo.
+    _tasasCache = null;
     notifyListeners();
   }
 
@@ -464,8 +739,11 @@ Widget _cfTarjeta(String titulo, IconData icon, Color color, Widget child,
     );
 
 /// Tabla que se desplaza horizontalmente si no cabe.
+/// [colores] (opcional) pinta el fondo de cada fila (null = sin color).
 Widget _cfTabla(List<String> columnas, List<List<Widget>> filas,
-        {Color color = AppColors.brandBlue, List<int> numericas = const []}) =>
+        {Color color = AppColors.brandBlue,
+        List<int> numericas = const [],
+        List<Color?>? colores}) =>
     SingleChildScrollView(
       scrollDirection: Axis.horizontal,
       child: DataTable(
@@ -483,7 +761,16 @@ Widget _cfTabla(List<String> columnas, List<List<Widget>> filas,
           for (var i = 0; i < columnas.length; i++)
             DataColumn(label: Text(columnas[i]), numeric: numericas.contains(i)),
         ],
-        rows: [for (final f in filas) DataRow(cells: [for (final c in f) DataCell(c)])],
+        rows: [
+          for (var i = 0; i < filas.length; i++)
+            DataRow(
+                color: (colores != null &&
+                        i < colores.length &&
+                        colores[i] != null)
+                    ? WidgetStateProperty.all(colores[i])
+                    : null,
+                cells: [for (final c in filas[i]) DataCell(c)]),
+        ],
       ),
     );
 
@@ -556,62 +843,187 @@ class _CfSelectorRango extends StatelessWidget {
   }
 }
 
-/// Tasas BCV / divisa editables (compartidas por los apartados).
-class _CfTasasEditor extends StatefulWidget {
+/// Tasas de cada día del período: la BCV (con su origen) y la divisa
+/// (USDT / paralelo) que carga el dueño. Los días con ventas y sin tasa
+/// divisa salen en rojo: el sistema no adivina la tasa de un día.
+class _CfTasasDelDia extends StatelessWidget {
   final _DatosFinanzasCF datos;
-  const _CfTasasEditor(this.datos);
-  @override
-  State<_CfTasasEditor> createState() => _CfTasasEditorState();
-}
+  final DateTime desde, hasta;
+  /// "AAAA-MM-DD" → cantidad de ventas de ese día.
+  final Map<String, int> ventasPorDia;
+  const _CfTasasDelDia({
+    required this.datos,
+    required this.desde,
+    required this.hasta,
+    required this.ventasPorDia,
+  });
 
-class _CfTasasEditorState extends State<_CfTasasEditor> {
-  late final TextEditingController _bcv, _div;
+  static String _tasa(double v) => v > 0 ? v.toStringAsFixed(2) : '—';
 
-  @override
-  void initState() {
-    super.initState();
-    _bcv = TextEditingController(
-        text: widget.datos.tasaBcv.toStringAsFixed(2));
-    _div = TextEditingController(
-        text: widget.datos.tasaDivisa.toStringAsFixed(2));
-  }
-
-  @override
-  void dispose() {
-    _bcv.dispose();
-    _div.dispose();
-    super.dispose();
-  }
-
-  Widget _campo(TextEditingController c, String label, String ayuda,
-          void Function(double) onOk) =>
-      SizedBox(
-        width: 220,
-        child: TextField(
-          controller: c,
-          keyboardType: const TextInputType.numberWithOptions(decimal: true),
-          decoration: InputDecoration(
-              labelText: label,
-              helperText: ayuda,
-              isDense: true,
-              border: const OutlineInputBorder()),
-          onSubmitted: (v) => onOk(double.tryParse(v.replaceAll(',', '.')) ?? 0),
-          onChanged: (v) {
-            final x = double.tryParse(v.replaceAll(',', '.'));
-            if (x != null && x > 0) onOk(x);
-          },
+  Future<void> _editar(BuildContext context, TasaDiaResuelta t) async {
+    final manual = TasasPorDia.leerManuales(datos.config, _cfDecodificar)[
+        fechaIsoCF(t.dia)];
+    final div = TextEditingController(
+        text: t.divisa > 0 ? t.divisa.toStringAsFixed(2) : '');
+    final bcv = TextEditingController(
+        text: (manual?.bcv ?? 0) > 0 ? manual!.bcv.toStringAsFixed(2) : '');
+    double leer(TextEditingController c) =>
+        double.tryParse(c.text.trim().replaceAll(',', '.')) ?? 0;
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text('Tasas del ${_cfFecha(t.dia)}'),
+        content: SingleChildScrollView(
+          child: Column(mainAxisSize: MainAxisSize.min, children: [
+            TextField(
+              controller: div,
+              autofocus: true,
+              keyboardType:
+                  const TextInputType.numberWithOptions(decimal: true),
+              decoration: const InputDecoration(
+                labelText: 'Tasa divisa del día (Bs por \$)',
+                helperText: 'A la que vendiste los Bs (USDT / paralelo)',
+                border: OutlineInputBorder(),
+              ),
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: bcv,
+              keyboardType:
+                  const TextInputType.numberWithOptions(decimal: true),
+              decoration: InputDecoration(
+                labelText: 'Tasa BCV del día (opcional)',
+                helperText: t.bcv > 0
+                    ? 'Vacío = ${t.bcv.toStringAsFixed(2)} (${t.fuenteBcv})'
+                    : 'Vacío = la automática',
+                border: const OutlineInputBorder(),
+              ),
+            ),
+          ]),
         ),
-      );
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('Cancelar')),
+          ElevatedButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text('Guardar')),
+        ],
+      ),
+    );
+    final vDiv = leer(div), vBcv = leer(bcv);
+    div.dispose();
+    bcv.dispose();
+    if (ok != true) return;
+    try {
+      await datos.guardarTasaDia(t.dia, divisa: vDiv, bcv: vBcv);
+    } catch (e) {
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+            content: Text('No se pudo guardar la tasa: $e'),
+            backgroundColor: AppColors.statusRed));
+      }
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
-    return Wrap(spacing: 12, runSpacing: 8, children: [
-      _campo(_bcv, 'Tasa BCV (Bs/\$)', 'A la que paga la financiadora',
-          (v) => widget.datos.cambiarTasas(bcv: v)),
-      _campo(_div, 'Tasa divisa / Binance (Bs/\$)',
-          'A la que conviertes los Bs a dólares',
-          (v) => widget.datos.cambiarTasas(divisa: v)),
-    ]);
+    // El día más reciente primero: es el que el dueño carga a diario.
+    final dias = datos.tasasPorDia.dias(desde, hasta).reversed.toList();
+    int ventas(TasaDiaResuelta t) => ventasPorDia[fechaIsoCF(t.dia)] ?? 0;
+    final faltan =
+        dias.where((t) => t.faltaDivisa && ventas(t) > 0).length;
+    final sugeridas =
+        dias.where((t) => t.divisaSugerida && ventas(t) > 0).length;
+    return _cfTarjeta(
+      'Tasas de cada día',
+      Icons.calendar_month,
+      Colors.teal,
+      Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+        const Text(
+            'Cada venta se calcula con las tasas de SU día. Toca un día para '
+            'cargar la tasa divisa (a la que vendiste los Bs). La BCV sale '
+            'sola (de la tabla BCV o de las ventas de ese día); puedes '
+            'corregirla si hace falta.',
+            style: TextStyle(fontSize: 11, color: AppColors.textSecondary)),
+        if (faltan > 0 || sugeridas > 0)
+          Container(
+            margin: const EdgeInsets.only(top: 6),
+            padding: const EdgeInsets.all(8),
+            decoration: BoxDecoration(
+              color: AppColors.statusRed.withValues(alpha: 0.08),
+              borderRadius: BorderRadius.circular(6),
+            ),
+            child: Text(
+              [
+                if (faltan > 0)
+                  'Falta la tasa divisa de $faltan día(s) con ventas: esas '
+                      'ventas se cuentan a precio de contado, sin diferencial.',
+                if (sugeridas > 0)
+                  'Hoy se está usando la tasa Binance configurada como '
+                      'sugerida: confírmala tocando el día.',
+              ].join('\n'),
+              style: const TextStyle(
+                  fontSize: 11.5,
+                  color: AppColors.statusRed,
+                  fontWeight: FontWeight.w600),
+            ),
+          ),
+        const SizedBox(height: 6),
+        _cfTabla(
+          ['Día', 'Ventas', 'Tasa BCV', 'Origen BCV', 'Tasa divisa', 'Estado',
+            ''],
+          [
+            for (final t in dias)
+              [
+                Text(_cfFecha(t.dia)),
+                Text('${ventas(t)}'),
+                Text(_tasa(t.bcv)),
+                Text(t.fuenteBcv.isEmpty ? '—' : t.fuenteBcv,
+                    style: const TextStyle(
+                        fontSize: 10.5, color: AppColors.textSecondary)),
+                Text(_tasa(t.divisa),
+                    style: const TextStyle(fontWeight: FontWeight.bold)),
+                Text(
+                  t.faltaDivisa
+                      ? (ventas(t) > 0
+                          ? 'Falta la tasa de este día'
+                          : 'Sin tasa (sin ventas)')
+                      : (t.divisaSugerida
+                          ? 'Sugerida (Binance): confírmala'
+                          : 'Cargada'),
+                  style: TextStyle(
+                      fontSize: 11,
+                      fontWeight: FontWeight.w600,
+                      color: t.faltaDivisa
+                          ? (ventas(t) > 0
+                              ? AppColors.statusRed
+                              : AppColors.textSecondary)
+                          : (t.divisaSugerida
+                              ? AppColors.statusOrange
+                              : AppColors.statusGreen)),
+                ),
+                IconButton(
+                  tooltip: 'Cargar tasas de este día',
+                  icon: const Icon(Icons.edit, size: 18),
+                  visualDensity: VisualDensity.compact,
+                  onPressed: () => _editar(context, t),
+                ),
+              ],
+          ],
+          color: Colors.teal,
+          numericas: const [1, 2, 4],
+          colores: [
+            for (final t in dias)
+              (t.faltaDivisa && ventas(t) > 0)
+                  ? AppColors.statusRed.withValues(alpha: 0.07)
+                  : (t.divisaSugerida
+                      ? AppColors.statusOrange.withValues(alpha: 0.07)
+                      : null),
+          ],
+        ),
+      ]),
+    );
   }
 }
 
@@ -661,7 +1073,8 @@ class _PanelEquilibrioCFState extends State<_PanelEquilibrioCF> {
               'Equilibrio = lo que GANAMOS cada día menos lo que GASTAMOS. '
               '"Hoy generamos 200, gastamos 50, quedamos en 150". La ganancia '
               'de cada venta es lo que entró en dólares (cobrado + lo que debe '
-              'la financiadora, convertido a divisa) menos el costo del equipo. '
+              'la financiadora, convertido a divisa con las tasas del día de '
+              'la venta, ver Ganancia real) menos el costo del equipo. '
               'Los gastos salen del apartado Gastos. Una tienda está en positivo '
               'cuando su ganancia acumulada cubre todos sus gastos del período.'),
           _CfSelectorRango(
@@ -780,15 +1193,86 @@ class _PanelGananciaRealCFState extends State<_PanelGananciaRealCF> {
     }
   }
 
-  List<Widget> _filaResumen(String nombre, ResumenGanancia r) => [
-        Text(nombre, style: const TextStyle(fontWeight: FontWeight.w600)),
+  static const _colsResumen = [
+    '', 'Equipos', 'Cobrado al cliente\n(en divisa)',
+    'Debe la financ.\n(\$ BCV)', 'Financiado\n(en divisa)',
+    'Ingreso real\n(\$)', 'Valor de\ncontado', 'Diferencial\ncambiario',
+    'Ganancia\nreal', 'Comisión financ.\n(informativa)',
+  ];
+  static const _numResumen = [1, 2, 3, 4, 5, 6, 7, 8, 9];
+
+  List<Widget> _filaResumen(String nombre, ResumenGanancia r,
+          {bool negrita = false}) =>
+      [
+        Text(r.sinTasa > 0 ? '$nombre  (${r.sinTasa} sin tasa)' : nombre,
+            style: TextStyle(
+                fontWeight: negrita ? FontWeight.bold : FontWeight.w600,
+                color: r.sinTasa > 0 ? AppColors.statusRed : null)),
         Text('${r.unidades}'),
         _cfNum(r.cobradoEnDivisa),
         _cfNum(r.financiadoBcv),
         _cfNum(r.financiadoEnDivisa),
+        _cfNum(r.ingresoEnDivisa, negrita: negrita),
         _cfNum(r.valorContado),
         _cfNum(r.diferencialCambiario, negrita: true),
+        _cfNum(r.gananciaReal, negrita: negrita),
+        _cfNum(r.comisionFinanciadora),
       ];
+
+  static String _origen(String o) => switch (o) {
+        origenPrecioFactura => 'de la factura',
+        origenPrecioHistorial => 'historial',
+        _ => 'actual',
+      };
+
+  /// Una fila por equipo: lo que el dueño compara con su Excel.
+  Widget _ventaPorVenta(List<VentaAnalizada> ventas) {
+    final ordenadas = [...ventas]..sort((a, b) => b.fecha.compareTo(a.fecha));
+    final filas = <List<Widget>>[];
+    final colores = <Color?>[];
+    for (final v in ordenadas) {
+      for (final e in v.equipos) {
+        filas.add([
+          Text(_cfFecha(v.fecha)),
+          Text(v.nroFactura, style: const TextStyle(fontSize: 10.5)),
+          Text(v.tienda),
+          Text(v.esFinanciada ? v.financiadora : 'Contado'),
+          Text(e.equipo.nombre.isEmpty ? e.equipo.codigo : e.equipo.nombre),
+          _cfNum(e.precioContado),
+          _cfNum(e.costo),
+          Text(e.equipo.precioFinanciadora == null || !v.esFinanciada
+              ? '—'
+              : formatCurrency(e.equipo.precioFinanciadora!)),
+          Text(v.faltaTasa
+              ? 'falta'
+              : '${v.tasaBcv.toStringAsFixed(2)} / '
+                  '${v.tasaDivisa.toStringAsFixed(2)}'),
+          _cfNum(e.ingresoEnDivisa),
+          _cfNum(e.diferencialCambiario, negrita: true),
+          _cfNum(e.gananciaReal),
+          _cfNum(e.gananciaTotal),
+          Text(_origen(e.equipo.origenPrecio),
+              style: TextStyle(
+                  fontSize: 10.5,
+                  color: e.equipo.origenPrecio == origenPrecioActual
+                      ? AppColors.statusOrange
+                      : AppColors.textSecondary)),
+        ]);
+        colores.add(
+            v.faltaTasa ? AppColors.statusRed.withValues(alpha: 0.07) : null);
+      }
+    }
+    return _cfTabla(
+      ['Día', 'Factura', 'Tienda', 'Financiadora', 'Equipo',
+        'Precio\ncontado', 'Costo', 'Precio\nfinanc.', 'Tasa BCV /\ndivisa',
+        'Ingreso\nreal \$', 'Diferencial', 'Ganancia\nreal',
+        'Ganancia\ntotal', 'Precio'],
+      filas,
+      color: Colors.indigo,
+      numericas: const [5, 6, 7, 9, 10, 11, 12],
+      colores: colores,
+    );
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -800,9 +1284,11 @@ class _PanelGananciaRealCFState extends State<_PanelGananciaRealCF> {
         final total = totalGanancias(ventas);
         final porFin = agruparGanancias(
             ventas, (v) => v.esFinanciada ? v.financiadora : 'De contado');
-        final financiadas = ventas.where((v) => v.esFinanciada).toList();
-        final porDia = agruparGanancias(financiadas, (v) => fechaIsoCF(v.fecha));
+        final porDia = agruparGanancias(ventas, (v) => fechaIsoCF(v.fecha));
         final diasOrden = porDia.keys.toList()..sort();
+        final ventasPorDia = {
+          for (final e in porDia.entries) e.key: e.value.facturas,
+        };
         final porTienda = agruparGanancias(ventas, (v) => v.tienda);
         final gastos = d.gastosEntre(_desde, _hasta);
         double gastosDe(String t) => gastos
@@ -811,24 +1297,28 @@ class _PanelGananciaRealCFState extends State<_PanelGananciaRealCF> {
         final gastosTotal =
             gastos.fold<double>(0, (s, g) => s + g.montoUsd);
         final tiendas = d.tiendas(porTienda.keys);
-        const colsDif = [
-          '', 'Equipos', 'Cobrado al cliente\n(en divisa)',
-          'Debe la financ.\n(\$ BCV)', 'Financiado\n(en divisa)',
-          'Valor de\ncontado', 'Diferencial\ncambiario',
-        ];
+        final sinHistorial = ventas
+            .expand((v) => v.equipos)
+            .where((e) => e.equipo.origenPrecio == origenPrecioActual)
+            .length;
 
         return _cfContenedor([
           _cfAyuda(
-              'GANANCIA REAL = precio de CONTADO − costo, como si toda venta '
-              'fuera de contado (equipo de costo 100, de contado 120, vendido '
-              'financiado en 140: la ganancia real es 20, no 40).\n'
-              'DIFERENCIAL CAMBIARIO = lo que entró de verdad en dólares − el '
-              'valor de contado: iniciales convertidas a divisa + lo que paga la '
-              'financiadora convertido a divisa (paga en Bs a tasa BCV: \$1000 '
-              'pueden ser 850) − valor de contado de esos equipos.\n'
-              'Precio de contado y costo salen del inventario; lo que debe la '
-              'financiadora sale de su lista de precios (igual que el Reporte '
-              'por Financiadora).'),
+              'Se calcula VENTA POR VENTA con las tasas de SU día, como en tu '
+              'Excel.\n'
+              'GANANCIA REAL = precio de CONTADO − costo (contado 100, costo 88: '
+              'ganancia real 12).\n'
+              'INGRESO REAL = lo que de verdad entró en dólares: los Bs cobrados '
+              '÷ tasa divisa del día; los \$ tal cual; y lo que debe la '
+              'financiadora (su lista − la inicial, en \$ BCV) × BCV del día ÷ '
+              'tasa divisa del día. Ej.: lista Krece 127, inicial 38 a 879 = '
+              '33.402 Bs ÷ 1015 = 32,91; Krece debe 89 × 879 ÷ 1015 = 77,07; '
+              'ingreso real 109,98.\n'
+              'DIFERENCIAL CAMBIARIO = ingreso real − precio de contado '
+              '(109,98 − 100 = 9,98). La comisión de la financiadora no se '
+              'descuenta: sale aparte como dato.\n'
+              'Precio y costo son los del DÍA DE LA VENTA (los guardados con la '
+              'factura o el historial de precios), no los de hoy.'),
           _CfSelectorRango(
               desde: _desde,
               hasta: _hasta,
@@ -837,42 +1327,113 @@ class _PanelGananciaRealCFState extends State<_PanelGananciaRealCF> {
                     _hasta = b;
                   })),
           const SizedBox(height: 8),
-          _CfTasasEditor(d),
-          const SizedBox(height: 10),
           _cfKpis([
             _cfKpi('Ganancia real (contado − costo)',
                 formatCurrency(total.gananciaReal), AppColors.statusGreen,
                 sub: '${total.unidades} equipos/artículos'),
             _cfKpi('Diferencial cambiario',
                 formatCurrency(total.diferencialCambiario), Colors.indigo,
-                sub: 'financiamiento y tasa'),
+                sub: total.sinTasa > 0
+                    ? '${total.sinTasa} venta(s) sin tasa del día'
+                    : 'financiamiento y tasa'),
             _cfKpi('Ganancia total', formatCurrency(total.gananciaTotal),
                 AppColors.brandBlue,
                 sub: 'real + diferencial'),
+            _cfKpi('Ingreso real en \$', formatCurrency(total.ingresoEnDivisa),
+                Colors.teal,
+                sub: 'contado: ${formatCurrency(total.valorContado)}'),
             _cfKpi('Costo de lo vendido', formatCurrency(total.costo),
                 Colors.deepOrange),
+            _cfKpi('Comisión financiadoras',
+                formatCurrency(total.comisionFinanciadora),
+                AppColors.textSecondary,
+                sub: 'informativa: no se descuenta'),
           ]),
+          if (sinHistorial > 0)
+            Padding(
+              padding: const EdgeInsets.only(top: 6),
+              child: Text(
+                  '$sinHistorial equipo(s) vendidos antes de que el sistema '
+                  'guardara los precios usan el precio ACTUAL del inventario '
+                  '(columna "Precio" = actual). Desde ahora cada factura guarda '
+                  'sus precios y cada cambio de precio queda en el historial.',
+                  style: const TextStyle(
+                      fontSize: 11, color: AppColors.statusOrange)),
+            ),
+          if (total.sinTasa > 0)
+            Container(
+              margin: const EdgeInsets.only(top: 6),
+              padding: const EdgeInsets.all(8),
+              decoration: BoxDecoration(
+                color: AppColors.statusRed.withValues(alpha: 0.08),
+                borderRadius: BorderRadius.circular(6),
+              ),
+              child: Text(
+                  '${total.sinTasa} venta(s) son de días sin tasa divisa: van a '
+                  'precio de contado, sin diferencial. Carga esas tasas en '
+                  '"Tasas de cada día" (más abajo).',
+                  style: const TextStyle(
+                      fontSize: 11.5,
+                      color: AppColors.statusRed,
+                      fontWeight: FontWeight.w600)),
+            ),
           _cfTarjeta(
             'Diferencial por financiadora',
             Icons.currency_exchange,
             Colors.indigo,
-            _cfTabla(colsDif, [
+            _cfTabla(_colsResumen.map((c) => c.isEmpty ? 'Financiadora' : c).toList(), [
               for (final e in porFin.entries) _filaResumen(e.key, e.value),
-              _filaResumen('TOTAL', total),
-            ], color: Colors.indigo, numericas: const [1, 2, 3, 4, 5, 6]),
+              _filaResumen('TOTAL', total, negrita: true),
+            ], color: Colors.indigo, numericas: _numResumen),
           ),
+          _CfTasasDelDia(
+              datos: d,
+              desde: _desde,
+              hasta: _hasta,
+              ventasPorDia: ventasPorDia),
           _cfTarjeta(
-            'Diferencial día por día (ventas financiadas)',
+            'Día por día',
             Icons.calendar_view_day,
             Colors.indigo,
             diasOrden.isEmpty
-                ? const Text('No hay ventas financiadas en el período.')
-                : _cfTabla(colsDif.map((c) => c.isEmpty ? 'Día' : c).toList(), [
+                ? const Text('No hay ventas en el período.')
+                : _cfTabla(_colsResumen.map((c) => c.isEmpty ? 'Día' : c).toList(), [
                     for (final k in diasOrden)
                       _filaResumen(
                           _cfFecha(parseFechaCF(k) ?? DateTime(2000)),
                           porDia[k]!),
-                  ], color: Colors.indigo, numericas: const [1, 2, 3, 4, 5, 6]),
+                  ], color: Colors.indigo, numericas: _numResumen),
+          ),
+          _cfTarjeta(
+            'Por tienda',
+            Icons.storefront,
+            Colors.indigo,
+            _cfTabla(_colsResumen.map((c) => c.isEmpty ? 'Tienda' : c).toList(), [
+              for (final t in tiendas)
+                if (porTienda[t] != null) _filaResumen(t, porTienda[t]!),
+              _filaResumen('TODAS', total, negrita: true),
+            ], color: Colors.indigo, numericas: _numResumen),
+          ),
+          Card(
+            margin: const EdgeInsets.symmetric(vertical: 6),
+            child: ExpansionTile(
+              leading: const Icon(Icons.receipt_long, color: Colors.indigo),
+              title: Text('Venta por venta (${ventas.length} facturas)',
+                  style: const TextStyle(
+                      fontSize: 14, fontWeight: FontWeight.bold)),
+              subtitle: const Text(
+                  'Cada equipo con su precio de contado, costo, ingreso real, '
+                  'diferencial y ganancia, para compararlo con tu Excel.',
+                  style: TextStyle(fontSize: 11)),
+              children: [
+                Padding(
+                  padding: const EdgeInsets.all(8),
+                  child: ventas.isEmpty
+                      ? const Text('No hay ventas en el período.')
+                      : _ventaPorVenta(ventas),
+                ),
+              ],
+            ),
           ),
           _cfTarjeta(
             'Balance neto por tienda',
@@ -881,7 +1442,9 @@ class _PanelGananciaRealCFState extends State<_PanelGananciaRealCF> {
             Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
               const Text(
                   'Ventas cobradas en divisa + montos financiados − costo de '
-                  'los equipos − gastos de la tienda.',
+                  'los equipos − gastos de la tienda. Cada venta se convierte '
+                  'con las tasas de su día; las que no tienen tasa van a precio '
+                  'de contado.',
                   style: TextStyle(fontSize: 11, color: AppColors.textSecondary)),
               const SizedBox(height: 6),
               _cfTabla(
@@ -894,7 +1457,7 @@ class _PanelGananciaRealCFState extends State<_PanelGananciaRealCF> {
                       final g = gastosDe(t);
                       return [
                         Text(t),
-                        _cfNum(r.cobradoEnDivisa),
+                        _cfNum(r.cobradoEnDivisa + r.contadoSinTasa),
                         _cfNum(r.financiadoEnDivisa),
                         _cfNum(r.costo),
                         _cfNum(g),
@@ -910,7 +1473,8 @@ class _PanelGananciaRealCFState extends State<_PanelGananciaRealCF> {
                     ],
                   [
                     const Text('TODAS', style: TextStyle(fontWeight: FontWeight.bold)),
-                    _cfNum(total.cobradoEnDivisa, negrita: true),
+                    _cfNum(total.cobradoEnDivisa + total.contadoSinTasa,
+                        negrita: true),
                     _cfNum(total.financiadoEnDivisa, negrita: true),
                     _cfNum(total.costo, negrita: true),
                     _cfNum(gastosTotal, negrita: true),

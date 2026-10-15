@@ -12,8 +12,9 @@
 //      financiamiento / la tasa y son DIFERENCIAL CAMBIARIO, que se
 //      reporta aparte.
 //
-//      Cómo lo calcula el dueño con Krece:
-//        iniciales del día convertidas a divisa
+//      Cómo lo calcula el dueño con Krece, VENTA POR VENTA y con las
+//      tasas BCV y divisa DE ESE DÍA (ver sección 1):
+//        inicial convertida a divisa
 //      + lo que debe la financiadora convertido a divisa (paga en Bs a
 //        tasa BCV: "me pagaron $1000, convertido son 850")
 //      − valor de contado de los equipos
@@ -21,7 +22,8 @@
 //
 //   2. BALANCE NETO POR TIENDA
 //        ventas cobradas en divisa + montos financiados
-//      − costo de los equipos − gastos de la tienda.
+//      − costo de los equipos − gastos de la tienda
+//      (cada venta convertida con las tasas de su día).
 //
 //   3. EQUILIBRIO DIARIO ("hoy generamos 200, gastamos 50, quedamos en
 //      150") y el día del mes en que cada tienda cubre sus gastos.
@@ -69,30 +71,70 @@ String fechaIsoCF(DateTime d) =>
 // ════════════════════════════════════════════════════════════════════
 //  1. VENTAS: GANANCIA REAL Y DIFERENCIAL CAMBIARIO
 // ════════════════════════════════════════════════════════════════════
+//  Se calcula VENTA POR VENTA con las tasas DEL DÍA de cada venta, como
+//  lo hace el dueño en su Excel. Antes se usaba UNA sola tasa divisa
+//  (Binance) para todo el período y en ventas de contado salían
+//  diferenciales raros (~$7, 12-14 %): una venta de hace tres semanas
+//  se convertía con la tasa de hoy.
+//
+//  Ejemplo del dueño (financiada con Krece): contado $100, costo $88,
+//  lista Krece $127. Inicial $38 BCV pagada en Bs a 879 = 33.402 Bs →
+//  a la tasa divisa del día (1015) son $32,91 reales. Krece debe
+//  127 − 38 = $89 BCV y los paga en Bs a BCV: 89 × 879 = 78.231 Bs →
+//  ÷ 1015 = $77,07 reales. Ingreso real $109,98; diferencial
+//  109,98 − 100 = $9,98; ganancia real 100 − 88 = $12.
+//
+//  Contado pagado en Bs: precio BCV $120 cobrado a 879 = 105.480 Bs →
+//  ÷ 1015 = $103,92 reales → diferencial $3,92. Contado en $ efectivo:
+//  entra lo cobrado tal cual (diferencial normalmente 0).
+//
+//  Lo que la plataforma debe es la fórmula del dueño: precio de su
+//  lista − inicial, SIN descontar comisión. La comisión de la
+//  financiadora (Cashea/Weppa) se informa aparte en
+//  [VentaAnalizada.comisionFinanciadora] y no se mezcla con el
+//  diferencial.
+//
+//  Si un día no tiene tasa divisa cargada NO se adivina: la venta se
+//  marca [VentaAnalizada.faltaTasa] y se cuenta a precio de contado
+//  (diferencial 0) hasta que el dueño cargue la tasa de ese día.
+// ════════════════════════════════════════════════════════════════════
 
-/// Un equipo o artículo vendido, con los precios del catálogo.
+/// De dónde salió el precio/costo con que se analizó un equipo.
+const String origenPrecioFactura = 'factura';
+const String origenPrecioHistorial = 'historial';
+const String origenPrecioActual = 'actual';
+
+/// Un equipo o artículo vendido, con los precios VIGENTES el día de la
+/// venta (los guardados con la factura; si no, los del historial de
+/// precios; y si no hay historial, los actuales del catálogo).
 class EquipoVendidoCF {
   final String codigo;
   final String imei;
-  /// Costo del producto (precio de costo del catálogo).
+  final String nombre;
+  /// Costo del producto el día de la venta.
   final double costo;
-  /// Precio de contado / divisa (precio de venta del catálogo).
+  /// Precio de contado / divisa el día de la venta.
   final double precioContado;
   /// Precio en la lista de la financiadora (la "Base" sobre la que la
   /// financiadora le paga a la tienda). null = venta de contado o sin
   /// lista: se usa el de contado.
   final double? precioFinanciadora;
+  /// [origenPrecioFactura], [origenPrecioHistorial] u [origenPrecioActual].
+  final String origenPrecio;
   const EquipoVendidoCF({
     this.codigo = '',
     this.imei = '',
+    this.nombre = '',
     required this.costo,
     required this.precioContado,
     this.precioFinanciadora,
+    this.origenPrecio = origenPrecioActual,
   });
 }
 
 /// Un pago que hizo el CLIENTE en la factura.
 class PagoClienteCF {
+  /// Monto en SU moneda: Bs si [enBolivares], si no $.
   final double monto;
   /// true si el método es en bolívares (Pago Móvil, Punto, etc.).
   final bool enBolivares;
@@ -113,6 +155,7 @@ class PagoClienteCF {
 class FacturaCF {
   final String nroFactura;
   final String tienda;
+  /// Día de la venta (para agrupar y para buscar las tasas del día).
   final DateTime fecha;
   final List<EquipoVendidoCF> equipos;
   final List<PagoClienteCF> pagos;
@@ -135,36 +178,60 @@ class FacturaCF {
   bool get esFinanciada => financiadora.isNotEmpty;
 }
 
-/// Tasas con que se convierte todo a divisa.
-///   · [tasaBcv]: la tasa oficial a la que la financiadora paga en Bs.
-///   · [tasaDivisa]: la tasa a la que el dueño convierte los Bs a
-///     dólares reales (Binance). Si es 0 se usa la del pago (BCV).
+/// Tasas DEL DÍA de una venta.
+///   · [tasaBcv]: la oficial, a la que la financiadora paga en Bs.
+///   · [tasaDivisa]: a la que el dueño vende los Bs para tener dólares
+///     reales (USDT / paralelo). 0 = no se cargó: no se adivina.
 class TasasCF {
   final double tasaBcv;
   final double tasaDivisa;
   const TasasCF({required this.tasaBcv, required this.tasaDivisa});
 
-  /// Cuántos dólares reales vale 1 dólar BCV: "me pagaron $1000,
-  /// convertido son 850" → 0,85. 1 si falta alguna tasa.
+  /// Cuántos dólares reales vale 1 dólar BCV (879 / 1015 = 0,866).
+  /// 0 si falta alguna tasa.
   double get factorBcvADivisa =>
-      (tasaBcv > 0 && tasaDivisa > 0) ? tasaBcv / tasaDivisa : 1.0;
+      (tasaBcv > 0 && tasaDivisa > 0) ? tasaBcv / tasaDivisa : 0;
 
-  /// Bs → divisa. Usa la tasa divisa; si no hay, la del pago.
-  double bsADivisa(double bs, {double tasaPago = 0}) {
-    if (tasaDivisa > 0) return bs / tasaDivisa;
-    if (tasaPago > 0) return bs / tasaPago;
-    if (tasaBcv > 0) return bs / tasaBcv;
-    return 0;
-  }
+  /// Bs → dólares reales con la tasa divisa del día (0 si no hay).
+  double bsADivisa(double bs) => tasaDivisa > 0 ? bs / tasaDivisa : 0;
 }
 
-/// Resultado de analizar una factura.
+/// Un equipo dentro de una venta analizada: lo que el dueño compara
+/// renglón por renglón con su Excel.
+class EquipoAnalizado {
+  final EquipoVendidoCF equipo;
+  /// Lo que debe la financiadora por este equipo, en $ BCV.
+  final double financiadoBcv;
+  /// Parte de la inicial que le toca a este equipo, en $ BCV.
+  final double inicialBcv;
+  /// Comisión que cobraría la financiadora (solo informativa).
+  final double comision;
+  /// Lo que entró en dólares reales por este equipo.
+  final double ingresoEnDivisa;
+  const EquipoAnalizado({
+    required this.equipo,
+    required this.financiadoBcv,
+    required this.inicialBcv,
+    required this.comision,
+    required this.ingresoEnDivisa,
+  });
+  double get costo => equipo.costo;
+  double get precioContado => equipo.precioContado;
+  double get gananciaReal => precioContado - costo;
+  double get diferencialCambiario => ingresoEnDivisa - precioContado;
+  double get gananciaTotal => ingresoEnDivisa - costo;
+}
+
+/// Resultado de analizar una factura con las tasas de su día.
 class VentaAnalizada {
   final String nroFactura;
   final String tienda;
   final DateTime fecha;
   final String financiadora;
   final int unidades;
+  /// Tasas con que se analizó (las del día de la venta).
+  final double tasaBcv;
+  final double tasaDivisa;
   /// Σ costo de los equipos.
   final double costo;
   /// Σ precio de contado de los equipos.
@@ -173,12 +240,20 @@ class VentaAnalizada {
   final double cobradoUsd;
   /// Pagos del cliente en Bs (sin convertir).
   final double cobradoBs;
-  /// Pagos del cliente convertidos a divisa.
+  /// Pagos del cliente convertidos a dólares reales (0 en la parte Bs
+  /// si falta la tasa divisa del día).
   final double cobradoEnDivisa;
-  /// Lo que debe la financiadora en $ BCV (base − inicial − comisión).
+  /// Lo que debe la financiadora en $ BCV (precio de su lista − inicial).
   final double financiadoBcv;
-  /// Lo que debe la financiadora convertido a divisa.
+  /// Lo que debe la financiadora convertido a dólares reales.
   final double financiadoEnDivisa;
+  /// Comisión de la financiadora (Cashea/Weppa). Solo informativa: el
+  /// dueño mide el diferencial sin descontarla.
+  final double comisionFinanciadora;
+  /// true si al día de la venta le falta la tasa divisa (o la BCV para
+  /// convertir lo que paga la financiadora): no se calcula diferencial.
+  final bool faltaTasa;
+  final List<EquipoAnalizado> equipos;
 
   const VentaAnalizada({
     required this.nroFactura,
@@ -186,6 +261,8 @@ class VentaAnalizada {
     required this.fecha,
     required this.financiadora,
     required this.unidades,
+    this.tasaBcv = 0,
+    this.tasaDivisa = 0,
     required this.costo,
     required this.valorContado,
     required this.cobradoUsd,
@@ -193,28 +270,31 @@ class VentaAnalizada {
     required this.cobradoEnDivisa,
     required this.financiadoBcv,
     required this.financiadoEnDivisa,
+    this.comisionFinanciadora = 0,
+    this.faltaTasa = false,
+    this.equipos = const [],
   });
 
   bool get esFinanciada => financiadora.isNotEmpty;
 
-  /// Todo lo que entra por la venta, en dólares reales.
-  double get ingresoEnDivisa => cobradoEnDivisa + financiadoEnDivisa;
+  /// Todo lo que entra por la venta, en dólares reales. Sin tasa del
+  /// día se cuenta el valor de contado (no se inventa un diferencial).
+  double get ingresoEnDivisa =>
+      faltaTasa ? valorContado : cobradoEnDivisa + financiadoEnDivisa;
 
   /// Ganancia REAL: como si se hubiera vendido de contado.
   double get gananciaReal => valorContado - costo;
 
-  /// Lo que sobra (o falta) por financiamiento y tasa.
+  /// Lo que sobra (o falta) por financiamiento y tasa, comparado
+  /// SIEMPRE contra el precio de contado en divisa.
   double get diferencialCambiario => ingresoEnDivisa - valorContado;
 
   /// Ganancia total = real + diferencial = ingreso real − costo.
   double get gananciaTotal => ingresoEnDivisa - costo;
 }
 
-/// Analiza una factura: separa ganancia real y diferencial cambiario.
-///
-/// La deuda de la financiadora se calcula igual que en el Reporte por
-/// Financiadora (`calcularDeudaFactura`): base de su lista − inicial del
-/// cliente (en $ BCV) − comisión de la financiadora.
+/// Analiza una factura con las tasas de SU día: separa ganancia real y
+/// diferencial cambiario, y lo reparte por equipo.
 VentaAnalizada analizarFactura(FacturaCF f, TasasCF tasas) {
   double costo = 0, contado = 0, cobUsd = 0, cobBs = 0, cobDiv = 0;
   for (final e in f.equipos) {
@@ -224,19 +304,20 @@ VentaAnalizada analizarFactura(FacturaCF f, TasasCF tasas) {
   for (final p in f.pagos) {
     if (p.enBolivares) {
       cobBs += p.monto;
-      cobDiv += tasas.bsADivisa(p.monto, tasaPago: p.tasa);
+      cobDiv += tasas.bsADivisa(p.monto);
     } else {
       cobUsd += p.monto;
       cobDiv += p.monto;
     }
   }
 
-  double financiadoBcv = 0;
   final fin = f.financiadora;
-  if (fin.isNotEmpty && f.equipos.isNotEmpty) {
-    // Inicial en $ BCV (tasa histórica de cada pago), como la cuenta
-    // con la financiadora: si hay pagos marcados como inicial, solo
-    // esos; si no, todos los pagos del cliente son la inicial.
+  final financiada = fin.isNotEmpty && f.equipos.isNotEmpty;
+  List<EquipoFinanciado> cuentas = const [];
+  if (financiada) {
+    // Inicial en $ BCV: los Bs a la tasa con que se cobraron (la BCV de
+    // ese momento); los $ tal cual. Si hay pagos marcados como inicial,
+    // solo esos; si no, todos los pagos del cliente son la inicial.
     final hayMarcados = f.pagos.any((p) => p.esInicial);
     double inicial = 0;
     for (final p in f.pagos) {
@@ -248,7 +329,7 @@ VentaAnalizada analizarFactura(FacturaCF f, TasasCF tasas) {
         inicial += p.monto;
       }
     }
-    final cuentas = [
+    cuentas = [
       for (final e in f.equipos)
         EquipoFinanciado(
           financiadora: fin,
@@ -258,8 +339,46 @@ VentaAnalizada analizarFactura(FacturaCF f, TasasCF tasas) {
           codigo: e.codigo,
         ),
     ];
+    // Reparte la inicial por equipo (y calcula la comisión de cada uno,
+    // que aquí solo se informa).
     calcularDeudaFactura(cuentas, redondearCentavos(inicial));
-    financiadoBcv = cuentas.fold<double>(0, (s, c) => s + c.deuda);
+  }
+
+  // Fórmula del dueño: lo que debe la plataforma = lista − inicial.
+  double netoDe(EquipoFinanciado c) =>
+      (c.base - c.inicial).clamp(0.0, double.infinity).toDouble();
+  final financiadoBcv = cuentas.fold<double>(0, (s, c) => s + netoDe(c));
+  final comision = cuentas.fold<double>(0, (s, c) => s + c.comision);
+
+  // ¿Faltan tasas? Hacen falta si entraron Bs o si la financiadora
+  // (que paga en Bs a BCV) debe algo.
+  final faltaDivisa =
+      (cobBs > 0 || financiadoBcv > 0) && tasas.tasaDivisa <= 0;
+  final faltaBcv = financiadoBcv > 0 && tasas.tasaBcv <= 0;
+  final faltaTasa = faltaDivisa || faltaBcv;
+  final factor = tasas.factorBcvADivisa;
+
+  // Reparto por equipo: lo cobrado al cliente en proporción a la base
+  // de cada equipo (lista de la financiadora o precio de contado).
+  final pesos = [
+    for (var i = 0; i < f.equipos.length; i++)
+      financiada ? cuentas[i].base : f.equipos[i].precioContado,
+  ];
+  final sumaPesos = pesos.fold<double>(0, (s, x) => s + x);
+  final equipos = <EquipoAnalizado>[];
+  for (var i = 0; i < f.equipos.length; i++) {
+    final e = f.equipos[i];
+    final parte =
+        sumaPesos > 0 ? pesos[i] / sumaPesos : 1 / f.equipos.length;
+    final finBcv = financiada ? netoDe(cuentas[i]) : 0.0;
+    equipos.add(EquipoAnalizado(
+      equipo: e,
+      financiadoBcv: finBcv,
+      inicialBcv: financiada ? cuentas[i].inicial : 0,
+      comision: financiada ? cuentas[i].comision : 0,
+      ingresoEnDivisa:
+          faltaTasa ? e.precioContado : cobDiv * parte + finBcv * factor,
+    ));
   }
 
   return VentaAnalizada(
@@ -268,20 +387,32 @@ VentaAnalizada analizarFactura(FacturaCF f, TasasCF tasas) {
     fecha: f.fecha,
     financiadora: fin,
     unidades: f.equipos.length,
+    tasaBcv: tasas.tasaBcv,
+    tasaDivisa: tasas.tasaDivisa,
     costo: costo,
     valorContado: contado,
     cobradoUsd: cobUsd,
     cobradoBs: cobBs,
     cobradoEnDivisa: cobDiv,
     financiadoBcv: financiadoBcv,
-    financiadoEnDivisa: financiadoBcv * tasas.factorBcvADivisa,
+    financiadoEnDivisa: financiadoBcv * factor,
+    comisionFinanciadora: comision,
+    faltaTasa: faltaTasa,
+    equipos: equipos,
   );
 }
 
-/// Totales de un grupo de ventas (una tienda, una financiadora, todo).
+/// Analiza cada factura con las tasas de su día ([tasasDe]).
+List<VentaAnalizada> analizarFacturas(Iterable<FacturaCF> facturas,
+        TasasCF Function(DateTime dia) tasasDe) =>
+    [for (final f in facturas) analizarFactura(f, tasasDe(f.fecha))];
+
+/// Totales de un grupo de ventas (una tienda, una financiadora, un día).
 class ResumenGanancia {
   int facturas = 0;
   int unidades = 0;
+  /// Ventas sin la tasa del día (contadas a precio de contado).
+  int sinTasa = 0;
   double costo = 0;
   double valorContado = 0;
   double cobradoUsd = 0;
@@ -289,6 +420,10 @@ class ResumenGanancia {
   double cobradoEnDivisa = 0;
   double financiadoBcv = 0;
   double financiadoEnDivisa = 0;
+  double comisionFinanciadora = 0;
+  /// Valor de contado de las ventas sin tasa (entran como ingreso SIN
+  /// diferencial hasta que se cargue la tasa del día).
+  double contadoSinTasa = 0;
 
   void sumar(VentaAnalizada v) {
     facturas++;
@@ -297,21 +432,28 @@ class ResumenGanancia {
     valorContado += v.valorContado;
     cobradoUsd += v.cobradoUsd;
     cobradoBs += v.cobradoBs;
-    cobradoEnDivisa += v.cobradoEnDivisa;
+    comisionFinanciadora += v.comisionFinanciadora;
     financiadoBcv += v.financiadoBcv;
-    financiadoEnDivisa += v.financiadoEnDivisa;
+    if (v.faltaTasa) {
+      sinTasa++;
+      contadoSinTasa += v.valorContado;
+    } else {
+      cobradoEnDivisa += v.cobradoEnDivisa;
+      financiadoEnDivisa += v.financiadoEnDivisa;
+    }
   }
 
-  double get ingresoEnDivisa => cobradoEnDivisa + financiadoEnDivisa;
+  double get ingresoEnDivisa =>
+      cobradoEnDivisa + financiadoEnDivisa + contadoSinTasa;
   double get gananciaReal => valorContado - costo;
   double get diferencialCambiario => ingresoEnDivisa - valorContado;
   double get gananciaTotal => ingresoEnDivisa - costo;
 
   /// Balance neto del dueño: ventas en divisa + montos financiados −
-  /// costo de los equipos − gastos.
-  double balanceNeto(double gastosUsd) =>
-      balanceNetoTienda(
-        ventasDivisa: cobradoEnDivisa,
+  /// costo de los equipos − gastos (cada venta convertida con las
+  /// tasas de SU día).
+  double balanceNeto(double gastosUsd) => balanceNetoTienda(
+        ventasDivisa: cobradoEnDivisa + contadoSinTasa,
         montosFinanciados: financiadoEnDivisa,
         costoEquipos: costo,
         gastos: gastosUsd,
@@ -327,7 +469,7 @@ double balanceNetoTienda({
 }) =>
     ventasDivisa + montosFinanciados - costoEquipos - gastos;
 
-/// Agrupa ventas por una clave (tienda, financiadora…).
+/// Agrupa ventas por una clave (tienda, financiadora, día…).
 Map<String, ResumenGanancia> agruparGanancias(
     Iterable<VentaAnalizada> ventas, String Function(VentaAnalizada) clave) {
   final r = <String, ResumenGanancia>{};
@@ -341,6 +483,182 @@ ResumenGanancia totalGanancias(Iterable<VentaAnalizada> ventas) {
   final r = ResumenGanancia();
   for (final v in ventas) {
     r.sumar(v);
+  }
+  return r;
+}
+
+// ── Tasas de cada día ───────────────────────────────────────────────
+//  La tasa divisa (USDT / paralelo) la carga el dueño día por día; se
+//  guarda en `configuracion`, una clave por mes (`cf_tasas_dia_AAAA_MM`)
+//  con un mapa "AAAA-MM-DD" → {"d": divisa, "b": bcv}. La BCV también
+//  se puede corregir a mano; si no, sale de la tabla `tasa_bcv`, de las
+//  ventas de ese día (la tasa con que se cobró) o de la más reciente
+//  anterior. La divisa NUNCA se arrastra de otro día: si falta, falta.
+
+/// Clave de `configuracion` con las tasas cargadas de un mes.
+String claveTasasDiaMes(int anio, int mes) =>
+    'cf_tasas_dia_${anio}_${mes.toString().padLeft(2, '0')}';
+
+/// Lo que el dueño cargó a mano para un día (0 = no cargó esa tasa).
+class RegistroTasaDia {
+  final double divisa;
+  final double bcv;
+  const RegistroTasaDia({this.divisa = 0, this.bcv = 0});
+  factory RegistroTasaDia.fromJson(dynamic m) => m is Map
+      ? RegistroTasaDia(divisa: _num(m['d']), bcv: _num(m['b']))
+      : RegistroTasaDia(divisa: _num(m));
+  Map<String, dynamic> toJson() => {
+        if (divisa > 0) 'd': divisa,
+        if (bcv > 0) 'b': bcv,
+      };
+}
+
+const String fuenteBcvManual = 'cargada a mano';
+const String fuenteBcvTabla = 'BCV del día';
+const String fuenteBcvVentas = 'de las ventas del día';
+const String fuenteBcvAnterior = 'la del día anterior';
+const String fuenteBcvActual = 'la actual del sistema';
+
+/// Tasas de un día ya resueltas, con su origen.
+class TasaDiaResuelta {
+  final DateTime dia;
+  final double bcv;
+  final String fuenteBcv;
+  final double divisa;
+  /// true = la cargó el dueño; false = sugerida (Binance) o falta.
+  final bool divisaConfirmada;
+  const TasaDiaResuelta({
+    required this.dia,
+    required this.bcv,
+    required this.fuenteBcv,
+    required this.divisa,
+    required this.divisaConfirmada,
+  });
+  bool get faltaDivisa => divisa <= 0;
+  bool get divisaSugerida => divisa > 0 && !divisaConfirmada;
+  TasasCF get tasas => TasasCF(tasaBcv: bcv, tasaDivisa: divisa);
+}
+
+/// Resuelve las tasas de cada día a partir de lo cargado a mano, la
+/// tabla BCV y las tasas con que se cobraron las ventas. Las claves de
+/// los mapas son fechas "AAAA-MM-DD".
+class TasasPorDia {
+  final Map<String, RegistroTasaDia> manuales;
+  final Map<String, double> bcvTabla;
+  final Map<String, double> bcvVentas;
+  /// BCV actual del sistema (para hoy, si no hay otra).
+  final double bcvActual;
+  /// Tasa Binance que el dueño tiene configurada: solo se SUGIERE para
+  /// hoy (no se sabe a qué día corresponde una tasa vieja).
+  final double divisaSugeridaHoy;
+  final DateTime hoy;
+  final List<String> _diasBcv;
+
+  TasasPorDia({
+    this.manuales = const {},
+    this.bcvTabla = const {},
+    this.bcvVentas = const {},
+    this.bcvActual = 0,
+    this.divisaSugeridaHoy = 0,
+    DateTime? hoy,
+  })  : hoy = soloDia(hoy ?? DateTime.now()),
+        _diasBcv = {
+          ...bcvTabla.keys,
+          ...bcvVentas.keys,
+          for (final e in manuales.entries)
+            if (e.value.bcv > 0) e.key,
+        }.toList()
+          ..sort();
+
+  /// Lee todos los meses guardados (`cf_tasas_dia_*`) de `configuracion`.
+  /// [decodificar] convierte el valor crudo (texto JSON) en mapa.
+  static Map<String, RegistroTasaDia> leerManuales(
+      Map<String, dynamic> config, dynamic Function(dynamic) decodificar) {
+    final r = <String, RegistroTasaDia>{};
+    for (final e in config.entries) {
+      if (!e.key.startsWith('cf_tasas_dia_')) continue;
+      final v = decodificar(e.value);
+      if (v is! Map) continue;
+      v.forEach((k, x) {
+        final d = parseFechaCF(k.toString());
+        if (d != null) r[fechaIsoCF(d)] = RegistroTasaDia.fromJson(x);
+      });
+    }
+    return r;
+  }
+
+  double _bcvExacto(String iso) {
+    final m = manuales[iso]?.bcv ?? 0;
+    if (m > 0) return m;
+    return bcvTabla[iso] ?? bcvVentas[iso] ?? 0;
+  }
+
+  String _fuenteExacta(String iso) {
+    if ((manuales[iso]?.bcv ?? 0) > 0) return fuenteBcvManual;
+    if (bcvTabla.containsKey(iso)) return fuenteBcvTabla;
+    return fuenteBcvVentas;
+  }
+
+  TasaDiaResuelta resolver(DateTime dia) {
+    final d = soloDia(dia);
+    final iso = fechaIsoCF(d);
+    double bcv = _bcvExacto(iso);
+    String fuente = bcv > 0 ? _fuenteExacta(iso) : '';
+    if (bcv <= 0) {
+      // La más reciente anterior (fines de semana y feriados).
+      for (var i = _diasBcv.length - 1; i >= 0; i--) {
+        if (_diasBcv[i].compareTo(iso) >= 0) continue;
+        bcv = _bcvExacto(_diasBcv[i]);
+        if (bcv > 0) {
+          fuente = fuenteBcvAnterior;
+          break;
+        }
+      }
+    }
+    // Hoy: la que el sistema acaba de traer del BCV manda sobre la
+    // deducida de las ventas (algún equipo pudo cobrar con la de ayer).
+    if (d == hoy &&
+        bcvActual > 0 &&
+        fuente != fuenteBcvManual &&
+        fuente != fuenteBcvTabla) {
+      bcv = bcvActual;
+      fuente = fuenteBcvActual;
+    }
+    final manualDiv = manuales[iso]?.divisa ?? 0;
+    final sugerida = (d == hoy && manualDiv <= 0) ? divisaSugeridaHoy : 0.0;
+    return TasaDiaResuelta(
+      dia: d,
+      bcv: bcv,
+      fuenteBcv: fuente,
+      divisa: manualDiv > 0 ? manualDiv : sugerida,
+      divisaConfirmada: manualDiv > 0,
+    );
+  }
+
+  /// Todos los días entre [desde] y [hasta] (sin pasar de hoy).
+  List<TasaDiaResuelta> dias(DateTime desde, DateTime hasta) {
+    final r = <TasaDiaResuelta>[];
+    var d = soloDia(desde);
+    final fin = soloDia(hasta).isAfter(hoy) ? hoy : soloDia(hasta);
+    while (!d.isAfter(fin)) {
+      r.add(resolver(d));
+      d = DateTime(d.year, d.month, d.day + 1);
+    }
+    return r;
+  }
+}
+
+/// BCV de cada día deducida de las ventas: la MAYOR tasa con que se
+/// cobró ese día. Un equipo que no actualizó la tasa cobra con la del
+/// día anterior (más baja); la mayor es la publicada para ese día.
+Map<String, double> bcvDeLasVentas(Iterable<FacturaCF> facturas) {
+  final r = <String, double>{};
+  for (final f in facturas) {
+    final iso = fechaIsoCF(f.fecha);
+    for (final p in f.pagos) {
+      if (p.tasa <= 0) continue;
+      if (p.tasa > (r[iso] ?? 0)) r[iso] = p.tasa;
+    }
   }
   return r;
 }

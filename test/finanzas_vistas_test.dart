@@ -40,6 +40,10 @@ void main() {
     claveGastosMes(2026, 10): [gasto.toJson()],
     claveNominaPagosMes(2026, 10): [pago.toJson()],
     claveNominaEmpleados: [EmpleadoNomina(nombre: 'Ana', sueldo: 40).toJson()],
+    // Tasa divisa cargada solo el día 2: el 3 sale como "falta la tasa".
+    claveTasasDiaMes(2026, 10): {
+      '2026-10-02': const RegistroTasaDia(divisa: 100).toJson(),
+    },
   };
 
   for (final tam in const [Size(360, 740), Size(1024, 1366)]) {

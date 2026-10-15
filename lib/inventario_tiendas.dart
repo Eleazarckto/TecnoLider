@@ -425,3 +425,58 @@ Future<Uint8List> generarPdfInventario({
   ));
   return doc.save();
 }
+
+// ── 4. VALOR ACTUAL DEL INVENTARIO (TODAS LAS TIENDAS) ───────
+
+/// Unidades y valor (a costo y a precio de venta) del stock de HOY de
+/// una tienda, o de todas juntas.
+class ValorInventarioTienda {
+  final String tienda;
+  int unidades = 0;
+  double costo = 0;
+  double venta = 0;
+  ValorInventarioTienda(this.tienda);
+  void sumar(int n, Producto fila) {
+    unidades += n;
+    costo += n * fila.precioCosto;
+    venta += n * fila.precioVenta;
+  }
+}
+
+/// Valor actual del inventario por tienda y consolidado.
+///
+/// Costos → Inventario mostraba solo la cuenta del mes (stock al inicio
+/// del mes − ventas del mes, sin la mercancía que entró después) y su
+/// "costo de las ventas" se leía como valor a precio de venta. Esto es
+/// el inventario de HOY: IMEIs no vendidos (en la tienda donde están) +
+/// stock manual de cada fila producto/tienda, con el mismo
+/// [IndiceStockTiendas] del resto del sistema, así un equipo con filas
+/// en varias tiendas no cuenta sus IMEIs dos veces. Cada unidad se
+/// valora con el precio de la fila de su tienda (o la primera fila del
+/// código si esa tienda no tiene fila propia).
+({List<ValorInventarioTienda> porTienda, ValorInventarioTienda total})
+    valorarInventarioPorTienda(
+        List<Producto> productos, List<ImeiRegistro> imeis) {
+  final indice =
+      IndiceStockTiendas.desde(productos, imeis, sumarVariantes: false);
+  final filasPorCodigo = <String, List<Producto>>{};
+  for (final p in productos) {
+    filasPorCodigo.putIfAbsent(p.codigo, () => []).add(p);
+  }
+  final porTienda = <String, ValorInventarioTienda>{};
+  final total = ValorInventarioTienda('Todas las tiendas');
+  filasPorCodigo.forEach((codigo, filas) {
+    indice.porTienda(codigo).forEach((tienda, n) {
+      final fila =
+          filas.where((p) => p.tienda.trim() == tienda).firstOrNull ??
+              filas.first;
+      porTienda
+          .putIfAbsent(tienda, () => ValorInventarioTienda(nombreTiendaStock(tienda)))
+          .sumar(n, fila);
+      total.sumar(n, fila);
+    });
+  });
+  final lista = porTienda.values.toList()
+    ..sort((a, b) => a.tienda.compareTo(b.tienda));
+  return (porTienda: lista, total: total);
+}

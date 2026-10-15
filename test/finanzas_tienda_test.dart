@@ -1,6 +1,9 @@
 // Pruebas de la lógica de Costos y Finanzas: ganancia real vs
-// diferencial cambiario, balance neto, equilibrio diario y flujo de caja.
+// diferencial cambiario (venta por venta con las tasas del día, con los
+// ejemplos exactos del dueño), balance neto, equilibrio diario y flujo
+// de caja.
 import 'package:flutter_test/flutter_test.dart';
+import 'package:tecno_lider/cuenta_financiadora.dart';
 import 'package:tecno_lider/finanzas_tienda.dart';
 
 FacturaCF _fac(String tienda, DateTime fecha, List<EquipoVendidoCF> eq,
@@ -79,7 +82,10 @@ void main() {
       expect(v.diferencialCambiario, 0);
     });
 
-    test('Cashea descuenta su comisión de lo que paga', () {
+    test('Cashea: la comisión se informa aparte, no se descuenta', () {
+      // Fórmula del dueño: la plataforma debe lista − inicial (800 − 200).
+      // La comisión de Cashea (la misma del Reporte por Financiadora:
+      // 600 − 538,88) sale como dato, sin mezclarse con el diferencial.
       final f = _fac('T1', DateTime(2026, 10, 1), [
         const EquipoVendidoCF(costo: 500, precioContado: 600,
             precioFinanciadora: 800),
@@ -88,7 +94,9 @@ void main() {
             financiadora: 'Cashea'),
       ]);
       final v = analizarFactura(f, tasasIguales);
-      expect(v.financiadoBcv, 538.88); // mismo número que el reporte
+      expect(v.financiadoBcv, 600);
+      expect(v.comisionFinanciadora, closeTo(61.12, 1e-9));
+      expect(v.diferencialCambiario, 200); // 200 + 600 − 600
     });
 
     test('Agrupar por tienda y balance neto', () {
@@ -111,6 +119,203 @@ void main() {
       // Balance B: 40 cobrado + 100 financiado − 100 costo − 30 gastos.
       expect(g['B']!.balanceNeto(30), 10);
       expect(totalGanancias(ventas).gananciaTotal, 60);
+    });
+  });
+
+  group('Ejemplos del dueño (audio oct-2026): venta por venta con las '
+      'tasas del día', () {
+    // Tasas del día de los ejemplos: BCV 879, divisa (USDT) 1015.
+    const tasasDia = TasasCF(tasaBcv: 879, tasaDivisa: 1015);
+    double r2(double v) => redondearCentavos(v);
+    const equipo = EquipoVendidoCF(
+        codigo: 'A15', costo: 88, precioContado: 100, precioFinanciadora: 127);
+
+    test('a) Financiada con Krece, inicial \$38 BCV pagada en Bs', () {
+      // 38 × 879 = 33.402 Bs ("33.400 y pico").
+      final f = _fac('T1', DateTime(2026, 10, 14), [equipo], [
+        const PagoClienteCF(monto: 33402, enBolivares: true, tasa: 879,
+            esInicial: true, financiadora: 'Krece'),
+      ]);
+      final v = analizarFactura(f, tasasDia);
+      expect(r2(v.cobradoEnDivisa), 32.91);   // 33.402 ÷ 1015 ("32.9")
+      expect(v.financiadoBcv, 89);            // 127 − 38
+      expect(r2(v.financiadoEnDivisa), 77.07); // 89 × 879 = 78.231 ÷ 1015
+      expect(r2(v.ingresoEnDivisa), 109.98);  // él dice 109,97 redondeando
+      expect(r2(v.diferencialCambiario), 9.98); // ingreso − contado
+      expect(v.gananciaReal, 12);             // contado − costo
+      expect(r2(v.gananciaTotal), 21.98);     // ingreso − costo
+      expect(v.faltaTasa, isFalse);
+      // El mismo resultado por equipo (lo que se compara con el Excel).
+      final e = v.equipos.single;
+      expect(r2(e.ingresoEnDivisa), 109.98);
+      expect(r2(e.diferencialCambiario), 9.98);
+      expect(e.gananciaReal, 12);
+      expect(e.financiadoBcv, 89);
+      expect(e.inicialBcv, 38);
+    });
+
+    test('a) Inicial pagada en \$ efectivo cuenta tal cual', () {
+      final f = _fac('T1', DateTime(2026, 10, 14), [equipo], [
+        const PagoClienteCF(monto: 38, enBolivares: false, tasa: 879,
+            esInicial: true, financiadora: 'Krece'),
+      ]);
+      final v = analizarFactura(f, tasasDia);
+      expect(v.cobradoEnDivisa, 38);
+      expect(r2(v.ingresoEnDivisa), 115.07); // 38 + 77,07
+      expect(r2(v.diferencialCambiario), 15.07);
+    });
+
+    test('a) Con Cashea la comisión no entra al diferencial', () {
+      final f = _fac('T1', DateTime(2026, 10, 14), [equipo], [
+        const PagoClienteCF(monto: 33402, enBolivares: true, tasa: 879,
+            esInicial: true, financiadora: 'Cashea'),
+      ]);
+      final v = analizarFactura(f, tasasDia);
+      expect(v.financiadoBcv, 89);
+      expect(r2(v.diferencialCambiario), 9.98);
+      expect(v.comisionFinanciadora, greaterThan(0));
+    });
+
+    test('b) Contado pagado en Bs a la lista BCV (\$120)', () {
+      // 120 × 879 = 105.480 Bs → ÷ 1015 = 103,92 reales.
+      final f = _fac('T1', DateTime(2026, 10, 14), [
+        const EquipoVendidoCF(costo: 88, precioContado: 100),
+      ], [
+        const PagoClienteCF(monto: 105480, enBolivares: true, tasa: 879),
+      ]);
+      final v = analizarFactura(f, tasasDia);
+      expect(v.esFinanciada, isFalse);
+      expect(r2(v.ingresoEnDivisa), 103.92);
+      expect(r2(v.diferencialCambiario), 3.92);
+      expect(v.gananciaReal, 12);
+      expect(r2(v.gananciaTotal), 15.92);
+    });
+
+    test('b) Contado en \$ efectivo: diferencial = cobrado − precio divisa',
+        () {
+      final f = _fac('T1', DateTime(2026, 10, 14), [
+        const EquipoVendidoCF(costo: 88, precioContado: 100),
+      ], [const PagoClienteCF(monto: 100, enBolivares: false, tasa: 879)]);
+      final v = analizarFactura(f, tasasDia);
+      expect(v.ingresoEnDivisa, 100);
+      expect(v.diferencialCambiario, 0);
+    });
+
+    test('b) Pago mixto: suma de la parte en \$ y la parte en Bs', () {
+      // \$50 en efectivo + \$70 BCV en Bs (70 × 879 = 61.530 Bs).
+      final f = _fac('T1', DateTime(2026, 10, 14), [
+        const EquipoVendidoCF(costo: 88, precioContado: 100),
+      ], [
+        const PagoClienteCF(monto: 50, enBolivares: false),
+        const PagoClienteCF(monto: 61530, enBolivares: true, tasa: 879),
+      ]);
+      final v = analizarFactura(f, tasasDia);
+      expect(r2(v.ingresoEnDivisa), 110.62); // 50 + 60,62
+      expect(r2(v.diferencialCambiario), 10.62);
+    });
+
+    test('Cada venta usa la tasa de SU día (no una sola para el período)',
+        () {
+      final dia1 = DateTime(2026, 10, 13), dia2 = DateTime(2026, 10, 14);
+      final ventas = analizarFacturas([
+        _fac('T1', dia1, [const EquipoVendidoCF(costo: 88, precioContado: 100)],
+            [const PagoClienteCF(monto: 105480, enBolivares: true, tasa: 879)],
+            nro: 'F1'),
+        _fac('T1', dia2, [const EquipoVendidoCF(costo: 88, precioContado: 100)],
+            [const PagoClienteCF(monto: 105480, enBolivares: true, tasa: 879)],
+            nro: 'F2'),
+      ], (d) => d == dia1
+          ? const TasasCF(tasaBcv: 879, tasaDivisa: 1015)
+          : const TasasCF(tasaBcv: 879, tasaDivisa: 1050));
+      expect(r2(ventas[0].diferencialCambiario), 3.92);  // ÷ 1015
+      expect(r2(ventas[1].diferencialCambiario), 0.46);  // ÷ 1050
+      expect(r2(totalGanancias(ventas).diferencialCambiario), 4.38);
+    });
+
+    test('Sin tasa divisa del día no se adivina: se marca y va a contado',
+        () {
+      final f = _fac('T1', DateTime(2026, 10, 14), [
+        const EquipoVendidoCF(costo: 88, precioContado: 100),
+      ], [const PagoClienteCF(monto: 105480, enBolivares: true, tasa: 879)]);
+      final v = analizarFactura(f, const TasasCF(tasaBcv: 879, tasaDivisa: 0));
+      expect(v.faltaTasa, isTrue);
+      expect(v.ingresoEnDivisa, 100);
+      expect(v.diferencialCambiario, 0);
+      expect(v.gananciaReal, 12);
+      final r = totalGanancias([v]);
+      expect(r.sinTasa, 1);
+      expect(r.diferencialCambiario, 0);
+      // Una venta en \$ efectivo no necesita la tasa divisa.
+      final usd = analizarFactura(
+          _fac('T1', DateTime(2026, 10, 14),
+              [const EquipoVendidoCF(costo: 88, precioContado: 100)],
+              [const PagoClienteCF(monto: 100, enBolivares: false)]),
+          const TasasCF(tasaBcv: 879, tasaDivisa: 0));
+      expect(usd.faltaTasa, isFalse);
+    });
+  });
+
+  group('Tasas de cada día', () {
+    final hoy = DateTime(2026, 10, 15);
+    test('Divisa: la cargada; sugerida solo hoy; si no, falta', () {
+      final t = TasasPorDia(
+        manuales: {'2026-10-14': const RegistroTasaDia(divisa: 1015)},
+        bcvVentas: {'2026-10-14': 879},
+        bcvActual: 880,
+        divisaSugeridaHoy: 1020,
+        hoy: hoy,
+      );
+      final d14 = t.resolver(DateTime(2026, 10, 14));
+      expect(d14.divisa, 1015);
+      expect(d14.divisaConfirmada, isTrue);
+      expect(d14.bcv, 879);
+      expect(d14.fuenteBcv, fuenteBcvVentas);
+      final d13 = t.resolver(DateTime(2026, 10, 13));
+      expect(d13.faltaDivisa, isTrue);       // no se arrastra otra tasa
+      final d15 = t.resolver(hoy);
+      expect(d15.divisa, 1020);
+      expect(d15.divisaSugerida, isTrue);
+      expect(d15.bcv, 880);                  // la actual del sistema
+      expect(t.dias(DateTime(2026, 10, 1), DateTime(2026, 10, 31)).length,
+          15);                               // no pasa de hoy
+    });
+
+    test('BCV: manual > tabla > ventas > la del día anterior', () {
+      final t = TasasPorDia(
+        manuales: {'2026-10-10': const RegistroTasaDia(bcv: 875.5)},
+        bcvTabla: {'2026-10-10': 874, '2026-10-09': 873},
+        bcvVentas: {'2026-10-09': 870, '2026-10-08': 869},
+        hoy: hoy,
+      );
+      expect(t.resolver(DateTime(2026, 10, 10)).bcv, 875.5);
+      expect(t.resolver(DateTime(2026, 10, 9)).bcv, 873);
+      expect(t.resolver(DateTime(2026, 10, 8)).bcv, 869);
+      final domingo = t.resolver(DateTime(2026, 10, 11));
+      expect(domingo.bcv, 875.5);
+      expect(domingo.fuenteBcv, fuenteBcvAnterior);
+    });
+
+    test('BCV de las ventas: la mayor del día', () {
+      final m = bcvDeLasVentas([
+        _fac('T1', DateTime(2026, 10, 14), const [], const [
+          PagoClienteCF(monto: 1, enBolivares: true, tasa: 874.73),
+          PagoClienteCF(monto: 1, enBolivares: true, tasa: 879.12),
+        ]),
+      ]);
+      expect(m['2026-10-14'], 879.12);
+    });
+
+    test('Se guardan por mes en configuracion y se vuelven a leer', () {
+      expect(claveTasasDiaMes(2026, 3), 'cf_tasas_dia_2026_03');
+      final config = <String, dynamic>{
+        claveTasasDiaMes(2026, 10): {
+          '2026-10-14': const RegistroTasaDia(divisa: 1015, bcv: 879).toJson(),
+        },
+        'otra_clave': 'x',
+      };
+      final m = TasasPorDia.leerManuales(config, (v) => v);
+      expect(m['2026-10-14']!.divisa, 1015);
+      expect(m['2026-10-14']!.bcv, 879);
     });
   });
 
