@@ -1,0 +1,14 @@
+{
+  "android": {
+    "version": "1.0.17",
+    "url": "https://sistemasceccato.com/tecnolider/updates/tecnolider-1.0.17.apk",
+    "obligatoria": false,
+    "notas": "Ganancia real y diferencial cambiario calculados venta por venta con la tasa BCV y la tasa divisa de cada dia (se cargan en Costos > Ganancia real). Los cambios de precio ya no alteran la ganancia de ventas anteriores (historial de precios y foto de precios en cada factura). Valor del inventario de todas las tiendas. Asignar tienda a cada vendedor en Usuarios. Ventas financiadas sin inicial (promociones)."
+  },
+  "windows": {
+    "version": "1.0.17",
+    "url": "https://sistemasceccato.com/tecnolider/updates/tecnolider-windows-1.0.17.zip",
+    "obligatoria": false,
+    "notas": "Ganancia real y diferencial cambiario calculados venta por venta con la tasa BCV y la tasa divisa de cada dia (se cargan en Costos > Ganancia real). Los cambios de precio ya no alteran la ganancia de ventas anteriores (historial de precios y foto de precios en cada factura). Valor del inventario de todas las tiendas. Asignar tienda a cada vendedor en Usuarios. Ventas financiadas sin inicial (promociones)."
+  }
+}
