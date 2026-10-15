@@ -171,4 +171,41 @@ void main() {
           isNull);
     });
   });
+
+  group('Valor actual del inventario (Costos → Inventario)', () {
+    test('suma TODAS las tiendas sin contar dos veces los IMEIs', () {
+      // Teléfono con fila en dos tiendas (costo 100, venta 130) y 3 IMEIs
+      // sin vender: 2 en Principal y 1 en Sucursal (más uno vendido).
+      Producto tel(String tienda) => Producto(
+            codigo: 'TEL1', nombre: 'Galaxy A15', categoria: 'Telefono',
+            marca: 'Samsung', modelo: 'A15', tipo: 'Galaxy A15',
+            precioCosto: 100, precioVenta: 130, tienda: tienda);
+      ImeiRegistro imei(String n, String ubicacion, {bool vendido = false}) =>
+          ImeiRegistro(
+            imei: n, producto: tel('Principal'), fechaIngreso: '01/10/2026',
+            proveedor: '', color: '', ubicacion: ubicacion, vendido: vendido);
+      final productos = [
+        tel('Principal'),
+        tel('Sucursal'),
+        _p(tienda: 'Principal', stock: 5), // costo 2, venta 5
+        _p(tienda: 'Sucursal', stock: 3),
+      ];
+      final imeis = [
+        imei('1', 'Principal'),
+        imei('2', 'Principal'),
+        imei('3', 'Sucursal'),
+        imei('4', 'Sucursal', vendido: true),
+      ];
+      final v = valorarInventarioPorTienda(productos, imeis);
+      expect(v.total.unidades, 3 + 8);
+      expect(v.total.costo, 3 * 100 + 8 * 2);
+      expect(v.total.venta, 3 * 130 + 8 * 5);
+      final principal =
+          v.porTienda.firstWhere((t) => t.tienda == 'Principal');
+      expect(principal.unidades, 2 + 5);
+      expect(principal.costo, 200 + 10);
+      final sucursal = v.porTienda.firstWhere((t) => t.tienda == 'Sucursal');
+      expect(sucursal.unidades, 1 + 3);
+    });
+  });
 }

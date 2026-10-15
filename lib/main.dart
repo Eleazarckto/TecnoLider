@@ -29,6 +29,7 @@ import 'descarga.dart';
 import 'cuenta_financiadora.dart';
 import 'cxp_perfil.dart';
 import 'finanzas_tienda.dart';
+import 'historial_precios.dart';
 // ── Impresión térmica directa (sin drivers) ─────────
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 import 'package:usb_serial/usb_serial.dart';
@@ -28206,6 +28207,11 @@ class _FormularioProductoState extends State<FormularioProducto> {
         final anterior = widget.productoAEditar!;
         if ((anterior.precioVenta - prod.precioVenta).abs() > 0.0001 ||
             (anterior.precioCosto - prod.precioCosto).abs() > 0.0001) {
+          // Historial de precios: el precio ANTERIOR queda guardado con
+          // su vigencia para que las ventas viejas no cambien de
+          // ganancia. Va primero en la cola para leer las listas antes
+          // de que se recalculen.
+          unawaited(registrarCambioDePrecio(anterior, prod));
           ScaffoldMessengerState? messenger;
           if (mounted) messenger = ScaffoldMessenger.maybeOf(context);
           unawaited(actualizarListasPorCambioDePrecio(anterior, prod)
@@ -31058,6 +31064,10 @@ class _FormularioFacturaState extends State<FormularioFactura>
             nuevaFactura.id = idRaw is int ? idRaw : int.tryParse(idRaw.toString());
           }
         }
+        // Foto de precios y tasas de esta venta (la BD no guarda el
+        // precio por renglón). En segundo plano: si falla, la factura
+        // ya está guardada.
+        unawaited(guardarFotoPreciosFactura(nuevaFactura));
       }
 
       // ── 1a-bis. Actualizar contador local de compras ─────
@@ -48928,13 +48938,18 @@ class ItemInventarioCF {
     this.precioUnitarioCompra = 0,
     this.ventaUnidades = 0,
     this.costoUnitarioSalida = 0,
+    this.costoSalidaHistorico,
   });
 
   double get invInicialValorado => invInicialUnidades * costoUnitarioInicial;
   double get comprasTotales => comprasUnidades * precioUnitarioCompra;
   double get inventarioTotalUnidades => invInicialUnidades + comprasUnidades;
   double get valorInventarioUltimaCompra => inventarioTotalUnidades * precioUnitarioCompra;
-  double get costoTotalSalida => ventaUnidades * costoUnitarioSalida;
+  /// Costo de lo vendido con el costo vigente el día de cada venta
+  /// (null = ventas × costo unitario actual, para filas a mano).
+  double? costoSalidaHistorico;
+  double get costoTotalSalida =>
+      costoSalidaHistorico ?? ventaUnidades * costoUnitarioSalida;
   double get inventarioFinalUnidades => inventarioTotalUnidades - ventaUnidades;
   double get inventarioFinalValorado => inventarioFinalUnidades * costoUnitarioSalida;
 }
@@ -49084,6 +49099,9 @@ class _VentanaCostosFinanzasState extends State<VentanaCostosFinanzas>
 
   // ── Inventario ──
   final List<ItemInventarioCF> _inventario = [];
+  /// Valor de HOY del inventario, por tienda y total (todas las tiendas).
+  ({List<ValorInventarioTienda> porTienda, ValorInventarioTienda total})?
+      _valorInventario;
 
   // ── Compras ──
   final List<ItemComprasCF> _compras = [];
@@ -49190,6 +49208,8 @@ class _VentanaCostosFinanzasState extends State<VentanaCostosFinanzas>
       // Sincronizar globales para que `construirFacturaModelDesdeJson`
       // resuelva equipos/items correctamente con los datos del mes.
       stockImeiGlobal = imeiPorNumero.values.toList();
+      _valorInventario =
+          valorarInventarioPorTienda(prods, stockImeiGlobal);
 
       // ─── COMPRAS DEL MES (persistidas en la tabla `compras`) ───
       // Las compras viven en BD; las leemos y filtramos por el mes
@@ -49253,16 +49273,25 @@ class _VentanaCostosFinanzasState extends State<VentanaCostosFinanzas>
       _inventario.clear();
       // _compras ya se llenó al inicio desde la tabla `compras` de BD.
 
-      // Unidades vendidas en el mes por código (de las facturas)
+      // Unidades vendidas en el mes por código (de las facturas) y su
+      // costo con el costo VIGENTE el día de cada venta (foto de la
+      // factura o historial de precios), no el de hoy.
       final ventasPorCodigo = <String, int>{};
+      final costoVendidoPorCodigo = <String, double>{};
       for (final f in facturasMes) {
-        for (final eq in f.equipos) {
-          ventasPorCodigo[eq.producto.codigo] =
-              (ventasPorCodigo[eq.producto.codigo] ?? 0) + 1;
-        }
-        for (final p in f.itemsSinImei) {
-          ventasPorCodigo[p.codigo] =
-              (ventasPorCodigo[p.codigo] ?? 0) + 1;
+        final momento = _datosCF.momentoDe(
+            f.nroFactura, parseFechaFlexible(f.fecha) ?? DateTime(2000));
+        for (final (p, imei) in [
+          for (final eq in f.equipos) (eq.producto, eq.imei),
+          for (final it in f.itemsSinImei) (it, ''),
+        ]) {
+          ventasPorCodigo[p.codigo] = (ventasPorCodigo[p.codigo] ?? 0) + 1;
+          costoVendidoPorCodigo[p.codigo] =
+              (costoVendidoPorCodigo[p.codigo] ?? 0) +
+                  _datosCF
+                      .preciosDeVenta(f.nroFactura, p.codigo, imei, momento,
+                          respaldo: p)
+                      .costo;
         }
       }
 
@@ -49275,7 +49304,11 @@ class _VentanaCostosFinanzasState extends State<VentanaCostosFinanzas>
       final iniciales = await _cargarOCrearInventarioInicial(
           prods, imeisRaw);
 
+      // Una línea por código: `productos` tiene una fila por tienda y
+      // antes el mismo producto salía (y se sumaba) una vez por fila.
+      final codigosListados = <String>{};
       for (final p in prods.where((p) => p.productoPadreCodigo.isEmpty)) {
+        if (!codigosListados.add(p.codigo)) continue;
         final inicialUnid = (iniciales[p.codigo]?['unidades']
             as num?)?.toDouble() ?? 0;
         final inicialCosto = (iniciales[p.codigo]?['costo']
@@ -49289,6 +49322,7 @@ class _VentanaCostosFinanzasState extends State<VentanaCostosFinanzas>
           precioUnitarioCompra: 0,        // se completa desde Compras
           ventaUnidades: vendidoMes.toDouble(),
           costoUnitarioSalida: p.precioCosto,
+          costoSalidaHistorico: costoVendidoPorCodigo[p.codigo],
         ));
       }
       // Aplicar las compras que ya estén capturadas en _compras
@@ -49365,24 +49399,19 @@ class _VentanaCostosFinanzasState extends State<VentanaCostosFinanzas>
     // No existe snapshot del mes → crearlo con el stock actual
     debugPrint('[InvInicial] creando snapshot $_anioSel-$_mesSel '
         'tienda="$tiendaUsr"');
+    // Stock con el helper común (IMEIs no vendidos + stock manual de
+    // CADA fila producto/tienda). Antes se tomaba el stock manual de una
+    // sola fila del código (la última) y el resultado se guardaba por
+    // código: un accesorio con filas en varias tiendas quedaba con el
+    // stock de una sola.
+    final indice = IndiceStockTiendas.desde(prods, [
+      for (final i in rawImeis)
+        if (i is Map) ImeiRegistro.fromMap(Map<String, dynamic>.from(i)),
+    ], sumarVariantes: false);
+    final yaCreados = <String>{};
     for (final p in prods.where((p) => p.productoPadreCodigo.isEmpty)) {
-      int stockHoy;
-      if (CategoriasProductos.usaIMEI(p.categoria)) {
-        stockHoy = rawImeis.where((i) {
-          final mp = i as Map;
-          if ((mp['producto_codigo']?.toString() ?? '') != p.codigo) return false;
-          final vendido = (mp['vendido']?.toString() ?? '0');
-          if (vendido == '1' || vendido == 'true') return false;
-          // Si hay tienda específica, contar solo IMEIs de esa tienda
-          if (tiendaUsr.isNotEmpty
-              && (mp['ubicacion']?.toString() ?? '') != tiendaUsr) {
-            return false;
-          }
-          return true;
-        }).length;
-      } else {
-        stockHoy = p.stockManual;
-      }
+      if (!yaCreados.add(p.codigo)) continue;
+      final int stockHoy = indice.enTienda(p.codigo, tiendaUsr);
 
       if (stockHoy <= 0) continue;
 
@@ -49535,22 +49564,29 @@ class _VentanaCostosFinanzasState extends State<VentanaCostosFinanzas>
   }
 
   /// Una línea por equipo / artículo vendido. El precio es el de
-  /// CONTADO del inventario actual (no el cobrado en la factura).
+  /// CONTADO vigente el día de la venta (foto de la factura o historial
+  /// de precios; sin historial, el del inventario actual). Antes era
+  /// siempre el actual: al subir un precio cambiaban las ventas viejas.
   List<ItemVentasCF> _lineasDeVenta(Iterable<FacturaModel> facturas,
       Map<String, Producto> prodPorCodigo) {
     final r = <ItemVentasCF>[];
     for (final fac in facturas) {
       final fecha = parseFechaFlexible(fac.fecha);
-      for (final p in [
-        for (final eq in fac.equipos) eq.producto,
-        ...fac.itemsSinImei,
+      final momento =
+          _datosCF.momentoDe(fac.nroFactura, fecha ?? DateTime(2000));
+      for (final (p, imei) in [
+        for (final eq in fac.equipos) (eq.producto, eq.imei),
+        for (final it in fac.itemsSinImei) (it, ''),
       ]) {
         r.add(ItemVentasCF(
           fecha: fecha,
           producto: p.nombre.isEmpty ? p.codigo : p.nombre,
           cantidad: 1,
           tasaDia: _tasaBinanceVentas,
-          precioUnitario: prodPorCodigo[p.codigo]?.precioVenta ?? p.precioVenta,
+          precioUnitario: _datosCF
+              .preciosDeVenta(fac.nroFactura, p.codigo, imei, momento,
+                  respaldo: prodPorCodigo[p.codigo] ?? p)
+              .venta,
           tienda: fac.tienda,
         ));
       }
@@ -50034,20 +50070,24 @@ class _VentanaCostosFinanzasState extends State<VentanaCostosFinanzas>
                 color: AppColors.brandBlue, size: 18),
             SizedBox(width: 8),
             Expanded(child: Text(
-              "Inv. inicial = stock actual del producto · "
+              "Inv. inicial = stock guardado al empezar el mes · "
               "Compras = lo capturado en la pestaña Compras · "
-              "Ventas = de las facturas del mes",
+              "Ventas = de las facturas del mes, al costo del día de "
+              "cada venta",
               style: TextStyle(fontSize: 11,
                   color: AppColors.textPrimary),
             )),
           ]),
         ),
-        _cardTitulo("Inventario de Mercancía", Icons.inventory_2, AppColors.brandBlue, Column(children: [
-          // Totales
+        if (_valorInventario != null) _tarjetaValorInventario(_valorInventario!),
+        _cardTitulo("Movimiento del mes (hoja de inventario)", Icons.inventory_2, AppColors.brandBlue, Column(children: [
+          // Totales. OJO: no es el valor actual del inventario (ese va en
+          // la tarjeta de arriba): es inicial del mes + compras anotadas −
+          // ventas del mes, sin la mercancía que entró sin pasar por Compras.
           Row(children: [
-            Expanded(child: _kpiMini("Inv. Final Valorado", "\$${totalInvFinal.toStringAsFixed(2)}", Colors.green)),
+            Expanded(child: _kpiMini("Inv. final del mes (cálculo)", "\$${totalInvFinal.toStringAsFixed(2)}", Colors.green)),
             const SizedBox(width: 8),
-            Expanded(child: _kpiMini("Costo Total Ventas", "\$${totalCostoSalida.toStringAsFixed(2)}", Colors.orange)),
+            Expanded(child: _kpiMini("Costo de lo vendido en el mes", "\$${totalCostoSalida.toStringAsFixed(2)}", Colors.orange)),
           ]),
           const SizedBox(height: 12),
           // Tabla scrollable horizontal
@@ -50119,6 +50159,49 @@ class _VentanaCostosFinanzasState extends State<VentanaCostosFinanzas>
         ])),
       ]),
     );
+  }
+
+  /// Valor ACTUAL del inventario de todas las tiendas, con desglose.
+  Widget _tarjetaValorInventario(
+      ({List<ValorInventarioTienda> porTienda, ValorInventarioTienda total}) v) {
+    List<Widget> fila(ValorInventarioTienda t, {bool negrita = false}) => [
+          Text(t.tienda,
+              style: TextStyle(
+                  fontWeight: negrita ? FontWeight.bold : FontWeight.w600)),
+          Text('${t.unidades}'),
+          _cfNum(t.costo, negrita: negrita),
+          _cfNum(t.venta, negrita: negrita),
+          _cfNum(t.venta - t.costo, negrita: negrita),
+        ];
+    return _cardTitulo("Valor actual del inventario (todas las tiendas)",
+        Icons.warehouse_outlined, Colors.teal, Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+      Row(children: [
+        Expanded(child: _kpiMini("A costo (hoy)",
+            formatCurrency(v.total.costo), Colors.teal)),
+        const SizedBox(width: 8),
+        Expanded(child: _kpiMini("A precio de venta (hoy)",
+            formatCurrency(v.total.venta), Colors.green)),
+      ]),
+      const SizedBox(height: 6),
+      const Text(
+          "Es lo que hay HOY en todas las tiendas: equipos con IMEI sin "
+          "vender (en la tienda donde están) + stock de los demás productos "
+          "en cada tienda, a su costo y precio actuales. No depende del mes "
+          "elegido arriba.",
+          style: TextStyle(fontSize: 11, color: AppColors.textSecondary)),
+      const SizedBox(height: 6),
+      _cfTabla(
+        ['Tienda', 'Unidades', 'A costo', 'A precio\nde venta',
+          'Ganancia\nproyectada'],
+        [
+          for (final t in v.porTienda) fila(t),
+          fila(v.total, negrita: true),
+        ],
+        color: Colors.teal,
+        numericas: const [1, 2, 3, 4],
+      ),
+    ]));
   }
 
   // ── TAB COMPRAS ────────────────────────────────────────
