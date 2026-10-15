@@ -7,6 +7,31 @@ part of 'main.dart';
 //  precio del producto).
 // ============================================================
 
+// ── Inicial de 0 (promociones de Krece / Cashea) ─────────────
+// A veces las financiadoras hacen promociones sin inicial. Un 0 es
+// válido en el % de inicial de las listas y al facturar; sólo se
+// bloquean los negativos.
+
+/// Lo que se muestra en vez de "Inicial: $0.00".
+const String kTextoSinInicial = 'Sin inicial (promoción)';
+
+/// true si una inicial (monto o %) es cero: venta sin inicial.
+bool esInicialCero(double valor) => valor.abs() < 0.005;
+
+/// Error del % de inicial escrito en una lista de financiamiento, o
+/// null si vale. Vacío y 0 se aceptan (0 = promoción sin inicial).
+String? errorPctInicial(String texto) {
+  final t = texto.trim().replaceAll(',', '.');
+  if (t.isEmpty) return null;
+  final v = double.tryParse(t);
+  if (v == null) return 'El % de inicial debe ser un número.';
+  if (v < 0) {
+    return 'El % de inicial no puede ser negativo '
+        '(usa 0 para vender sin inicial).';
+  }
+  return null;
+}
+
 /// Marcadores del bloque de financiamiento dentro del orden de
 /// columnas de los documentos. Llevan `__` como las columnas
 /// virtuales, así que nunca chocan con una columna real.

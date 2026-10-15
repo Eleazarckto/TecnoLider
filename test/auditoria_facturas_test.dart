@@ -202,4 +202,47 @@ void main() {
     expect(fin, ['Precio base: \$110.00', 'Precio Krece: \$141.00']);
     expect(fin.any((l) => l.contains('%')), isFalse);
   });
+
+  group('venta financiada sin inicial (promoción)', () {
+    final cashea = preciosReferenciaDe(codigo: 'H010', precioVenta: 110,
+        listas: _listas, financiadora: 'Cashea');
+    final krece = preciosReferenciaDe(codigo: 'H010', precioVenta: 110,
+        listas: _listas, financiadora: 'Krece');
+
+    test('inicial 0 y cuotas = precio de la lista concuerda', () {
+      final r = auditarFacturaAuto(
+          renglones: [RenglonAuditoria(financiado: true, precios: cashea)],
+          pagadoUsd: 0, pagadoBsEnUsd: 0,
+          numeroCuotas: 6, montoCuota: 33, financiadora: 'Cashea');
+      expect(r.estado, EstadoAuditoriaAuto.concuerda);
+      expect(r.detalle, contains('Sin inicial (promoción)'));
+    });
+
+    test('inicial 0 con lista de 30% y cuotas que no suman el precio: diferencia', () {
+      final r = auditarFacturaAuto(
+          renglones: [RenglonAuditoria(financiado: true, precios: krece)],
+          pagadoUsd: 0, pagadoBsEnUsd: 0,
+          numeroCuotas: 6, montoCuota: 14, financiadora: 'Krece');
+      expect(r.estado, EstadoAuditoriaAuto.diferencia);
+      expect(r.detalle, startsWith('Sin inicial (promoción)'));
+    });
+
+    test('% de inicial: 0 y vacío valen, negativo no', () {
+      expect(errorPctInicial('0'), isNull);
+      expect(errorPctInicial(''), isNull);
+      expect(errorPctInicial('36,5'), isNull);
+      expect(errorPctInicial('-5'), isNotNull);
+      expect(errorPctInicial('abc'), isNotNull);
+      expect(esInicialCero(0), isTrue);
+      expect(esInicialCero(0.001), isTrue);
+      expect(esInicialCero(0.01), isFalse);
+    });
+
+    test('lista con 0% de inicial: la inicial es 0 y la cuota cubre el precio', () {
+      final l = _lista('Promo Cashea', {'Precio': 198}, financiadora: 'Cashea');
+      l.numeroCuotas = 6;
+      final it = l.items.first;
+      expect(l.inicialDe(it, 198), 0);
+    });
+  });
 }

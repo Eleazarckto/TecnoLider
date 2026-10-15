@@ -171,4 +171,44 @@ void main() {
           isNull);
     });
   });
+
+  group('tienda asignada en la ficha del usuario', () {
+    Usuario u(String rol, String tienda) => Usuario(nombre: 'X', cedula: '',
+        correo: '$rol$tienda@x.com', clave: '1234', rol: rol, tienda: tienda);
+
+    test('opciones: "sin tienda" primero y luego las tiendas', () {
+      expect(opcionesTiendaUsuario(['Principal', 'Sucursal'], ''),
+          ['', 'Principal', 'Sucursal']);
+    });
+
+    test('una tienda que ya no existe se conserva para no romper el selector', () {
+      expect(opcionesTiendaUsuario(['Principal'], 'Vieja'),
+          ['', 'Principal', 'Vieja']);
+      expect(opcionesTiendaUsuario(['Principal'], 'Principal'),
+          ['', 'Principal']);
+    });
+
+    test('etiqueta de la tarjeta', () {
+      expect(etiquetaTiendaUsuario(''), 'Sin tienda (todas)');
+      expect(etiquetaTiendaUsuario(' Sucursal '), 'Sucursal');
+    });
+
+    test('cuenta sólo vendedores (roles restringidos) sin tienda', () {
+      final lista = [
+        u('Vendedor', ''), u('Vendedor', 'Principal'), u('Activador', ''),
+        u('Dueño', ''), u('Administrador', ''),
+      ];
+      expect(contarSinTiendaAsignada(lista), 2);
+      expect(avisoSinTiendaAsignada(lista), '2 vendedores sin tienda asignada');
+      expect(avisoSinTiendaAsignada([u('Vendedor', '')]),
+          '1 vendedor sin tienda asignada');
+      expect(avisoSinTiendaAsignada([u('Dueño', '')]), isNull);
+    });
+
+    test('la tienda viaja en toMap/fromMap', () {
+      final m = u('Vendedor', 'Sucursal').toMap();
+      expect(m['tienda'], 'Sucursal');
+      expect(Usuario.fromMap({...m, 'id': '7'}).tienda, 'Sucursal');
+    });
+  });
 }

@@ -10648,7 +10648,15 @@ class _ResumenInicialFactura {
 
   bool esPagoInicial(PagoFactura p) =>
       pagosInicial.any((x) => identical(x, p));
+
+  /// Venta financiada sin inicial (promoción de la financiadora).
+  bool get sinInicial => esInicialCero(inicialUsd);
 }
+
+/// Los pagos de $0 (el que registra una venta financiada SIN inicial)
+/// no se listan en la factura impresa: el bloque de inicial ya dice
+/// "Sin inicial (promoción)".
+bool _pagoVisibleEnFactura(PagoFactura p) => !esInicialCero(p.monto);
 
 /// Devuelve el resumen de inicial de la factura, o null si la venta no
 /// es financiada (venta de contado normal → no hay "Inicial").
@@ -10738,7 +10746,16 @@ pw.Widget _bloqueInicialPdf(_ResumenInicialFactura r,
   return pw.Column(
     crossAxisAlignment: pw.CrossAxisAlignment.stretch,
     children: [
-      fila('Inicial', formatCurrency(r.inicialUsd), fuerte: true),
+      // Promoción sin inicial: "Sin inicial (promoción)" en vez de
+      // un "Inicial: $0.00" que parece un error.
+      if (r.sinInicial)
+        pw.Text(kTextoSinInicial,
+          style: pw.TextStyle(
+            fontSize: fontSize,
+            fontWeight: pw.FontWeight.bold,
+            color: PdfColors.black))
+      else
+        fila('Inicial', formatCurrency(r.inicialUsd), fuerte: true),
       // Si la inicial se pagó completa en bolívares, su monto en Bs
       // va en una línea aparte (cabe en térmica de 58mm).
       if (r.inicialBs != null)
@@ -14548,7 +14565,7 @@ Future<File?> generarFacturaPDF(FacturaModel factura) async {
           pw.Text("FORMA DE PAGO",
             style: pw.TextStyle(fontSize: 11, fontWeight: pw.FontWeight.bold, color: PdfColors.blue900)),
           pw.SizedBox(height: 4),
-          ...factura.pagos.map((p) {
+          ...factura.pagos.where(_pagoVisibleEnFactura).map((p) {
             // Para pagos Financiados con cuotas, mostramos DOS líneas:
             //   1) método y monto (igual que antes)
             //   2) detalle de cuotas: "N cuotas de $X c/u"
@@ -15145,7 +15162,7 @@ Future<void> imprimirFactura(FacturaModel factura, [BuildContext? context]) asyn
         // ═══════════════════════════════════════════════════════
         if (factura.pagos.isNotEmpty) ...[
           _seccionTermica("MÉTODOS DE PAGO", fs),
-          ...factura.pagos.map((p) {
+          ...factura.pagos.where(_pagoVisibleEnFactura).map((p) {
             // ── Equivalente USD con tasa HISTÓRICA del pago ──
             // Si el pago se hizo en Bs, mostrar el equivalente en USD
             // usando la tasa que estaba activa cuando se creó el pago
@@ -15434,7 +15451,7 @@ Future<void> imprimirFactura(FacturaModel factura, [BuildContext? context]) asyn
                       color: PdfColors.grey600,
                       letterSpacing: 1.5)),
                   pw.SizedBox(height: 6),
-                  ...factura.pagos.map((p) {
+                  ...factura.pagos.where(_pagoVisibleEnFactura).map((p) {
                     // ── Equivalente USD con tasa HISTÓRICA del pago ──
                     // Mismo criterio de moneda que el monto impreso.
                     final esEnBs = _esMetodoBsFactura(p.metodo);
@@ -20080,6 +20097,9 @@ class _VentanaUsuariosState extends State<VentanaUsuarios> {
     final sueldoCtrl = TextEditingController(text: usuario.sueldoBase.toStringAsFixed(2));
     String rol = usuario.rol;
     bool ganaComisiones = usuario.ganaComisiones;
+    // Tienda de la ficha (columna `usuarios.tienda`). Antes este diálogo
+    // la guardaba siempre en '' y no había dónde elegirla.
+    String tienda = usuario.tienda.trim();
     bool verClave = false;
     bool guardando = false;
     final formKey = GlobalKey<FormState>();
@@ -20170,28 +20190,12 @@ class _VentanaUsuariosState extends State<VentanaUsuarios> {
                 onChanged: (v) => setS(() => ganaComisiones = v),
                 activeThumbColor: AppColors.royalBlue,
               ),
-              // ── Tienda al iniciar sesión ─────────────────────────
-              // Ya no se asigna al usuario una tienda fija. El usuario
-              // elige la ubicación cada vez que inicia sesión.
+              // ── Tienda asignada ──────────────────────────────────
+              // Un Vendedor (o Activador/Encargado) con tienda sólo
+              // factura en ella; sin tienda, en cualquiera.
               const SizedBox(height: 10),
-              Container(
-                padding: const EdgeInsets.all(10),
-                decoration: BoxDecoration(
-                  color: AppColors.surfaceTintBlue,
-                  borderRadius: BorderRadius.circular(8),
-                  border: Border.all(
-                      color: AppColors.brandBlue.withValues(alpha: 0.2)),
-                ),
-                child: Row(children: const [
-                  Icon(Icons.info_outline,
-                      size: 16, color: AppColors.brandBlue),
-                  SizedBox(width: 8),
-                  Expanded(child: Text(
-                    "La tienda se selecciona al iniciar sesión.",
-                    style: TextStyle(fontSize: 12,
-                        color: AppColors.textPrimary))),
-                ]),
-              ),
+              _selectorTiendaUsuario(tienda, rol,
+                  (v) => setS(() => tienda = v)),
             ]),
           ),
         ),
@@ -20214,10 +20218,17 @@ class _VentanaUsuariosState extends State<VentanaUsuarios> {
                   'clave': claveCtrl.text.trim(),
                   'rol': rol,
                   'sueldo_base': double.tryParse(sueldoCtrl.text) ?? 0,
-                  // tienda queda vacía — se asigna al iniciar sesión
-                  'tienda': '',
+                  'tienda': tienda,
                   'gana_comisiones': ganaComisiones ? 1 : 0,
                 });
+                // Si me edité a mí mismo, la restricción de facturar
+                // usa la tienda nueva sin tener que volver a entrar.
+                // (`usuarioSesion.tienda` no se toca: es la tienda en
+                // la que se abrió la sesión.)
+                final esYo = usuarioSesion != null &&
+                    usuario.correo.toLowerCase() ==
+                        usuarioSesion!.correo.toLowerCase();
+                if (esYo) tiendaAsignadaSesion = tienda;
                 if (!ctx.mounted) return;
                 Navigator.pop(ctx);
                 await _cargar();
@@ -20244,6 +20255,7 @@ class _VentanaUsuariosState extends State<VentanaUsuarios> {
     final sueldoCtrl = TextEditingController(text: "0");
     String rol = "Vendedor";
     bool ganaComisiones = true;
+    String tienda = '';
     bool verClave = false;
     bool guardando = false;
     final formKey = GlobalKey<FormState>();
@@ -20340,28 +20352,12 @@ class _VentanaUsuariosState extends State<VentanaUsuarios> {
                 onChanged: (v) => setS(() => ganaComisiones = v),
                 activeThumbColor: AppColors.royalBlue,
               ),
-              // ── Tienda al iniciar sesión ─────────────────────────
-              // Ya no se asigna al usuario una tienda fija. Cada vez
-              // que inicia sesión elige la ubicación de trabajo.
+              // ── Tienda asignada ──────────────────────────────────
+              // Un Vendedor (o Activador/Encargado) con tienda sólo
+              // factura en ella; sin tienda, en cualquiera.
               const SizedBox(height: 10),
-              Container(
-                padding: const EdgeInsets.all(10),
-                decoration: BoxDecoration(
-                  color: AppColors.surfaceTintBlue,
-                  borderRadius: BorderRadius.circular(8),
-                  border: Border.all(
-                      color: AppColors.brandBlue.withValues(alpha: 0.2)),
-                ),
-                child: Row(children: const [
-                  Icon(Icons.info_outline,
-                      size: 16, color: AppColors.brandBlue),
-                  SizedBox(width: 8),
-                  Expanded(child: Text(
-                    "La tienda se selecciona al iniciar sesión.",
-                    style: TextStyle(fontSize: 12,
-                        color: AppColors.textPrimary))),
-                ]),
-              ),
+              _selectorTiendaUsuario(tienda, rol,
+                  (v) => setS(() => tienda = v)),
             ]),
           ),
         ),
@@ -20427,8 +20423,7 @@ class _VentanaUsuariosState extends State<VentanaUsuarios> {
                   'clave': claveCtrl.text.trim(),
                   'rol': rol,
                   'sueldo_base': double.tryParse(sueldoCtrl.text) ?? 0,
-                  // tienda vacía: se asigna al iniciar sesión
-                  'tienda': '',
+                  'tienda': tienda,
                   'gana_comisiones': ganaComisiones ? 1 : 0,
                 });
                 // El POST tuvo éxito. Cerramos el diálogo PRIMERO para
@@ -20515,7 +20510,30 @@ class _VentanaUsuariosState extends State<VentanaUsuarios> {
         ? const Center(child: CircularProgressIndicator())
         : _usuarios.isEmpty
           ? const EmptyState(mensaje: "No hay usuarios registrados.", icono: Icons.people_outline)
-          : ListView.builder(
+          : Column(children: [
+            // Aviso: vendedores sin tienda pueden facturar en cualquiera.
+            if (avisoSinTiendaAsignada(_usuarios) != null)
+              Container(
+                width: double.infinity,
+                margin: const EdgeInsets.fromLTRB(12, 8, 12, 0),
+                padding: const EdgeInsets.all(10),
+                decoration: BoxDecoration(
+                  color: AppColors.statusOrange.withValues(alpha: 0.1),
+                  borderRadius: BorderRadius.circular(8),
+                  border: Border.all(
+                      color: AppColors.statusOrange.withValues(alpha: 0.4))),
+                child: Row(children: [
+                  const Icon(Icons.store_outlined,
+                      size: 18, color: AppColors.statusOrange),
+                  const SizedBox(width: 8),
+                  Expanded(child: Text(
+                    "${avisoSinTiendaAsignada(_usuarios)}: pueden facturar "
+                    "en cualquier tienda. Toca el usuario para asignarle una.",
+                    style: const TextStyle(fontSize: 12,
+                        color: AppColors.textPrimary))),
+                ]),
+              ),
+            Expanded(child: ListView.builder(
             padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
             itemCount: _usuarios.length,
             itemBuilder: (c, i) {
@@ -20568,6 +20586,22 @@ class _VentanaUsuariosState extends State<VentanaUsuarios> {
                           style: const TextStyle(fontSize: 11, color: AppColors.textSecondary)),
                       ],
                     ]),
+                    // Tienda asignada (naranja si es vendedor y no tiene).
+                    const SizedBox(height: 2),
+                    Builder(builder: (_) {
+                      final falta = rolRestringidoATienda(u.rol) &&
+                          u.tienda.trim().isEmpty;
+                      final color = falta
+                          ? AppColors.statusOrange : AppColors.textSecondary;
+                      return Row(children: [
+                        Icon(Icons.store_outlined, size: 13, color: color),
+                        const SizedBox(width: 4),
+                        Flexible(child: Text(etiquetaTiendaUsuario(u.tienda),
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(fontSize: 12, color: color,
+                            fontWeight: falta ? FontWeight.w600 : FontWeight.normal))),
+                      ]);
+                    }),
                   ]),
                   trailing: Row(mainAxisSize: MainAxisSize.min, children: [
                     // Billetera de comisiones de este usuario (perfil)
@@ -20593,11 +20627,50 @@ class _VentanaUsuariosState extends State<VentanaUsuarios> {
                 ),
               );
             },
-          ),
+          )),
+          ]),
       floatingActionButton: FloatingActionButton(
         onPressed: _crearUsuario,
         child: const Icon(Icons.person_add_outlined)),
     );
+  }
+
+  /// Selector de la tienda asignada del usuario (columna
+  /// `usuarios.tienda`): las tiendas configuradas + "Sin tienda".
+  Widget _selectorTiendaUsuario(
+      String valor, String rol, ValueChanged<String> onChanged) {
+    final actual = valor.trim();
+    final opciones = opcionesTiendaUsuario(ConfigSistema.tiendas, actual);
+    final existentes = ConfigSistema.tiendas.map((t) => t.trim()).toSet();
+    final String ayuda;
+    if (!rolRestringidoATienda(rol)) {
+      ayuda = "Este rol puede trabajar en cualquier tienda.";
+    } else if (actual.isEmpty) {
+      ayuda = "Sin tienda: puede facturar en cualquier tienda.";
+    } else {
+      ayuda = "Sólo podrá facturar en esta tienda "
+          "(puede consultar el inventario de las demás).";
+    }
+    return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+      DropdownButtonFormField<String>(
+        value: actual,
+        isExpanded: true,
+        items: opciones.map((t) => DropdownMenuItem(
+          value: t,
+          child: Text(
+            t.isEmpty
+                ? kTextoSinTiendaUsuario
+                : (existentes.contains(t) ? t : "$t (ya no existe)"),
+            overflow: TextOverflow.ellipsis))).toList(),
+        onChanged: (v) { if (v != null) onChanged(v); },
+        decoration: const InputDecoration(labelText: "Tienda asignada",
+            prefixIcon: Icon(Icons.store_outlined)),
+      ),
+      Padding(
+        padding: const EdgeInsets.only(top: 4, left: 4),
+        child: Text(ayuda, style: const TextStyle(
+            fontSize: 11, color: AppColors.textSecondary))),
+    ]);
   }
 
   Color _colorRol(String rol) {
@@ -30647,9 +30720,12 @@ class _FormularioFacturaState extends State<FormularioFactura>
     // factura impresa.
     int? numeroCuotasManual,
     double? montoCuotaManual,
+    // Sólo para el pago de $0 de una venta financiada sin inicial
+    // (ver `_registrarPagoSinInicial`).
+    bool permitirCero = false,
   }) {
     final monto = double.tryParse(_montoPago.text.trim());
-    if (monto == null || monto <= 0) {
+    if (monto == null || monto < 0 || (monto == 0 && !permitirCero)) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text("Ingrese un monto de pago válido mayor a 0"),
           backgroundColor: AppColors.statusOrange));
@@ -30802,6 +30878,50 @@ class _FormularioFacturaState extends State<FormularioFactura>
     });
   }
 
+  /// true si algún producto de la factura se vende con financiadora
+  /// (F/D = Cashea, Weppa o Krece).
+  bool _hayProductoFinanciado() {
+    bool esFin(String? t) => t == 'Cashea' || t == 'Weppa' || t == 'Krece';
+    return _items.any((p) => esFin(_tipoVentaItem[identityHashCode(p)])) ||
+        _equipos.any((e) => esFin(_tipoVentaEquipo[identityHashCode(e)]));
+  }
+
+  /// Pregunta si la venta financiada va sin inicial (promoción).
+  Future<bool?> _confirmarVentaSinInicial() => showDialog<bool>(
+    context: context,
+    builder: (ctx) => AlertDialog(
+      title: const Row(children: [
+        Icon(Icons.local_offer_outlined, color: AppColors.royalBlue),
+        SizedBox(width: 8),
+        Expanded(child: Text("¿Venta sin inicial (promoción)?")),
+      ]),
+      content: const Text(
+        "La factura no tiene pagos. Si la financiadora está en "
+        "promoción y el cliente no paga inicial, confirma y se "
+        "guardará con inicial \$0.\n\nSi el cliente sí pagó, "
+        "toca \"Agregar pago\" y regístralo."),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(ctx, false),
+          child: const Text("Agregar pago")),
+        ElevatedButton(
+          onPressed: () => Navigator.pop(ctx, true),
+          child: const Text("Sí, sin inicial")),
+      ],
+    ),
+  );
+
+  /// Registra el pago de $0 de una venta financiada sin inicial. Pasa
+  /// por `_agregarPago` para que lleve la financiadora, las cuotas y la
+  /// lista igual que cualquier inicial.
+  void _registrarPagoSinInicial() {
+    final metodoPrevio = _metodo;
+    _metodo = kTextoSinInicial;
+    _montoPago.text = '0';
+    _agregarPago(esInicial: true, permitirCero: true);
+    _metodo = metodoPrevio;
+  }
+
   Future<void> _guardarFactura() async {
     // ── Anti-doble-click ─────────────────────────────────────
     // Si el usuario presiona "Guardar" mientras ya hay un POST en
@@ -30860,6 +30980,18 @@ class _FormularioFacturaState extends State<FormularioFactura>
       _mostrarValidacion("Agregue al menos un producto a la factura.");
       return;
     }
+    // Venta financiada (Krece/Cashea/Weppa) SIN inicial: promociones.
+    // Antes era imposible (el pago exige monto > 0 y aquí se exigía al
+    // menos un pago). Ahora se confirma y se registra un pago de $0
+    // marcado como inicial, que lleva la financiadora, las cuotas y la
+    // lista: los reportes y la factura impresa los leen del pago.
+    bool sinInicialConfirmada = false;
+    if (_pagos.isEmpty && _hayProductoFinanciado()) {
+      final ok = await _confirmarVentaSinInicial();
+      if (ok != true || !mounted) return;
+      _registrarPagoSinInicial();
+      sinInicialConfirmada = _pagos.isNotEmpty;
+    }
     if (_pagos.isEmpty) {
       _mostrarValidacion("Agregue al menos un método de pago.");
       return;
@@ -30869,7 +31001,9 @@ class _FormularioFacturaState extends State<FormularioFactura>
     final totalProductos = _equipos.fold(0.0, (s, e) => s + e.producto.precioVenta)
         + _items.fold(0.0, (s, p) => s + p.precioVenta);
     final totalPagos = _pagos.fold(0.0, (s, p) => s + p.monto);
-    if ((totalPagos - totalProductos).abs() > 0.10) { // tolerancia de $0.10
+    // (Sin inicial ya se confirmó arriba: no se pregunta dos veces.)
+    if (!sinInicialConfirmada &&
+        (totalPagos - totalProductos).abs() > 0.10) { // tolerancia de $0.10
       final confirmar = await showDialog<bool>(
         context: context,
         builder: (ctx) => AlertDialog(
@@ -33787,7 +33921,7 @@ class _VentanaConsultaRapidaPreciosState
                                           Text(
                                             "${(pr['varias_columnas'] as bool) ? '${pr['columna']} · ' : ''}"
                                             "${pr['financiadora'] ?? 'Financiamiento'} · "
-                                            "Inicial ${moneda == 'Bs' ? '${(pr['inicial'] as double).toStringAsFixed(2)} Bs' : '\$${(pr['inicial'] as double).toStringAsFixed(2)}'}"
+                                            "${esInicialCero(pr['inicial'] as double) ? kTextoSinInicial : "Inicial ${moneda == 'Bs' ? '${(pr['inicial'] as double).toStringAsFixed(2)} Bs' : '\$${(pr['inicial'] as double).toStringAsFixed(2)}'}"}"
                                             "${(pr['tiene_cuotas'] as bool) ? ' · ${pr['n_cuotas']} cuotas de ${moneda == 'Bs' ? '${(pr['cuota'] as double).toStringAsFixed(2)} Bs' : '\$${(pr['cuota'] as double).toStringAsFixed(2)}'}' : ' · sin cuotas'}",
                                             style: const TextStyle(
                                                 fontSize: 10,
@@ -34394,6 +34528,14 @@ class _VentanaListasPreciosState extends State<VentanaListasPrecios> {
             icon: const Icon(Icons.save),
             label: const Text("Guardar"),
             onPressed: () async {
+              // % de inicial: 0 vale (promoción sin inicial), negativo no.
+              final errPct = esFinanc ? errorPctInicial(pctInicialCtrl.text) : null;
+              if (errPct != null) {
+                ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+                  content: Text(errPct),
+                  backgroundColor: AppColors.statusOrange));
+                return;
+              }
               // Actualizar todos los campos en el objeto existente
               lista.nombre = nombreCtrl.text.trim().isEmpty
                   ? lista.nombre
@@ -34827,6 +34969,14 @@ class _VentanaListasPreciosState extends State<VentanaListasPrecios> {
                   if (esFinanc && financiadoraCtrl.text.trim().isEmpty) {
                     ScaffoldMessenger.of(context).showSnackBar(
                       const SnackBar(content: Text("Ingrese el nombre de la financiadora")));
+                    return;
+                  }
+                  // % de inicial: 0 vale (promoción sin inicial), negativo no.
+                  final errPct =
+                      esFinanc ? errorPctInicial(pctInicialCtrl.text) : null;
+                  if (errPct != null) {
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      SnackBar(content: Text(errPct)));
                     return;
                   }
                   final tasa = esBs
@@ -37465,15 +37615,27 @@ class _DetalleListaPrecioState extends State<DetalleListaPrecio> {
   void _ejecutarCambioMasivo(BuildContext ctx, List<int>? indices,
       String tipoOp, String campoFinanc, String valorStr) {
     final valor = double.tryParse(valorStr.replaceAll(',', '.')) ?? 0;
-    if (valor == 0 &&
-        !(tipoOp == 'reemplazar' && campoFinanc != 'n_cuotas')) {
+    final lista = widget.lista;
+    final esFinanc = lista.esFinanciamiento;
+    // Los campos de TODA la lista siempre fijan el valor, aunque el tipo
+    // de operación haya quedado en "Aumentar %" (ese chip no se ve para
+    // ellos). Por eso un 0% de inicial se rechazaba.
+    final fijaValor = tipoOp == 'reemplazar' ||
+        (esFinanc && (campoFinanc == 'inicial_pct' ||
+            campoFinanc == 'recargo_pct' ||
+            campoFinanc == 'n_cuotas'));
+    if (valor < 0) {
+      ScaffoldMessenger.of(ctx).showSnackBar(const SnackBar(
+        content: Text('El valor no puede ser negativo'),
+        backgroundColor: Colors.orange));
+      return;
+    }
+    if (valor == 0 && !(fijaValor && campoFinanc != 'n_cuotas')) {
       ScaffoldMessenger.of(ctx).showSnackBar(const SnackBar(
         content: Text('Ingresa un valor mayor a 0'),
         backgroundColor: Colors.orange));
       return;
     }
-    final lista = widget.lista;
-    final esFinanc = lista.esFinanciamiento;
 
     // ─── CASO 1: cambio a nivel de LISTA (financ. solo) ───
     // Va aparte porque puede tener que preguntar (async) qué hacer con
@@ -47774,7 +47936,8 @@ class _VentanaConfiguracionState extends State<VentanaConfiguracion>
                         l.porcentajeInicial.toString(),
                         (v) {
                           final val = double.tryParse(v);
-                          if (val != null) setState(() => l.porcentajeInicial = val);
+                          // 0 vale (promoción sin inicial); negativo no.
+                          if (val != null && val >= 0) setState(() => l.porcentajeInicial = val);
                         })),
                       const SizedBox(width: 8),
                       Expanded(child: _cfTextField("Cuotas",

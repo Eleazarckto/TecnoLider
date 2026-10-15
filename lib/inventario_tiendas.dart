@@ -82,6 +82,50 @@ String? motivoNoPuedeFacturarEnSesion(String tiendaVenta) =>
       tiendaVenta: tiendaVenta,
     );
 
+// ── Asignar la tienda desde la ficha del usuario ────────────
+// Las reglas de arriba usan `usuarios.tienda`, pero la ventana de
+// Usuarios no tenía dónde elegirla (y al editar la ponía en ''), así
+// que en producción ningún vendedor tenía tienda y la restricción no
+// se aplicaba a nadie.
+
+/// Texto de la opción "sin tienda" del selector de la ficha.
+const String kTextoSinTiendaUsuario = 'Sin tienda (todas)';
+
+/// Valores del selector de tienda de la ficha de un usuario: '' (sin
+/// tienda) + las tiendas configuradas. Si la tienda guardada ya no está
+/// en la lista (la renombraron o la borraron) se agrega igual, para que
+/// el selector no se rompa y el administrador vea qué tenía.
+List<String> opcionesTiendaUsuario(List<String> tiendas, String actual) {
+  final opciones = <String>[''];
+  for (final t in tiendas) {
+    final limpia = t.trim();
+    if (limpia.isNotEmpty && !opciones.contains(limpia)) opciones.add(limpia);
+  }
+  final a = actual.trim();
+  if (a.isNotEmpty && !opciones.contains(a)) opciones.add(a);
+  return opciones;
+}
+
+/// Etiqueta de la tienda de un usuario para mostrar en su tarjeta.
+String etiquetaTiendaUsuario(String tienda) =>
+    tienda.trim().isEmpty ? kTextoSinTiendaUsuario : tienda.trim();
+
+/// Cuántos usuarios de rol restringido (Vendedor, Activador,
+/// Encargado...) no tienen tienda en su ficha: esos pueden facturar en
+/// cualquier tienda.
+int contarSinTiendaAsignada(Iterable<Usuario> usuarios) => usuarios
+    .where((u) => rolRestringidoATienda(u.rol) && u.tienda.trim().isEmpty)
+    .length;
+
+/// Aviso para la ventana de Usuarios, o null si no falta ninguno.
+String? avisoSinTiendaAsignada(Iterable<Usuario> usuarios) {
+  final n = contarSinTiendaAsignada(usuarios);
+  if (n == 0) return null;
+  return n == 1
+      ? '1 vendedor sin tienda asignada'
+      : '$n vendedores sin tienda asignada';
+}
+
 // ── 1. INGRESO DE STOCK DIRECTO EN LA TIENDA ────────────────
 
 /// Qué hay que hacer para sumar stock de un código en una tienda.

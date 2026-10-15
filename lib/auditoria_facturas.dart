@@ -252,6 +252,10 @@ double _tolerancia(double esperado) => math.max(1.0, esperado.abs() * 0.01);
 
 String _usd(double v) => '\$${v.toStringAsFixed(2)}';
 
+/// "Inicial $50.00", o "Sin inicial (promoción)" si es 0.
+String _txtInicial(double inicial) =>
+    esInicialCero(inicial) ? kTextoSinInicial : 'Inicial ${_usd(inicial)}';
+
 /// Verificación automática por reglas de una factura.
 ///
 ///  · CONTADO: lo pagado debe ser el precio en divisa si pagó en
@@ -264,6 +268,8 @@ String _usd(double v) => '\$${v.toStringAsFixed(2)}';
 ///        cuotas llevan recargo y no suman el precio).
 ///    Si no, informa la diferencia de la inicial contra la esperada (o
 ///    del plan completo contra el precio, si la lista no fija %).
+///    Una inicial de 0 (promoción) cuadra por la regla de las cuotas:
+///    N° cuotas × cuota = precio de la lista.
 ResultadoAuditoriaAuto auditarFacturaAuto({
   required List<RenglonAuditoria> renglones,
   required double pagadoUsd,
@@ -349,7 +355,7 @@ ResultadoAuditoriaAuto auditarFacturaAuto({
       (planTotal - precioFin).abs() <= _tolerancia(precioFin)) {
     return ResultadoAuditoriaAuto(EstadoAuditoriaAuto.concuerda,
         diferencia: redondearPrecio(planTotal - precioFin),
-        detalle: 'Inicial ${_usd(inicial)}$extraContado + '
+        detalle: '${_txtInicial(inicial)}$extraContado + '
             '$numeroCuotas × ${_usd(montoCuota!)} = precio $fin ${_usd(precioFin)}');
   }
   // b) Inicial = % de la lista.
@@ -358,7 +364,7 @@ ResultadoAuditoriaAuto auditarFacturaAuto({
     final dif = redondearPrecio(inicial - esperada);
     final pctTxt = pct == pct.roundToDouble()
         ? pct.toStringAsFixed(0) : pct.toStringAsFixed(1);
-    final det = 'Inicial ${_usd(inicial)}$extraContado · esperada '
+    final det = '${_txtInicial(inicial)}$extraContado · esperada '
         '${_usd(esperada)} ($pctTxt% de ${_usd(precioFin)}, precio $fin)';
     return dif.abs() <= _tolerancia(esperada)
         ? ResultadoAuditoriaAuto(EstadoAuditoriaAuto.concuerda,
@@ -370,12 +376,12 @@ ResultadoAuditoriaAuto auditarFacturaAuto({
     final dif = redondearPrecio(planTotal - precioFin);
     return ResultadoAuditoriaAuto(EstadoAuditoriaAuto.diferencia,
         diferencia: dif,
-        detalle: 'Inicial ${_usd(inicial)} + $numeroCuotas × '
+        detalle: '${_txtInicial(inicial)} + $numeroCuotas × '
             '${_usd(montoCuota!)} = ${_usd(planTotal)} · precio $fin '
             '${_usd(precioFin)}');
   }
   return ResultadoAuditoriaAuto(EstadoAuditoriaAuto.sinDatos,
-      detalle: 'Inicial ${_usd(inicial)} · precio $fin ${_usd(precioFin)} '
+      detalle: '${_txtInicial(inicial)} · precio $fin ${_usd(precioFin)} '
           '(faltan las cuotas o el % de inicial de la lista)');
 }
 
