@@ -241,6 +241,12 @@ function get_endpoints(): array {
         'producto_imagenes'         => 'producto_imagenes.php',
         'producto_imagen_guardar'   => 'producto_imagenes.php',
 
+        // ── Ficha técnica de cada producto (sin IA) ─────────
+        // GET resumen o una ficha (?codigo=), POST guardar (la app
+        // manda usuario_correo; el servidor comprueba el rol).
+        'ficha_tecnica'             => 'ficha_tecnica.php',
+        'ficha_tecnica_guardar'     => 'ficha_tecnica.php',
+
         // ── Diagnóstico ──────────────────────────────────────
         'diagnostico_factura_cuotas' => 'diagnostico_factura_cuotas.php',
         // Chequeo de salud + reparación idempotente del esquema.

@@ -1,7 +1,7 @@
 name: tecno_lider
 description: "Sistema POS Tecno Líder"
 publish_to: 'none'
-version: 1.0.17+17
+version: 1.0.18+18
 
 environment:
   sdk: ^3.5.0
@@ -32,6 +32,10 @@ dependencies:
   mailer: ^6.6.0
   flutter_local_notifications: ^17.2.4
   intl: ^0.20.0
+  # Actualizador (lib/actualizador.dart): huella SHA-256 y revisar/descomprimir
+  # el paquete. Ya venían como dependencias de otras; ahora se usan directo.
+  crypto: ^3.0.3
+  archive: ^3.6.1
 
 dev_dependencies:
   flutter_test:

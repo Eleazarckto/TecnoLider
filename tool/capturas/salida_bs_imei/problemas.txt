@@ -1,0 +1,153 @@
+[Editar lista Bs] ListTile background color or ink splashes may be invisible. The ListTile is wrapped in a DecoratedBox that has a background color. Because ListTile paints its background and ink splashes on the nearest Material ancestor, this DecoratedBox will hide those effects.
+[Editar lista Bs] ListTile background color or ink splashes may be invisible. The ListTile is wrapped in a DecoratedBox that has a background color. Because ListTile paints its background and ink splashes on the nearest Material ancestor, this DecoratedBox will hide those effects.
+[Editar lista Bs] ListTile background color or ink splashes may be invisible. The ListTile is wrapped in a DecoratedBox that has a background color. Because ListTile paints its background and ink splashes on the nearest Material ancestor, this DecoratedBox will hide those effects.
+[Editar lista Bs] ListTile background color or ink splashes may be invisible. The ListTile is wrapped in a DecoratedBox that has a background color. Because ListTile paints its background and ink splashes on the nearest Material ancestor, this DecoratedBox will hide those effects.
+[Editar lista Bs] ListTile background color or ink splashes may be invisible. The ListTile is wrapped in a DecoratedBox that has a background color. Because ListTile paints its background and ink splashes on the nearest Material ancestor, this DecoratedBox will hide those effects.
+[Editar lista Bs] ListTile background color or ink splashes may be invisible. The ListTile is wrapped in a DecoratedBox that has a background color. Because ListTile paints its background and ink splashes on the nearest Material ancestor, this DecoratedBox will hide those effects.
+[Editar lista Bs] ListTile background color or ink splashes may be invisible. The ListTile is wrapped in a DecoratedBox that has a background color. Because ListTile paints its background and ink splashes on the nearest Material ancestor, this DecoratedBox will hide those effects.
+[Editar lista Bs] ListTile background color or ink splashes may be invisible. The ListTile is wrapped in a DecoratedBox that has a background color. Because ListTile paints its background and ink splashes on the nearest Material ancestor, this DecoratedBox will hide those effects.
+
+════ Editar lista Bs
+══╡ EXCEPTION CAUGHT BY FLUTTER FRAMEWORK ╞══════════════════════
+The following assertion was thrown:
+ListTile background color or ink splashes may be invisible.
+The ListTile is wrapped in a DecoratedBox that has a background
+color. Because ListTile paints its background and ink splashes on
+the nearest Material ancestor, this DecoratedBox will hide those
+effects.
+To fix this, wrap the ListTile in its own Material widget, or
+remove the background color from the intermediate DecoratedBox.
+
+ListTile:
+  ListTile(dense: true, selectedColor: Color(alpha: 1.0000, red: 0.1216, green: 0.1333, blue: 0.4392, colorSpace: ColorSpace.sRGB), onTap: Closure: () => void)
+DecoratedBox:
+  DecoratedBox(bg: BoxDecoration(color: Color(alpha: 1.0000, red: 0.9608, green: 0.9608, blue: 0.9608, colorSpace: ColorSpace.sRGB), border: Border.all(BorderSide(color: Color(alpha: 1.0000, red: 0.8784, green: 0.8784, blue: 0.8784, colorSpace: ColorSpace.sRGB))), borderRadius: BorderRadius.circular(8.0)))
+═════════════════════════════════════════════════════════════════
+
+
+════ Editar lista Bs
+══╡ EXCEPTION CAUGHT BY FLUTTER FRAMEWORK ╞══════════════════════
+The following assertion was thrown:
+ListTile background color or ink splashes may be invisible.
+The ListTile is wrapped in a DecoratedBox that has a background
+color. Because ListTile paints its background and ink splashes on
+the nearest Material ancestor, this DecoratedBox will hide those
+effects.
+To fix this, wrap the ListTile in its own Material widget, or
+remove the background color from the intermediate DecoratedBox.
+
+ListTile:
+  ListTile(dense: true, selectedColor: Color(alpha: 1.0000, red: 0.1216, green: 0.1333, blue: 0.4392, colorSpace: ColorSpace.sRGB), onTap: Closure: () => void)
+DecoratedBox:
+  DecoratedBox(bg: BoxDecoration(color: Color(alpha: 1.0000, red: 0.9608, green: 0.9608, blue: 0.9608, colorSpace: ColorSpace.sRGB), border: Border.all(BorderSide(color: Color(alpha: 1.0000, red: 0.8784, green: 0.8784, blue: 0.8784, colorSpace: ColorSpace.sRGB))), borderRadius: BorderRadius.circular(8.0)))
+═════════════════════════════════════════════════════════════════
+
+
+════ Editar lista Bs
+══╡ EXCEPTION CAUGHT BY FLUTTER FRAMEWORK ╞══════════════════════
+The following assertion was thrown:
+ListTile background color or ink splashes may be invisible.
+The ListTile is wrapped in a DecoratedBox that has a background
+color. Because ListTile paints its background and ink splashes on
+the nearest Material ancestor, this DecoratedBox will hide those
+effects.
+To fix this, wrap the ListTile in its own Material widget, or
+remove the background color from the intermediate DecoratedBox.
+
+ListTile:
+  ListTile(dense: true, selectedColor: Color(alpha: 1.0000, red: 0.1216, green: 0.1333, blue: 0.4392, colorSpace: ColorSpace.sRGB), onTap: Closure: () => void)
+DecoratedBox:
+  DecoratedBox(bg: BoxDecoration(color: Color(alpha: 0.0600, red: 0.1216, green: 0.1333, blue: 0.4392, colorSpace: ColorSpace.sRGB), border: Border.all(BorderSide(color: Color(alpha: 0.4000, red: 0.1216, green: 0.1333, blue: 0.4392, colorSpace: ColorSpace.sRGB))), borderRadius: BorderRadius.circular(8.0)))
+═════════════════════════════════════════════════════════════════
+
+
+════ Editar lista Bs
+══╡ EXCEPTION CAUGHT BY FLUTTER FRAMEWORK ╞══════════════════════
+The following assertion was thrown:
+ListTile background color or ink splashes may be invisible.
+The ListTile is wrapped in a DecoratedBox that has a background
+color. Because ListTile paints its background and ink splashes on
+the nearest Material ancestor, this DecoratedBox will hide those
+effects.
+To fix this, wrap the ListTile in its own Material widget, or
+remove the background color from the intermediate DecoratedBox.
+
+ListTile:
+  ListTile(dense: true, selectedColor: Color(alpha: 1.0000, red: 0.1804, green: 0.4902, blue: 0.1961, colorSpace: ColorSpace.sRGB), onTap: Closure: () => void)
+DecoratedBox:
+  DecoratedBox(bg: BoxDecoration(color: Color(alpha: 0.0600, red: 0.1804, green: 0.4902, blue: 0.1961, colorSpace: ColorSpace.sRGB), border: Border.all(BorderSide(color: Color(alpha: 0.4000, red: 0.1804, green: 0.4902, blue: 0.1961, colorSpace: ColorSpace.sRGB))), borderRadius: BorderRadius.circular(8.0)))
+═════════════════════════════════════════════════════════════════
+
+
+════ Editar lista Bs
+══╡ EXCEPTION CAUGHT BY FLUTTER FRAMEWORK ╞══════════════════════
+The following assertion was thrown:
+ListTile background color or ink splashes may be invisible.
+The ListTile is wrapped in a DecoratedBox that has a background
+color. Because ListTile paints its background and ink splashes on
+the nearest Material ancestor, this DecoratedBox will hide those
+effects.
+To fix this, wrap the ListTile in its own Material widget, or
+remove the background color from the intermediate DecoratedBox.
+
+ListTile:
+  ListTile(dense: true, selectedColor: Color(alpha: 1.0000, red: 0.1216, green: 0.1333, blue: 0.4392, colorSpace: ColorSpace.sRGB), onTap: Closure: () => void)
+DecoratedBox:
+  DecoratedBox(bg: BoxDecoration(color: Color(alpha: 0.0600, red: 0.1216, green: 0.1333, blue: 0.4392, colorSpace: ColorSpace.sRGB), border: Border.all(BorderSide(color: Color(alpha: 0.4000, red: 0.1216, green: 0.1333, blue: 0.4392, colorSpace: ColorSpace.sRGB))), borderRadius: BorderRadius.circular(8.0)))
+═════════════════════════════════════════════════════════════════
+
+
+════ Editar lista Bs
+══╡ EXCEPTION CAUGHT BY FLUTTER FRAMEWORK ╞══════════════════════
+The following assertion was thrown:
+ListTile background color or ink splashes may be invisible.
+The ListTile is wrapped in a DecoratedBox that has a background
+color. Because ListTile paints its background and ink splashes on
+the nearest Material ancestor, this DecoratedBox will hide those
+effects.
+To fix this, wrap the ListTile in its own Material widget, or
+remove the background color from the intermediate DecoratedBox.
+
+ListTile:
+  ListTile(dense: true, selectedColor: Color(alpha: 1.0000, red: 0.1804, green: 0.4902, blue: 0.1961, colorSpace: ColorSpace.sRGB), onTap: Closure: () => void)
+DecoratedBox:
+  DecoratedBox(bg: BoxDecoration(color: Color(alpha: 0.0600, red: 0.1804, green: 0.4902, blue: 0.1961, colorSpace: ColorSpace.sRGB), border: Border.all(BorderSide(color: Color(alpha: 0.4000, red: 0.1804, green: 0.4902, blue: 0.1961, colorSpace: ColorSpace.sRGB))), borderRadius: BorderRadius.circular(8.0)))
+═════════════════════════════════════════════════════════════════
+
+
+════ Editar lista Bs
+══╡ EXCEPTION CAUGHT BY FLUTTER FRAMEWORK ╞══════════════════════
+The following assertion was thrown:
+ListTile background color or ink splashes may be invisible.
+The ListTile is wrapped in a DecoratedBox that has a background
+color. Because ListTile paints its background and ink splashes on
+the nearest Material ancestor, this DecoratedBox will hide those
+effects.
+To fix this, wrap the ListTile in its own Material widget, or
+remove the background color from the intermediate DecoratedBox.
+
+ListTile:
+  ListTile(dense: true, selectedColor: Color(alpha: 1.0000, red: 0.1216, green: 0.1333, blue: 0.4392, colorSpace: ColorSpace.sRGB), onTap: Closure: () => void)
+DecoratedBox:
+  DecoratedBox(bg: BoxDecoration(color: Color(alpha: 1.0000, red: 0.9608, green: 0.9608, blue: 0.9608, colorSpace: ColorSpace.sRGB), border: Border.all(BorderSide(color: Color(alpha: 1.0000, red: 0.8784, green: 0.8784, blue: 0.8784, colorSpace: ColorSpace.sRGB))), borderRadius: BorderRadius.circular(8.0)))
+═════════════════════════════════════════════════════════════════
+
+
+════ Editar lista Bs
+══╡ EXCEPTION CAUGHT BY FLUTTER FRAMEWORK ╞══════════════════════
+The following assertion was thrown:
+ListTile background color or ink splashes may be invisible.
+The ListTile is wrapped in a DecoratedBox that has a background
+color. Because ListTile paints its background and ink splashes on
+the nearest Material ancestor, this DecoratedBox will hide those
+effects.
+To fix this, wrap the ListTile in its own Material widget, or
+remove the background color from the intermediate DecoratedBox.
+
+ListTile:
+  ListTile(dense: true, selectedColor: Color(alpha: 1.0000, red: 0.1216, green: 0.1333, blue: 0.4392, colorSpace: ColorSpace.sRGB), onTap: Closure: () => void)
+DecoratedBox:
+  DecoratedBox(bg: BoxDecoration(color: Color(alpha: 1.0000, red: 0.9608, green: 0.9608, blue: 0.9608, colorSpace: ColorSpace.sRGB), border: Border.all(BorderSide(color: Color(alpha: 1.0000, red: 0.8784, green: 0.8784, blue: 0.8784, colorSpace: ColorSpace.sRGB))), borderRadius: BorderRadius.circular(8.0)))
+═════════════════════════════════════════════════════════════════
+
+

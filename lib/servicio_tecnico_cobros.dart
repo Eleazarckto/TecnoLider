@@ -888,34 +888,16 @@ class _VentanaIngresosServicioTecnicoState
             Chip(label: Text(_tienda!)),
         ]),
         const SizedBox(height: 10),
-        Container(
-          padding: const EdgeInsets.all(14),
-          decoration: BoxDecoration(
-            gradient: const LinearGradient(
-              colors: [AppColors.brandBlue, AppColors.brandBlueDark]),
-            borderRadius: BorderRadius.circular(14)),
-          child: Row(children: [
-            Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-              const Text('Ingresos cobrados',
-                style: TextStyle(color: Colors.white70, fontSize: 12)),
-              Text(formatCurrency(totalUsd),
-                style: const TextStyle(color: AppColors.brandYellow,
-                  fontSize: 26, fontWeight: FontWeight.w900)),
-              Text('${filas.length} cobro(s)',
-                style: const TextStyle(color: Colors.white70, fontSize: 12)),
-            ])),
-            Column(crossAxisAlignment: CrossAxisAlignment.end, children: [
-              const Text('Pendiente por cobrar',
-                style: TextStyle(color: Colors.white70, fontSize: 11)),
-              Text(formatCurrency(pendiente),
-                style: const TextStyle(color: Colors.white,
-                  fontSize: 16, fontWeight: FontWeight.w800)),
-              const Text('(servicios recibidos en el rango)',
-                style: TextStyle(color: Colors.white54, fontSize: 10)),
-            ]),
-          ]),
-        ),
+        // Indicadores del Panel (estilo Brizuela); antes un bloque azul.
+        FilaIndicadores(padding: const EdgeInsets.symmetric(vertical: 4), [
+          Indicador('Ingresos cobrados', formatCurrency(totalUsd),
+              icono: Icons.payments_rounded, color: AppColors.statusGreen,
+              detalle: '${filas.length} cobro(s)'),
+          Indicador('Pendiente por cobrar', formatCurrency(pendiente),
+              icono: Icons.hourglass_bottom_rounded,
+              color: pendiente > 0 ? AppColors.statusOrange : AppColors.azulVivo,
+              detalle: '(servicios recibidos en el rango)'),
+        ]),
         const SizedBox(height: 10),
         Card(child: Padding(
           padding: const EdgeInsets.all(12),

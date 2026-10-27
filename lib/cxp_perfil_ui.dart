@@ -453,72 +453,35 @@ class _VistaPerfilesCxpState extends State<VistaPerfilesCxp> {
     ]);
   }
 
+  // Indicadores del Panel (estilo Brizuela); antes un bloque azul con
+  // cifras blancas.
   Widget _resumen(ResumenAcreedores r) {
-    Widget bloque(String titulo, double monto, String detalle, Color color,
-        IconData icono) => Expanded(
-      child: Container(
-        padding: const EdgeInsets.all(12),
-        decoration: BoxDecoration(
-          color: Colors.white.withValues(alpha: 0.12),
-          borderRadius: BorderRadius.circular(12),
-          border: Border(left: BorderSide(color: color, width: 4)),
-        ),
-        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-          Row(children: [
-            Icon(icono, size: 14, color: Colors.white70),
-            const SizedBox(width: 4),
-            Flexible(child: Text(titulo,
-                style: const TextStyle(color: Colors.white70,
-                    fontSize: 11, letterSpacing: 0.8))),
-          ]),
-          const SizedBox(height: 4),
-          FittedBox(
-            fit: BoxFit.scaleDown,
-            alignment: Alignment.centerLeft,
-            child: Text(formatCurrency(monto),
-                style: const TextStyle(color: Colors.white,
-                    fontSize: 24, fontWeight: FontWeight.bold)),
-          ),
-          Text(detalle,
-              style: const TextStyle(color: Colors.white70, fontSize: 11)),
-        ]),
-      ),
-    );
-
     final quien = widget.esProveedor ? 'proveedor' : 'acreedor';
     String plural(int n) => '$n $quien${n == 1 ? '' : 'es'}';
-    return Container(
-      width: double.infinity,
-      padding: const EdgeInsets.fromLTRB(14, 14, 14, 12),
-      decoration: const BoxDecoration(
-        gradient: LinearGradient(
-          colors: [AppColors.royalBlue, Color(0xFF003580)],
-          begin: Alignment.topLeft, end: Alignment.bottomRight),
-      ),
-      child: Column(children: [
-        Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
-          bloque('DEUDA TOTAL', r.deudaTotal,
-              'con ${plural(r.conDeuda)}',
-              AppColors.statusRed, Icons.trending_down),
-          const SizedBox(width: 10),
-          bloque('SALDO A FAVOR', r.favorTotal,
-              'con ${plural(r.conFavor)}',
-              AppColors.statusGreen, Icons.savings_outlined),
-        ]),
-        const SizedBox(height: 8),
-        Row(children: [
+    return Column(children: [
+      FilaIndicadores([
+        Indicador('Deuda total', formatCurrency(r.deudaTotal),
+            icono: Icons.trending_down_rounded, color: AppColors.statusRed,
+            detalle: 'con ${plural(r.conDeuda)}'),
+        Indicador('Saldo a favor', formatCurrency(r.favorTotal),
+            icono: Icons.savings_rounded, color: AppColors.statusGreen,
+            detalle: 'con ${plural(r.conFavor)}'),
+      ]),
+      Padding(
+        padding: const EdgeInsets.fromLTRB(16, 0, 16, 6),
+        child: Row(children: [
           Expanded(child: Text(
             r.favorTotal > 0.005
                 ? 'Neto (deuda − a favor): ${formatCurrency(r.neto)}'
                 : '${plural(r.acreedores)} en total',
-            style: const TextStyle(color: Colors.white, fontSize: 12,
+            style: const TextStyle(color: AppColors.textPrimary, fontSize: 12,
                 fontWeight: FontWeight.w600))),
           if (r.favorTotal > 0.005)
             Text(plural(r.acreedores),
-                style: const TextStyle(color: Colors.white70, fontSize: 11)),
+                style: const TextStyle(color: AppColors.textSecondary, fontSize: 11)),
         ]),
-      ]),
-    );
+      ),
+    ]);
   }
 
   Widget _tarjeta(GrupoAcreedor<CuentaCxp> g) {

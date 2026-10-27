@@ -21,7 +21,7 @@
     <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
 
     <!-- =====================================================================
-         ACTUALIZACION OTA (ActualizadorApp en main.dart)
+         ACTUALIZACION OTA (lib/actualizador.dart + Actualizador.kt)
          =====================================================================
          REQUEST_INSTALL_PACKAGES es OBLIGATORIO desde Android 8 (API 26).
          Sin el, al descargar el APK nuevo el sistema BLOQUEA el instalador
@@ -31,10 +31,14 @@
 
          Ademas del permiso, el usuario debe autorizar UNA vez a la app en
          Ajustes > Apps > Acceso especial > Instalar apps desconocidas.
-         Ese permiso se solicita en tiempo de ejecucion desde
-         ActualizadorApp.descargarEInstalar().
+         El aviso de actualizacion lleva al usuario a ese interruptor
+         (canal tl/instalador, "abrirPermiso").
          ===================================================================== -->
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+    <!-- Android 12+: la app se actualiza a si misma sin pedir "Instalar"
+         (Actualizador.kt, traido de Brizuela). Es un permiso normal, no se
+         pide. En Xiaomi/HyperOS no se usa: se muestra la confirmacion. -->
+    <uses-permission android:name="android.permission.UPDATE_PACKAGES_WITHOUT_USER_ACTION" />
 
     <!-- Camara -->
     <uses-permission android:name="android.permission.CAMERA" />
@@ -188,6 +192,33 @@
                 android:name="android.hardware.usb.action.USB_DEVICE_ATTACHED"
                 android:resource="@xml/device_filter" />
         </activity>
+
+        <!-- Actualizador (Actualizador.kt): resultado de la instalacion y
+             aviso "se actualizo, toca para abrir". -->
+        <receiver
+            android:name=".ReceptorInstalacion"
+            android:exported="false" />
+        <receiver
+            android:name=".ReceptorActualizada"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+            </intent-filter>
+        </receiver>
+        <!-- Instalador clasico: si Android cancela la sesion de
+             PackageInstaller (tablets Xiaomi con HyperOS: "codigo 3,
+             Permission denied"), el APK descargado se abre con el instalador
+             de siempre, que pide "Instalar". No choca con el FileProvider
+             de open_filex (otra authority). -->
+        <provider
+            android:name=".ProveedorApk"
+            android:authorities="${applicationId}.instalador"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
 
         <meta-data
             android:name="flutterEmbedding"

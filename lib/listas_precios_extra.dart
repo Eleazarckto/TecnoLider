@@ -247,6 +247,7 @@ int refrescarProductosDeLista(ListaPrecio lista) {
       cuotaManual: it.cuotaManual,
       pctInicialOverride: it.pctInicialOverride,
       cuotasOverride: it.cuotasOverride,
+      columnasManuales: it.columnasManuales,
     );
     n++;
   }

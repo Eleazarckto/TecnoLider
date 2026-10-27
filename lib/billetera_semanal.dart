@@ -452,37 +452,40 @@ class _VentanaBilleteraComisionesState
               fontWeight: FontWeight.w600)),
         ),
       // ── Tarjeta principal: comisión del período ──
+      // Tarjeta blanca del Panel (estilo Brizuela); antes azul.
       Container(
         padding: const EdgeInsets.all(18),
-        decoration: BoxDecoration(
-          gradient: const LinearGradient(
-            colors: [AppColors.brandBlue, AppColors.brandBlueDark]),
-          borderRadius: BorderRadius.circular(16),
-        ),
+        decoration: AppNeu.relieve(borde: BorderRadius.circular(16)),
         child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
           Row(children: [
-            const Icon(Icons.account_balance_wallet, color: Colors.white),
-            const SizedBox(width: 8),
+            Container(
+              padding: const EdgeInsets.all(6),
+              decoration: BoxDecoration(
+                color: AppColors.brandYellow,
+                borderRadius: BorderRadius.circular(10)),
+              child: const Icon(Icons.account_balance_wallet,
+                color: AppColors.brandBlueDeeper, size: 20)),
+            const SizedBox(width: 10),
             Expanded(child: Text(u.nombre,
-              style: const TextStyle(color: Colors.white,
+              style: const TextStyle(color: AppColors.textPrimary,
                 fontWeight: FontWeight.w800, fontSize: 15))),
           ]),
           const SizedBox(height: 12),
           Text(_rango == null
               ? 'Comisiones de la semana'
               : 'Comisiones del rango',
-            style: const TextStyle(color: Colors.white70, fontSize: 12)),
-          Text(formatCurrency(r?.totalComision ?? 0),
-            style: const TextStyle(color: AppColors.brandYellow,
+            style: const TextStyle(color: AppColors.textSecondary, fontSize: 12)),
+          TextoQueCuenta(formatCurrency(r?.totalComision ?? 0),
+            style: const TextStyle(color: AppColors.statusGreen,
               fontWeight: FontWeight.w900, fontSize: 30)),
           if (tasa > 0)
             Text('≈ ${formatBolivares((r?.totalComision ?? 0) * tasa)}'
                  '  (tasa ${tasa.toStringAsFixed(2)})',
-              style: const TextStyle(color: Colors.white70, fontSize: 12)),
+              style: const TextStyle(color: AppColors.textSecondary, fontSize: 12)),
           const SizedBox(height: 10),
           Text('Base ${formatCurrency(r?.base ?? 0)}  ·  '
                'Total estimado a cobrar ${formatCurrency(r?.totalPagar() ?? 0)}',
-            style: const TextStyle(color: Colors.white, fontSize: 12)),
+            style: const TextStyle(color: AppColors.textPrimary, fontSize: 12)),
         ]),
       ),
       const SizedBox(height: 12),
@@ -612,23 +615,7 @@ class _VentanaBilleteraComisionesState
     );
   }
 
-  Widget _kpi(String label, String valor, IconData icon, Color color) {
-    return Container(
-      padding: const EdgeInsets.all(10),
-      decoration: BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: AppColors.surfaceGrey),
-      ),
-      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-        Icon(icon, color: color, size: 20),
-        const SizedBox(height: 4),
-        FittedBox(fit: BoxFit.scaleDown, child: Text(valor,
-          style: TextStyle(fontWeight: FontWeight.w900, color: color,
-            fontSize: 16))),
-        Text(label, style: const TextStyle(
-          color: AppColors.textSecondary, fontSize: 11)),
-      ]),
-    );
-  }
+  // Tarjeta del Panel (TarjetaIndicador, theme/movimiento.dart).
+  Widget _kpi(String label, String valor, IconData icon, Color color) =>
+      TarjetaIndicador(label, valor, icono: icon, color: color, compacta: true);
 }

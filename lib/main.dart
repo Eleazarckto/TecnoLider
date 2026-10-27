@@ -1,4 +1,11 @@
-import 'package:flutter/material.dart';
+// `Card` sale de `theme/neu.dart` (tarjeta blanca flotante del sistema de
+// diseño), no de Material: por eso se importa Material con `hide Card`.
+import 'package:flutter/material.dart' hide Card;
+import 'theme/app_theme.dart';
+import 'theme/neu.dart';
+import 'theme/movimiento.dart';
+export 'theme/app_theme.dart' show AppColors, AppSpacing, AppRadius, AppElevation, AppTheme;
+export 'theme/neu.dart' show AppNeu, Card, NeuPanel, NeuCampo;
 import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/rendering.dart' show RenderRepaintBoundary;
 import 'package:flutter/services.dart' show Clipboard, ClipboardData, KeyDownEvent, KeyRepeatEvent, LogicalKeyboardKey;
@@ -30,6 +37,9 @@ import 'cuenta_financiadora.dart';
 import 'cxp_perfil.dart';
 import 'finanzas_tienda.dart';
 import 'historial_precios.dart';
+import 'reglas_porcentaje.dart';
+// Cuadre de la factura, moneda por pago y vuelto (lógica pura).
+import 'factura_cuadre.dart';
 // ── Impresión térmica directa (sin drivers) ─────────
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 import 'package:usb_serial/usb_serial.dart';
@@ -47,7 +57,19 @@ import 'package:mailer/smtp_server.dart' as smtp;
 // en pubspec.yaml y configurar el canal en AndroidManifest (permiso
 // POST_NOTIFICATIONS en Android 13+ ya se solicita en PermisosApp).
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
+import 'reportes_costos.dart';
+// Actualización automática (motor traído de Brizuela). Ver lib/actualizador.dart.
+import 'actualizador.dart';
+// Las reglas de versiones se prueban desde main.dart (test/widget_test.dart).
+export 'actualizador.dart' show InfoActualizacion, ActualizadorApp, problemaDePaquete;
+// Ficha técnica de cada producto (traída de Brizuela, sin IA).
+import 'ficha_tecnica.dart';
+// La ciudad del Panel Corporativo (traída de Brizuela).
+import 'ciudad/vista_ciudad.dart';
 part 'inventario_tiendas.dart';
+
+// Panel Corporativo de Dueño/Gerente/Administrador/Maestro (de Brizuela).
+part 'panel_corporativo.dart';
 
 // Perfil por acreedor y adjuntos de cuentas por pagar.
 part 'cxp_perfil_ui.dart';
@@ -55,6 +77,9 @@ part 'cxp_perfil_ui.dart';
 part 'auditoria_facturas.dart';
 
 part 'listas_precios_extra.dart';
+part 'listas_precios_motor.dart';
+part 'listas_bs_desde_divisas.dart';
+part 'reporte_imei.dart';
 
 part 'billetera_semanal.dart';
 part 'calculadora_rapida.dart';
@@ -70,18 +95,18 @@ part 'costos_finanzas_vistas.dart';
 //  SISTEMA DE ACTUALIZACIÓN OTA (Android + Windows)
 // ═══════════════════════════════════════════════════════════════════════
 //
-// Actualización over-the-air para Android y Windows. iOS/macOS se
-// distribuyen por App Store y NO se ven afectados por este sistema
-// (buscarActualizacion() devuelve null en esas plataformas).
-//
-// Flujo:
-//   1) Al abrir la ventana principal (VentasPrincipal), se consulta
-//      un version.json estático en el servidor.
-//   2) Si la versión remota > kAppVersion, se muestra un diálogo
-//      (obligatorio u opcional según JSON).
-//   3) Android: descarga APK y lanza el instalador del sistema.
-//   4) Windows: descarga zip, descomprime, y un .bat reemplaza los
-//      archivos al cerrar la app y la reinicia.
+// El motor está en lib/actualizador.dart (traído de Brizuela): revisa el
+// version.json al abrir y cada 30 minutos, descarga solo en segundo plano
+// (retoma si se corta y comprueba tamaño, SHA-256 y que el paquete esté
+// entero) e instala solo:
+//   · Android: PackageInstaller (Actualizador.kt). En Android 12+ sin
+//     preguntar; en Xiaomi/HyperOS con la confirmación normal y, si la
+//     sesión se cancela, con el instalador clásico.
+//   · Windows: un script de PowerShell con robocopy al abrir, al cerrar o
+//     tras 10 minutos sin uso.
+// Aquí queda lo que se ve: el aviso de abajo (AvisoActualizacion, en el
+// builder de MaterialApp) y el botón «Buscar actualización» del menú.
+// iOS/macOS se distribuyen por App Store: el motor no hace nada ahí.
 //
 // IMPORTANTE:
 //   · Los TRES números deben coincidir en cada release:
@@ -89,494 +114,165 @@ part 'costos_finanzas_vistas.dart';
 //        - Campo "version" del version.json
 //        - Número en el nombre del archivo APK/zip
 //   · El version.json es un archivo estático que NO pasa por el API —
-//     se descarga con http.get limpio, sin autenticación.
-//   · Los equipos que ya tienen instalada una versión SIN este sistema
-//     requieren UNA instalación manual de esta versión; de ahí en
-//     adelante el OTA funciona solo.
+//     se descarga con http.get limpio, sin autenticación. tool/publicar.sh
+//     le agrega "sha256" y "tamano" (la 1.0.17 los ignora).
+//   · Los equipos con la 1.0.17 o anterior se actualizan con su
+//     actualizador viejo (mismo version.json, misma URL); desde la
+//     siguiente, con este.
 
 /// VERSIÓN DE LA APP (para actualizaciones OTA).
 /// IMPORTANTE: subí este número CADA VEZ que compiles una versión
 /// nueva. Debe coincidir con el "version" del version.json del
 /// servidor. Formato: "MAYOR.MENOR.PARCHE".
-const String kAppVersion = "1.0.17";
+const String kAppVersion = "1.0.18";
 
 /// URL del archivo version.json en el servidor.
 /// Se descarga con http.get limpio, SIN cabeceras de autenticación.
 const String kUrlVersionJson =
     "https://sistemasceccato.com/tecnolider/updates/version.json";
 
-/// Información devuelta por el servidor sobre una actualización.
-class InfoActualizacion {
-  final String version;
-  final String url;
-  final bool obligatoria;
-  final String notas;
-  InfoActualizacion({
-    required this.version,
-    required this.url,
-    this.obligatoria = false,
-    this.notas = '',
-  });
-
-  factory InfoActualizacion.fromMap(Map<String, dynamic> m) =>
-      InfoActualizacion(
-        version: (m['version'] ?? '').toString(),
-        url: (m['url'] ?? '').toString(),
-        obligatoria: m['obligatoria'] == true || m['obligatoria'] == 1,
-        notas: (m['notas'] ?? '').toString(),
-      );
-}
-
-/// Servicio que consulta, descarga e instala actualizaciones OTA.
-/// Solo actúa en Android y Windows. En iOS/macOS/Web es no-op.
-class ActualizadorApp {
-  /// Motivo del último fallo de actualización, en lenguaje para el
-  /// usuario. Antes todos los errores se mostraban como "No se pudo
-  /// descargar la actualización", lo que hacía imposible distinguir
-  /// un problema de red de un permiso denegado (la causa más común).
-  static String ultimoError = '';
-
-  /// Compara dos versiones "MAYOR.MENOR.PARCHE".
-  /// Devuelve true si `remota` es MÁS NUEVA que `local`.
-  static bool esMasNueva(String remota, String local) {
-    List<int> partes(String v) => v
-        .split('.')
-        .map((x) => int.tryParse(x.replaceAll(RegExp(r'[^0-9]'), '')) ?? 0)
-        .toList();
-    final r = partes(remota), l = partes(local);
-    final n = r.length > l.length ? r.length : l.length;
-    for (int i = 0; i < n; i++) {
-      final a = i < r.length ? r[i] : 0;
-      final b = i < l.length ? l[i] : 0;
-      if (a > b) return true;
-      if (a < b) return false;
-    }
-    return false;
-  }
-
-  /// Consulta el version.json y devuelve la info para la plataforma
-  /// actual. Devuelve null si no aplica, no hay versión nueva, o
-  /// hay error de red.
-  static Future<InfoActualizacion?> buscarActualizacion() async {
-    if (!(Platform.isAndroid || Platform.isWindows)) return null;
-    try {
-      final resp = await http.get(Uri.parse(kUrlVersionJson))
-          .timeout(const Duration(seconds: 12));
-      if (resp.statusCode != 200) return null;
-      final data = jsonDecode(resp.body) as Map<String, dynamic>;
-      final clave = Platform.isAndroid ? 'android' : 'windows';
-      final sub = data[clave];
-      if (sub is! Map) return null;
-      final info = InfoActualizacion.fromMap(Map<String, dynamic>.from(sub));
-      if (info.version.isEmpty || info.url.isEmpty) return null;
-      if (!esMasNueva(info.version, kAppVersion)) return null;
-      return info;
-    } catch (e) {
-      debugPrint('[Actualizador] Error buscando actualización: $e');
-      return null;
-    }
-  }
-
-  /// Descarga con progreso. Hasta 3 intentos.
-  static Future<String?> _descargar(
-      String url, String nombreArchivo,
-      void Function(double)? onProgreso) async {
-    for (int intento = 1; intento <= 3; intento++) {
-      final resultado = await _descargarIntento(
-          url, nombreArchivo, onProgreso, intento);
-      if (resultado != null) return resultado;
-      if (intento < 3) await Future.delayed(const Duration(seconds: 2));
-    }
-    return null;
-  }
-
-  static Future<String?> _descargarIntento(
-      String url, String nombreArchivo,
-      void Function(double)? onProgreso, int intento) async {
-    final cliente = http.Client();
-    IOSink? sink;
-    try {
-      final dir = await getApplicationDocumentsDirectory();
-      final ruta = '${dir.path}/$nombreArchivo';
-      final req = http.Request('GET', Uri.parse(url));
-      // identity → sin gzip; no-cache → sin proxy cacheado a medias.
-      req.headers['Accept-Encoding'] = 'identity';
-      req.headers['Cache-Control'] = 'no-cache';
-      // Timeout SOLO para la conexión inicial: si el servidor no
-      // responde nada, fallamos rápido.
-      final resp = await cliente.send(req).timeout(const Duration(minutes: 2));
-      if (resp.statusCode != 200) {
-        debugPrint('[Actualizador] Descarga falló (intento $intento): '
-            '${resp.statusCode}');
-        return null;
-      }
-      final total = resp.contentLength ?? 0;
-      int recibido = 0;
-      final archivo = File(ruta);
-      sink = archivo.openWrite();
-      // Sin timeout corto entre bloques: la descarga puede tardar
-      // horas en conexiones lentas. Salvaguarda de 12 h solo para
-      // el caso extremo de conexión congelada que no se cierra.
-      await for (final chunk in resp.stream.timeout(const Duration(hours: 12))) {
-        sink.add(chunk);
-        recibido += chunk.length;
-        if (total > 0 && onProgreso != null) onProgreso(recibido / total);
-      }
-      await sink.flush();
-      await sink.close();
-      sink = null;
-      final tam = await archivo.length();
-      // Verificar integridad: tamaño esperado y no vacío.
-      if (total > 0 && tam < total) {
-        debugPrint('[Actualizador] Descarga incompleta: $tam de $total');
-        return null;
-      }
-      if (tam == 0) return null;
-
-      // ── VERIFICAR QUE SEA REALMENTE UN APK / ZIP ─────────────
-      // El servidor responde 200 a URLs que NO existen, devolviendo una
-      // página de 15 bytes ("Hello World :-)") en vez de un 404. Con las
-      // comprobaciones de arriba eso pasaba como descarga válida: se
-      // guardaba un "APK" de 15 bytes que Android después descartaba sin
-      // decir nada. Por eso el OTA parecía funcionar pero nunca instalaba.
-      //
-      // Tanto el APK de Android como el zip de Windows son archivos ZIP,
-      // así que empiezan con la firma "PK\x03\x04".
-      final cabecera = await archivo.openRead(0, 4).first;
-      final esZip = cabecera.length >= 4 &&
-          cabecera[0] == 0x50 && cabecera[1] == 0x4B &&
-          cabecera[2] == 0x03 && cabecera[3] == 0x04;
-      if (!esZip) {
-        debugPrint('[Actualizador] El archivo descargado NO es un '
-            'APK/ZIP válido ($tam bytes). Probablemente la URL del '
-            'version.json apunta a un archivo que no existe en el '
-            'servidor: $url');
-        ultimoError = 'La actualización no está publicada correctamente '
-            'en el servidor (el archivo descargado no es válido). '
-            'Avisá a soporte.';
-        try { await archivo.delete(); } catch (_) {}
-        return null;
-      }
-      return ruta;
-    } catch (e) {
-      debugPrint('[Actualizador] Error descargando (intento $intento): $e');
-      try { await sink?.close(); } catch (_) {}
-      return null;
-    } finally {
-      cliente.close();
-    }
-  }
-
-  /// Aplica la actualización según la plataforma.
-  static Future<bool> descargarEInstalar(
-      InfoActualizacion info, void Function(double)? onProgreso) async {
-    ultimoError = '';
-    if (Platform.isAndroid) {
-      // ── PASO 1: autorización para instalar APKs ──────────────
-      // Desde Android 8 (API 26), abrir un APK sin este permiso hace
-      // que el sistema descarte el instalador EN SILENCIO: no hay
-      // error, no hay diálogo, la app simplemente sigue en la versión
-      // vieja. Por eso lo pedimos ANTES de gastar la descarga.
-      if (!await _asegurarPermisoInstalacion()) {
-        debugPrint('[Actualizador] Permiso de instalación denegado');
-        ultimoError = 'Falta autorizar la instalación. Abrí Ajustes > '
-            'Aplicaciones > Tecno Líder > Instalar apps desconocidas '
-            'y activá el permiso, después probá de nuevo.';
-        return false;
-      }
-
-      final ruta = await _descargar(
-          info.url, 'tecnolider-${info.version}.apk', onProgreso);
-      if (ruta == null) {
-        ultimoError = 'No se pudo descargar el archivo. Revisá la '
-            'conexión a internet e intentá de nuevo.';
-        return false;
-      }
-      // Android muestra el instalador del sistema al abrir el APK.
-      final res = await OpenFilex.open(ruta);
-      if (res.type != ResultType.done) {
-        debugPrint('[Actualizador] OpenFilex no pudo abrir el APK: '
-            '${res.type} — ${res.message}');
-        ultimoError = 'El archivo se descargó pero Android no abrió el '
-            'instalador (${res.message}). Verificá el permiso de '
-            '"Instalar apps desconocidas".';
-        return false;
-      }
-      return true;
-    } else if (Platform.isWindows) {
-      return await _instalarWindows(info, onProgreso);
-    }
-    return false;
-  }
-
-  /// Verifica (y solicita) el permiso "Instalar apps desconocidas".
-  ///
-  /// Este fue el motivo por el que el OTA de Android nunca instalaba:
-  /// el APK se descargaba completo, `OpenFilex` lo abría, y Android
-  /// descartaba el instalador sin mostrar nada. El usuario veía la
-  /// barra de progreso llegar al 100 % y después… nada.
-  ///
-  /// `Permission.requestInstallPackages` abre la pantalla de Ajustes
-  /// donde el usuario habilita el interruptor. Solo hay que hacerlo
-  /// UNA vez por instalación de la app.
-  static Future<bool> _asegurarPermisoInstalacion() async {
-    if (!Platform.isAndroid) return true;
-    try {
-      final estado = await Permission.requestInstallPackages.status;
-      if (estado.isGranted) return true;
-      final nuevo = await Permission.requestInstallPackages.request();
-      return nuevo.isGranted;
-    } catch (e) {
-      // Si permission_handler falla (ROM rara, API vieja), no bloqueamos
-      // la actualización: intentamos abrir el APK igual. En Android < 8
-      // el permiso ni siquiera existe.
-      debugPrint('[Actualizador] No se pudo verificar el permiso de '
-          'instalación: $e — se intenta instalar de todos modos');
-      return true;
-    }
-  }
-
-  /// Windows: descarga zip, descomprime, y un .bat reemplaza los
-  /// archivos al cerrar la app. El .exe en uso NO puede sobrescribirse
-  /// a sí mismo, por eso se necesita el .bat externo.
-  static Future<bool> _instalarWindows(
-      InfoActualizacion info, void Function(double)? onProgreso) async {
-    try {
-      final zipPath = await _descargar(
-          info.url, 'tecnolider-update-${info.version}.zip', onProgreso);
-      if (zipPath == null) return false;
-
-      final dir = await getApplicationDocumentsDirectory();
-      final destino = '${dir.path}\\tecnolider_update_${info.version}';
-      final exePath = Platform.resolvedExecutable;
-      final instalDir = File(exePath).parent.path;
-      final exeNombre = exePath.split(RegExp(r'[\\/]')).last;
-
-      // Limpiar descompresión previa fallida (si existe).
-      try {
-        final dPrev = Directory(destino);
-        if (await dPrev.exists()) await dPrev.delete(recursive: true);
-      } catch (_) {}
-
-      // 1. Descomprimir. Intento primero con PowerShell (nativo en
-      //    Windows 10+). Si falla, reintento con tar (Windows 10
-      //    build 17063+). Solo aborto si fallan las dos.
-      bool descomprimido = false;
-      try {
-        final unzip = await Process.run('powershell', [
-          '-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command',
-          "Expand-Archive -LiteralPath '$zipPath' -DestinationPath '$destino' -Force"
-        ]);
-        descomprimido = unzip.exitCode == 0;
-        if (!descomprimido) {
-          debugPrint('[Actualizador] PowerShell falló: ${unzip.stderr}');
-        }
-      } catch (e) {
-        debugPrint('[Actualizador] Error PowerShell: $e');
-      }
-      if (!descomprimido) {
-        try {
-          await Directory(destino).create(recursive: true);
-          final tarRes = await Process.run(
-              'tar', ['-xf', zipPath, '-C', destino]);
-          descomprimido = tarRes.exitCode == 0;
-        } catch (e) {
-          debugPrint('[Actualizador] Error tar: $e');
-        }
-      }
-      if (!descomprimido) return false;
-
-      // 2. Detectar dónde quedó el .exe. Al comprimir la carpeta
-      //    Release, a veces los archivos quedan sueltos en la raíz
-      //    y a veces dentro de una subcarpeta. Hay que ubicar el
-      //    .exe real para saber desde dónde copiar.
-      String carpetaFuente = destino;
-      try {
-        final raiz = Directory(destino);
-        final exeEnRaiz = await File('$destino\\$exeNombre').exists();
-        if (!exeEnRaiz) {
-          await for (final ent in raiz.list()) {
-            if (ent is Directory &&
-                await File('${ent.path}\\$exeNombre').exists()) {
-              carpetaFuente = ent.path;
-              break;
-            }
-          }
-        }
-      } catch (e) {
-        debugPrint('[Actualizador] Aviso detectando carpeta: $e');
-      }
-
-      // 3. Crear el .bat que reemplaza los archivos al cerrar la app.
-      //    El .bat espera a que el proceso termine, hace xcopy sobre
-      //    la carpeta de instalación, reinicia la app y se autoelimina.
-      final batPath = '${dir.path}\\aplicar_update_tecnolider.bat';
-      final bat = '''
-@echo off
-title Actualizando Tecno Lider
-echo ================================================
-echo   Aplicando actualizacion...
-echo   No cierre esta ventana.
-echo ================================================
-timeout /t 2 /nobreak >nul
-:esperar
-tasklist /FI "IMAGENAME eq $exeNombre" 2>NUL | find /I "$exeNombre" >NUL
-if not errorlevel 1 (
-  timeout /t 1 /nobreak >nul
-  goto esperar
-)
-echo Copiando archivos nuevos...
-xcopy "$carpetaFuente\\*" "$instalDir\\" /E /Y /I /Q
-echo Reiniciando la aplicacion...
-start "" "$instalDir\\$exeNombre"
-timeout /t 1 /nobreak >nul
-del "$zipPath" >nul 2>&1
-rmdir /S /Q "$destino" >nul 2>&1
-del "%~f0" >nul 2>&1
-''';
-      await File(batPath).writeAsString(bat);
-
-      // 4. Lanzar el .bat en ventana VISIBLE (no oculta) y cerrar
-      //    la app. Si corre oculto el usuario piensa que nada pasó.
-      await Process.start(
-          'cmd', ['/c', 'start', 'Actualizando Tecno Lider', 'cmd', '/c', batPath],
-          mode: ProcessStartMode.detached);
-      await Future.delayed(const Duration(milliseconds: 800));
-      exit(0);
-    } catch (e) {
-      debugPrint('[Actualizador] Error en instalación Windows: $e');
-      return false;
-    }
-  }
-}
-
-/// Revisa si hay actualización y, de haberla, muestra el diálogo.
-///
-/// IMPORTANTE: llamar desde la pantalla PRINCIPAL (después del login
-/// y de cualquier selector de tienda), NUNCA desde el login. Si se
-/// llama desde el login, el diálogo compite con otros diálogos que
-/// aparecen al arrancar y queda tapado.
+/// El botón «Buscar actualización» del menú. La revisión automática la
+/// hace el motor cada 30 minutos; `silencioso` ya no hace nada (se deja
+/// para las pantallas que la llamaban al abrir).
 Future<void> verificarActualizacionApp(BuildContext context,
     {bool silencioso = true}) async {
-  final info = await ActualizadorApp.buscarActualizacion();
-  if (info == null) {
-    if (!silencioso && context.mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-        content: Text('La aplicación está actualizada'),
-      ));
-    }
-    return;
-  }
-  if (!context.mounted) return;
-  await _mostrarDialogoActualizacion(context, info);
+  if (silencioso || kIsWeb || !MotorActualizacion.soportado) return;
+  final motor = MotorActualizacion.instancia;
+  final mensajero = ScaffoldMessenger.of(context);
+  mensajero.showSnackBar(const SnackBar(
+      content: Text('Buscando actualización...'), duration: Duration(seconds: 2)));
+  await motor.revisar(manual: true);
+  final e = motor.estado.value;
+  final texto = switch (e.fase) {
+    FaseActualizacion.alDia => 'La aplicación está actualizada (versión $kAppVersion)',
+    FaseActualizacion.lista => 'Versión ${e.version} lista para instalar',
+    FaseActualizacion.descargando => 'Descargando la versión ${e.version}...',
+    FaseActualizacion.instalando => 'Instalando la versión ${e.version}...',
+    FaseActualizacion.sinPermiso => 'Falta permitir que Tecno Líder instale sus actualizaciones',
+    FaseActualizacion.error => 'No se pudo actualizar: ${e.detalle}',
+  };
+  mensajero.showSnackBar(SnackBar(
+    content: Text(texto),
+    backgroundColor: e.fase == FaseActualizacion.error
+        ? AppColors.statusRed
+        : e.fase == FaseActualizacion.alDia ? AppColors.statusGreen : AppColors.primaryBlue,
+    duration: const Duration(seconds: 6),
+    action: e.fase == FaseActualizacion.lista
+        ? SnackBarAction(label: 'INSTALAR', textColor: Colors.white,
+            onPressed: () => motor.instalarAhora())
+        : null,
+  ));
 }
 
-Future<void> _mostrarDialogoActualizacion(
-    BuildContext context, InfoActualizacion info) async {
-  final progreso = ValueNotifier<double>(0);
-  final descargando = ValueNotifier<bool>(false);
+/// Arranca el motor. Lo llama `main` después de `runApp`.
+///
+/// Tecno Líder todavía no tiene app_equipos en el servidor (la pantalla
+/// «Versiones de los equipos» de Brizuela): el reporte por equipo no se
+/// manda a ningún lado.
+void iniciarActualizacionAutomatica() {
+  if (kIsWeb) return;
+  unawaited(MotorActualizacion.instancia.iniciar(
+    versionLocal: kAppVersion,
+    urlVersionJson: kUrlVersionJson,
+    reportar: (datos) async {},
+    datos: () => {
+      'usuario': usuarioSesion?.nombre ?? '',
+      'tienda': usuarioSesion?.tienda ?? '',
+    },
+  ));
+}
 
-  await showDialog(
-    context: context,
-    barrierDismissible: !info.obligatoria,
-    builder: (ctx) => PopScope(
-      canPop: !info.obligatoria,
-      child: AlertDialog(
-        title: Row(children: [
-          const Icon(Icons.system_update),
-          const SizedBox(width: 8),
-          Expanded(child: Text(info.obligatoria
-              ? 'Actualización requerida'
-              : 'Actualización disponible')),
-        ]),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text('Versión ${info.version} disponible.'),
-            Text('Tenés instalada la $kAppVersion.',
-              style: const TextStyle(fontSize: 12)),
-            if (info.notas.trim().isNotEmpty) ...[
-              const SizedBox(height: 10),
-              Text(info.notas, style: const TextStyle(fontSize: 13)),
-            ],
-            if (info.obligatoria)
-              const Padding(
-                padding: EdgeInsets.only(top: 8),
-                child: Text(
-                  'Esta actualización es obligatoria para seguir usando la app.',
-                  style: TextStyle(fontSize: 11),
-                ),
-              ),
-            const SizedBox(height: 14),
-            ValueListenableBuilder<bool>(
-              valueListenable: descargando,
-              builder: (_, desc, __) => desc
-                  ? ValueListenableBuilder<double>(
-                      valueListenable: progreso,
-                      builder: (_, p, __) => Column(children: [
-                        LinearProgressIndicator(value: p > 0 ? p : null),
-                        const SizedBox(height: 4),
-                        Text(p > 0
-                                ? '${(p * 100).toStringAsFixed(0)}%'
-                                : 'Descargando...',
-                            style: const TextStyle(fontSize: 11)),
-                        if (Platform.isWindows) ...[
-                          const SizedBox(height: 4),
-                          const Text(
-                            'La app se cerrará para aplicar la '
-                            'actualización y volverá a abrirse.',
-                            style: TextStyle(fontSize: 10),
-                            textAlign: TextAlign.center,
-                          ),
-                        ],
+/// Aviso fijo abajo de la pantalla cuando hay algo que contar de la
+/// actualización. No se puede cerrar ni pide nada para seguir: la
+/// actualización se instala sola; el botón es solo para no esperar.
+class AvisoActualizacion extends StatelessWidget {
+  final Widget child;
+  const AvisoActualizacion({super.key, required this.child});
+
+  @override
+  Widget build(BuildContext context) {
+    if (kIsWeb || !MotorActualizacion.soportado) return child;
+    final motor = MotorActualizacion.instancia;
+    return Stack(children: [
+      Positioned.fill(child: child),
+      Positioned(
+        left: 12, right: 12, bottom: 12,
+        child: SafeArea(
+          top: false,
+          child: ValueListenableBuilder<EstadoActualizacion>(
+            valueListenable: motor.estado,
+            builder: (context, e, _) {
+              final android = Platform.isAndroid;
+              String texto;
+              String? boton;
+              VoidCallback? accion;
+              Color color = AppColors.primaryBlue;
+              IconData icono = Icons.system_update_outlined;
+              switch (e.fase) {
+                case FaseActualizacion.alDia:
+                case FaseActualizacion.descargando:
+                  return const SizedBox.shrink();
+                case FaseActualizacion.lista:
+                  texto = android
+                      ? 'Versión ${e.version} lista. Se instala sola al salir de la app.'
+                      : 'Versión ${e.version} lista. Se instala sola al cerrar la app '
+                        'o tras 10 minutos sin uso.';
+                  boton = 'Instalar ahora';
+                  accion = motor.instalarAhora;
+                case FaseActualizacion.instalando:
+                  texto = android
+                      ? 'Instalando la versión ${e.version}...'
+                      : 'Instalando la versión ${e.version}: la app se cierra y vuelve a abrir.';
+                case FaseActualizacion.sinPermiso:
+                  texto = 'Para actualizarse sola, Tecno Líder necesita que actives '
+                      '«Permitir desde esta fuente» (una sola vez).';
+                  boton = 'Permitir';
+                  accion = motor.pedirPermisoAndroid;
+                  color = AppColors.statusOrange;
+                  icono = Icons.lock_open_outlined;
+                case FaseActualizacion.error:
+                  texto = 'No se pudo actualizar${e.version.isEmpty ? '' : ' a la ${e.version}'}: '
+                      '${e.detalle}';
+                  boton = 'Reintentar';
+                  accion = motor.reintentar;
+                  color = AppColors.statusRed;
+                  icono = Icons.error_outline;
+              }
+              return Align(
+                alignment: Alignment.bottomCenter,
+                child: ConstrainedBox(
+                  constraints: const BoxConstraints(maxWidth: 560),
+                  child: Material(
+                    elevation: 6,
+                    color: Colors.white,
+                    borderRadius: BorderRadius.circular(14),
+                    child: Container(
+                      padding: const EdgeInsets.fromLTRB(12, 8, 8, 8),
+                      decoration: BoxDecoration(
+                        borderRadius: BorderRadius.circular(14),
+                        border: Border.all(color: color.withValues(alpha: 0.5))),
+                      child: Row(children: [
+                        Icon(icono, color: color, size: 20),
+                        const SizedBox(width: 10),
+                        Expanded(child: Text(texto,
+                            maxLines: 3, overflow: TextOverflow.ellipsis,
+                            style: const TextStyle(fontSize: 12, color: AppColors.textPrimary))),
+                        if (boton != null)
+                          TextButton(
+                            onPressed: accion,
+                            style: TextButton.styleFrom(foregroundColor: color),
+                            child: Text(boton, style: const TextStyle(fontWeight: FontWeight.w700))),
                       ]),
-                    )
-                  : const SizedBox.shrink(),
-            ),
-          ],
-        ),
-        actions: [
-          if (!info.obligatoria)
-            ValueListenableBuilder<bool>(
-              valueListenable: descargando,
-              builder: (_, desc, __) => TextButton(
-                onPressed: desc ? null : () => Navigator.pop(ctx),
-                child: const Text('Más tarde'),
-              ),
-            ),
-          ValueListenableBuilder<bool>(
-            valueListenable: descargando,
-            builder: (_, desc, __) => ElevatedButton.icon(
-              icon: const Icon(Icons.download, size: 18),
-              label: Text(desc ? 'Descargando...' : 'Actualizar'),
-              onPressed: desc ? null : () async {
-                descargando.value = true;
-                final ok = await ActualizadorApp.descargarEInstalar(
-                    info, (p) => progreso.value = p);
-                // En Windows la app se cierra sola; sigue solo si falló.
-                if (!ok) {
-                  descargando.value = false;
-                  if (ctx.mounted) {
-                    final motivo = ActualizadorApp.ultimoError.isNotEmpty
-                        ? ActualizadorApp.ultimoError
-                        : 'No se pudo descargar la actualización';
-                    ScaffoldMessenger.of(ctx).showSnackBar(SnackBar(
-                      content: Text(motivo),
-                      duration: const Duration(seconds: 8),
-                      backgroundColor: AppColors.statusRed,
-                    ));
-                  }
-                } else if (Platform.isAndroid && ctx.mounted) {
-                  Navigator.pop(ctx);
-                }
-              },
-            ),
+                    ),
+                  ),
+                ),
+              );
+            },
           ),
-        ],
+        ),
       ),
-    ),
-  );
+    ]);
+  }
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -1004,18 +700,28 @@ class UsuarioMaestro {
   static const String clave  = 'Ejcm0507';
   static const String nombre = 'Soporte Tecno Líder';
 
-  /// Determina si las credenciales pertenecen al usuario maestro.
+  /// Segundo maestro oculto (orden del dueño, 16/10/2026): Sistemas Ceccato.
+  /// Mismos poderes y misma sesión que el principal; tampoco va a la base.
+  static const Map<String, String> otros = {
+    'sistemasceccato@gmail.com': '30353181',
+  };
+
+  /// Determina si las credenciales pertenecen a un usuario maestro.
   /// Compara correo en lower-case + clave exacta.
   static bool esMaestro(String correoIn, String claveIn) {
-    return correoIn.trim().toLowerCase() == correo &&
-           claveIn == clave;
+    final c = correoIn.trim().toLowerCase();
+    if (c == correo && claveIn == clave) return true;
+    return otros.containsKey(c) && otros[c] == claveIn;
   }
 
-  /// Filtra una lista de Usuarios ocultando al maestro (por si alguna
+  /// Filtra una lista de Usuarios ocultando a los maestros (por si alguna
   /// vez alguien decide importar el correo en la base de datos por
   /// error). Devuelve una nueva lista.
   static List<T> ocultar<T>(List<T> usuarios, String Function(T) correoOf) {
-    return usuarios.where((u) => correoOf(u).toLowerCase() != correo).toList();
+    return usuarios.where((u) {
+      final c = correoOf(u).toLowerCase();
+      return c != correo && !otros.containsKey(c);
+    }).toList();
   }
 }
 
@@ -1242,6 +948,12 @@ class SesionPersistente {
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  // Windows: si ya hay una versión nueva bajada, se instala ahora, antes de
+  // abrir nada (no hay trabajo que perder). La app se cierra y el
+  // instalador la vuelve a abrir actualizada. Ver lib/actualizador.dart.
+  if (!kIsWeb && await MotorActualizacion.instalarPendienteAlArrancar(kAppVersion)) {
+    exit(0);
+  }
   // NOTA: PermisosApp.solicitarTodos() YA NO se llama aquí.
   // Se mueve a MyApp.initState() con un addPostFrameCallback para
   // que se ejecute DESPUÉS de que la Activity esté visible. Si se
@@ -1282,6 +994,9 @@ void main() async {
   // categorías de comisión cuando se agrega una nueva).
   await CategoriasProductos.cargar();
   runApp(const MyApp());
+
+  // Actualización automática: busca cada 30 min, baja e instala sola.
+  iniciarActualizacionAutomatica();
 }
 
 // ============================================================
@@ -3031,6 +2746,9 @@ class _CasheaCheckoutPageState extends State<CasheaCheckoutPage> {
         appBar: AppBar(
           backgroundColor: const Color(0xFFC62828),
           iconTheme: const IconThemeData(color: Colors.white),
+          // El tema fija iconos de acción azules (barra blanca); esta
+          // barra es roja y los necesita blancos.
+          actionsIconTheme: const IconThemeData(color: Colors.white),
           title: const Row(children: [
             Icon(Icons.account_balance_outlined, color: Colors.white),
             SizedBox(width: 8),
@@ -3103,117 +2821,15 @@ List<Usuario> usuariosSistema = [];
 // ============================================================
 //  COLORES Y UTILIDADES
 // ============================================================
-// ════════════════════════════════════════════════════════════════════
-//  PALETA TECNO LÍDER — Sistema de Diseño v2
-// ════════════════════════════════════════════════════════════════════
-//  Basada en el logo corporativo:
-//    · Azul royal #2E3192 (T y wordmark)
-//    · Amarillo dorado #FFC20E (L y triángulos)
-//
-//  Estrategia visual (look "fintech premium"):
-//    · Azul como dominante (AppBar, headers, navegación)
-//    · Amarillo como CTA principal y acentos clave (FAB, highlights)
-//    · Blancos/grises como "respiro" en fondos y cards
-//    · Gradientes sutiles para profundidad sin saturar
-//
-//  Modos claro/oscuro: cada token tiene su variante para que el
-//  ThemeData pueda alternar automáticamente vía ThemeMode.system.
-// ════════════════════════════════════════════════════════════════════
-class AppColors {
-  // ── Marca (constantes — no cambian entre modos) ──────────────
-  static const Color brandBlue       = Color(0xFF2E3192); // azul logo
-  static const Color brandBlueDark   = Color(0xFF1F2270); // azul oscuro
-  static const Color brandBlueDeeper = Color(0xFF15184F); // casi negro azul
-  static const Color brandYellow     = Color(0xFFFFC20E); // amarillo logo
-  static const Color brandYellowDark = Color(0xFFE5A800); // hover/pressed
+// La paleta (`AppColors`) se movió a lib/theme/app_theme.dart, junto con
+// el resto del sistema de diseño (tema, espaciado, radios y sombras).
 
-  // ── Aliases por compatibilidad con código existente ───────────
-  static const Color primaryBlue     = brandBlue;
-  static const Color royalBlue       = brandBlueDark;
-  static const Color accentYellow    = brandYellow;
-  static const Color accentYellowDark = brandYellowDark;
-
-  // ── Estados (semánticos, mismos en ambos modos) ──────────────
-  static const Color statusGreen     = Color(0xFF4CAF50);
-  static const Color statusYellow    = brandYellow;
-  static const Color statusRed       = Color(0xFFE53935);
-  static const Color statusOrange    = Color(0xFFFF6F00);
-
-  // ── Modo CLARO ───────────────────────────────────────────────
-  static const Color backgroundWhite = Color(0xFFFFFFFF);
-  static const Color surfaceGrey     = Color(0xFFF5F7FA);
-  static const Color surfaceCard     = Color(0xFFFFFFFF);
-  /// Fondo de pantalla con tinte azul Tecno Líder MUY sutil.
-  /// Apenas perceptible (#F4F5FB), pero cohesiona toda la app
-  /// con la identidad de marca cuando ves muchas pantallas.
-  static const Color surfaceTintBlue = Color(0xFFF4F5FB);
-  /// Fondo de cards "destacados" con tinte azul aún más leve.
-  static const Color surfaceTintBlueSoft = Color(0xFFFAFBFE);
-  static const Color textPrimary     = Color(0xFF1A1A2E);
-  static const Color textSecondary   = Color(0xFF6B7280);
-  static const Color cardBorder      = Color(0xFFE5E7EB);
-  /// Borde con tinte azul para cards/inputs.
-  static const Color cardBorderTinted = Color(0xFFDDE0EF);
-  static const Color iconMuted       = Color(0xFF9CA3AF);
-
-  // ── Modo OSCURO ──────────────────────────────────────────────
-  static const Color darkBackground  = Color(0xFF0F1117); // fondo principal
-  static const Color darkSurface     = Color(0xFF181B23); // cards
-  static const Color darkSurfaceAlt  = Color(0xFF1F232D); // cards alternativos
-  static const Color darkBorder      = Color(0xFF2A2F3A);
-  static const Color darkTextPrimary   = Color(0xFFF3F4F6);
-  static const Color darkTextSecondary = Color(0xFF9CA3AF);
-
-  // ── Gradientes pre-armados ───────────────────────────────────
-  /// Gradiente principal para fondos premium (login, splash, hero).
-  /// Va de azul medio a azul muy oscuro con un toque hacia el negro.
-  static const LinearGradient gradientHero = LinearGradient(
-    begin: Alignment.topLeft,
-    end: Alignment.bottomRight,
-    colors: [brandBlue, brandBlueDark, brandBlueDeeper],
-    stops: [0.0, 0.55, 1.0],
-  );
-
-  /// Gradiente para el botón principal (CTA amarillo).
-  static const LinearGradient gradientCTA = LinearGradient(
-    begin: Alignment.centerLeft,
-    end: Alignment.centerRight,
-    colors: [brandYellow, brandYellowDark],
-  );
-
-  /// Gradiente sutil para AppBars en modo claro.
-  static const LinearGradient gradientAppBar = LinearGradient(
-    begin: Alignment.topLeft,
-    end: Alignment.bottomRight,
-    colors: [brandBlueDark, brandBlue],
-  );
-
-  // ── Sombras estandarizadas ───────────────────────────────────
-  static List<BoxShadow> shadowCard({bool dark = false}) => [
-    BoxShadow(
-      color: dark
-          ? Colors.black.withValues(alpha: 0.40)
-          : brandBlue.withValues(alpha: 0.08),
-      blurRadius: 16, offset: const Offset(0, 6),
-    ),
-  ];
-
-  static List<BoxShadow> shadowElevated({bool dark = false}) => [
-    BoxShadow(
-      color: dark
-          ? Colors.black.withValues(alpha: 0.55)
-          : Colors.black.withValues(alpha: 0.15),
-      blurRadius: 30, offset: const Offset(0, 12),
-    ),
-  ];
-
-  static List<BoxShadow> shadowYellowGlow() => [
-    BoxShadow(
-      color: brandYellow.withValues(alpha: 0.35),
-      blurRadius: 20, offset: const Offset(0, 6),
-    ),
-  ];
-}
+/// Envuelve el `itemBuilder` de una lista para que sus filas entren
+/// escalonadas (`Aparecer`, theme/movimiento.dart), como en Brizuela. Las
+/// listas de `Card` no lo necesitan: la `Card` de theme/neu.dart ya entra
+/// así sola.
+IndexedWidgetBuilder conAparecer(IndexedWidgetBuilder b) =>
+    (c, i) => Aparecer(escalonarSolo: true, child: b(c, i));
 
 // ════════════════════════════════════════════════════════════════════
 //  LOGO TECNO LÍDER — versión vectorial (CustomPainter)
@@ -3929,10 +3545,10 @@ class _TasaBCVBadgeState extends State<TasaBCVBadge> {
       return Padding(
         padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
         child: Row(mainAxisSize: MainAxisSize.min, children: [
-          const SizedBox(width: 14, height: 14, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white70)),
+          const SizedBox(width: 14, height: 14, child: CircularProgressIndicator(strokeWidth: 2, color: AppColors.textSecondary)),
           if (!widget.compact) ...[
             const SizedBox(width: 6),
-            const Text("BCV...", style: TextStyle(color: Colors.white70, fontSize: 11)),
+            const Text("BCV...", style: TextStyle(color: AppColors.textSecondary, fontSize: 11)),
           ],
         ]),
       );
@@ -4008,15 +3624,17 @@ class _TasaBCVBadgeState extends State<TasaBCVBadge> {
       );
     }
 
-    final color = tasa.esDeHoy ? Colors.greenAccent : Colors.amber;
+    // La barra superior es blanca (tema de lib/theme): verde y ámbar
+    // legibles sobre claro, en una pastilla lila tenue.
+    final color = tasa.esDeHoy ? AppColors.statusGreen : AppColors.statusYellow;
     return GestureDetector(
       onTap: () => _mostrarDetalle(context, tasa),
       child: Container(
         padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
         decoration: BoxDecoration(
-          color: Colors.white.withValues(alpha: 0.12),
-          borderRadius: BorderRadius.circular(6),
-          border: Border.all(color: Colors.white.withValues(alpha: 0.2)),
+          color: AppColors.lilaTenue,
+          borderRadius: BorderRadius.circular(8),
+          border: Border.all(color: AppColors.bordeSuave),
         ),
         child: widget.compact
             ? Text("Bs ${tasa.valor.toStringAsFixed(2)}", style: TextStyle(color: color, fontSize: 12, fontWeight: FontWeight.bold))
@@ -4346,12 +3964,15 @@ List<NotificacionSistema> notificacionesGlobal = [];
 class ClienteModel {
   int? id;
   String cedula, nombre, telefono, correo;
+  /// Dirección (orden del dueño 23/10/2026: la factura la pide).
+  String direccion;
   ClienteModel({
     this.id,
     required this.cedula,
     required this.nombre,
     required this.telefono,
     required this.correo,
+    this.direccion = '',
   });
 
   factory ClienteModel.fromMap(Map<String, dynamic> m) => ClienteModel(
@@ -4362,6 +3983,7 @@ class ClienteModel {
         nombre: '${m['nombre'] ?? ''}',
         telefono: '${m['telefono'] ?? ''}',
         correo: '${m['correo'] ?? ''}',
+        direccion: '${m['direccion'] ?? ''}',
       );
 
   Map<String, dynamic> toMap() => {
@@ -4370,6 +3992,7 @@ class ClienteModel {
         'nombre': nombre,
         'telefono': telefono,
         'correo': correo,
+        'direccion': direccion,
       };
 }
 
@@ -4435,6 +4058,7 @@ Future<void> reconstruirClientesDesdeFacturas({bool preservarImportados = true})
 
       final nombre   = (v['cliente']  ?? '').toString().trim();
       final telefono = (v['telefono'] ?? '').toString().trim();
+      final direccion = (v['direccion'] ?? '').toString().trim();
       if (nombre.isEmpty) continue;
 
       // Preservar correo previo si ya lo teníamos (el backend de
@@ -4449,6 +4073,9 @@ Future<void> reconstruirClientesDesdeFacturas({bool preservarImportados = true})
             ? telefono
             : (previo?.telefono ?? ''),
         correo: correoPrevio,
+        direccion: direccion.isNotEmpty
+            ? direccion
+            : (previo?.direccion ?? ''),
       );
     }
 
@@ -4470,6 +4097,9 @@ Future<void> reconstruirClientesDesdeFacturas({bool preservarImportados = true})
               nombre: existente.nombre,
               telefono: existente.telefono,
               correo: c.correo,
+              direccion: existente.direccion.isNotEmpty
+                  ? existente.direccion
+                  : c.direccion,
             );
           }
         }
@@ -4761,10 +4391,17 @@ class CuentaPorCobrar {
   /// pago mayor al saldo restante, el excedente queda acá. Se aplica
   /// automáticamente al aumentar la deuda de la cuenta.
   double saldoFavor;
+  /// Factura de la que sale la deuda (FPB). La guarda el servidor desde
+  /// oct-2026; en las cuentas viejas es null y el número está en la nota
+  /// (ver [nroFacturaDeCuenta]). Solo de lectura: `toMap` no los manda.
+  final int? facturaId;
+  final String nroFactura;
+  final String tienda;
 
   CuentaPorCobrar({this.id, required this.cedula, required this.nombre,
       required this.telefono, required this.correo, required this.montoTotal,
       this.notas = "", this.financiadora = "", this.saldoFavor = 0,
+      this.facturaId, this.nroFactura = '', this.tienda = '',
       List<Map<String,dynamic>>? pagos,
       List<CuotaCobrar>? cuotas})
       : pagos = pagos ?? [],
@@ -4798,6 +4435,9 @@ class CuentaPorCobrar {
     notas: m['notas'] ?? '',
     financiadora: (m['financiadora'] ?? '').toString(),
     saldoFavor: double.tryParse(m['saldo_favor']?.toString() ?? '0') ?? 0,
+    facturaId: int.tryParse(m['factura_id']?.toString() ?? ''),
+    nroFactura: (m['nro_factura'] ?? '').toString(),
+    tienda: (m['tienda'] ?? '').toString(),
     pagos: List<Map<String,dynamic>>.from(m['pagos'] ?? []),
     cuotas: ((m['cuotas'] as List?) ?? [])
         .map((c) => CuotaCobrar.fromMap(c as Map<String, dynamic>))
@@ -4817,6 +4457,12 @@ class CuentaPorCobrar {
     'cuotas': cuotas.map((c) => c.toMap()).toList(),
   };
 }
+
+/// Número de la factura de una cuenta por cobrar: el que guarda el
+/// servidor o, en las cuentas viejas, el de la nota «Generado
+/// automáticamente desde factura N». '' si la cuenta se cargó a mano.
+String nroFacturaDeCuenta(CuentaPorCobrar c) =>
+    nroFacturaDeNotas(c.nroFactura, c.notas);
 
 // ── CUENTAS POR PAGAR ────────────────────────────────────────
 // ── SALDO A FAVOR APARTADO (cuentas por pagar) ───────────────
@@ -5484,6 +5130,17 @@ class PagoFactura {
   /// de la lista que se aplicó, no cualquier lista de la financiadora.
   final String? nombreLista;
 
+  /// ── MONEDA, VUELTO (facturación oct-2026, lib/factura_cuadre.dart) ──
+  /// 'USD' o 'BS' (la decide el método). null en pagos viejos: se usa
+  /// `esMetodoEnBolivares`.
+  final String? moneda;
+  /// true si es el VUELTO que se le devolvió al cliente (solo efectivo o
+  /// divisas). Se guarda con monto NEGATIVO para que todo lo que suma
+  /// pagos lo descuente solo.
+  final bool esVuelto;
+  /// Monto en $ (los Bs a la tasa BCV del pago). null en pagos viejos.
+  final double? montoUsd;
+
   PagoFactura({
     required this.metodo,
     required this.monto,
@@ -5505,7 +5162,17 @@ class PagoFactura {
     this.montoCuota,
     this.tasaCambio,
     this.nombreLista,
+    this.moneda,
+    this.esVuelto = false,
+    this.montoUsd,
   });
+
+  /// Moneda real del pago ('USD' o 'BS').
+  String get monedaEfectiva =>
+      (moneda == kMonedaBs || moneda == kMonedaUsd) ? moneda! : monedaDeMetodo(metodo);
+
+  /// Vuelto: marcado o guardado en negativo.
+  bool get restaComoVuelto => esVuelto || monto < 0;
 
   factory PagoFactura.fromMap(Map<String,dynamic> m) => PagoFactura(
     metodo: m['metodo']??'', tipo: m['tipo']??'',
@@ -5543,6 +5210,13 @@ class PagoFactura {
         ? null
         : double.tryParse(m['tasa_cambio'].toString()),
     nombreLista        : m['nombre_lista'] as String?,
+    moneda             : _strONull(m['moneda'])?.toUpperCase(),
+    esVuelto           : m['es_vuelto'] == true || m['es_vuelto'] == 1
+        || m['es_vuelto']?.toString() == '1'
+        || (double.tryParse(m['monto'].toString()) ?? 0) < 0,
+    montoUsd           : m['monto_usd'] == null
+        ? null
+        : double.tryParse(m['monto_usd'].toString()),
   );
 
   Map<String,dynamic> toMap() => {
@@ -5565,6 +5239,9 @@ class PagoFactura {
     if (montoCuota          != null) 'monto_cuota'          : montoCuota,
     if (tasaCambio          != null) 'tasa_cambio'          : tasaCambio,
     if (nombreLista         != null) 'nombre_lista'         : nombreLista,
+    if (moneda              != null) 'moneda'               : moneda,
+    if (esVuelto)                    'es_vuelto'            : true,
+    if (montoUsd            != null) 'monto_usd'            : montoUsd,
   };
 }
 
@@ -5586,6 +5263,16 @@ class FacturaModel {
   /// Se usa en el cálculo de comisiones para detectar el "split cajero".
   /// Si está vacío, se asume el rol actual del usuario en `vendedor`.
   final String creadorRol;
+  /// ── Facturación oct-2026 (columnas nuevas de `facturas`) ──
+  /// Inicial de las líneas financiadas y lo que cubre la financiadora,
+  /// en $. null en facturas viejas.
+  final double? inicial;
+  final double? montoFinanciado;
+  /// Tasa BCV con la que se cobró. null en facturas viejas.
+  final double? tasaBcv;
+  /// Dirección del cliente (orden del dueño 23/10/2026). '' en facturas
+  /// viejas.
+  final String direccion;
 
   FacturaModel({this.id, required this.cliente, required this.cedula,
       required this.tienda, required this.telefono, required this.nroFactura,
@@ -5593,7 +5280,9 @@ class FacturaModel {
       required this.vendedor, required this.fecha,
       Map<String, String?>? vendedorPorImei,
       Map<String, String?>? vendedorPorCodigo,
-      this.creadorRol = ''})
+      this.creadorRol = '',
+      this.inicial, this.montoFinanciado, this.tasaBcv,
+      this.direccion = ''})
       : vendedorPorImei = vendedorPorImei ?? {},
         vendedorPorCodigo = vendedorPorCodigo ?? {};
 
@@ -5625,6 +5314,7 @@ class FacturaModel {
 
   Map<String,dynamic> toApiMap() => {
     'nro_factura':nroFactura,'cedula':cedula,'cliente':cliente,'telefono':telefono,
+    'direccion':direccion,
     'vendedor':vendedor,'tienda':tienda,'fecha':fecha,'total':total,
     'creador_rol':creadorRol,
     // Equipos/items ahora se mandan como objetos con su vendedor asignado.
@@ -6883,6 +6573,17 @@ class ItemListaPrecio {
   /// N° de cuotas propio de este producto. null = el de la lista.
   int? cuotasOverride;
 
+  /// Nombres de las columnas cuyo precio escribió una persona a mano
+  /// (`es_manual` en el JSON de la lista; Brizuela 1.0.38). Ninguna
+  /// fórmula ni «Recalcular precios» respetando los fijados pisa esas
+  /// celdas.
+  Set<String> columnasManuales;
+
+  /// El producto no está en el catálogo de este equipo (todavía no cargó,
+  /// o se borró). El ítem se conserva con un producto mínimo para no
+  /// borrarlo del servidor al guardar, pero no se muestra ni se recalcula.
+  bool fueraDeCatalogo;
+
   ItemListaPrecio({
     required this.producto,
     required this.preciosPorColumna,
@@ -6891,7 +6592,20 @@ class ItemListaPrecio {
     this.cuotaManual,
     this.pctInicialOverride,
     this.cuotasOverride,
-  });
+    Set<String>? columnasManuales,
+    this.fueraDeCatalogo = false,
+  }) : columnasManuales = columnasManuales ?? <String>{};
+
+  /// ¿El precio de esta columna lo fijó una persona a mano?
+  bool esManual(String columna) => columnasManuales
+      .any((c) => c.toLowerCase() == columna.toLowerCase());
+
+  /// Marca (o desmarca) una celda como escrita a mano.
+  void marcarManual(String columna, {bool manual = true}) {
+    columnasManuales
+        .removeWhere((c) => c.toLowerCase() == columna.toLowerCase());
+    if (manual) columnasManuales.add(columna);
+  }
 
   /// true si este producto tiene condiciones propias (distintas a
   /// las generales de la lista).
@@ -6933,6 +6647,48 @@ class ListaPrecio {
   //   → total a financiar = 60 × 1.20 = 72 → cuota = 72/6 = $12
   double porcentajeRecargoCuotas;
 
+  // ── Mejoras de Brizuela (hasta 1.0.72), 16/10/2026 ─────────────
+  // Todas nacen con un valor que deja la lista EXACTAMENTE como hoy.
+  // Ver backend/lib/precios_listas.php y docs/LISTAS_DE_PRECIOS_TL.md.
+
+  /// Monto fijo en $ que se suma antes del % (0 = nada).
+  double montoAdicionalDolares;
+
+  /// 'manual' (como siempre) o 'costo': los precios los calcula el
+  /// servidor desde el costo. Solo cambia con el ensayo
+  /// (`accion=precios_costo`), nunca con un guardado normal.
+  String modoPrecios;
+
+  /// % sobre el costo en modo costo (en financiamiento, sobre el precio
+  /// de venta). NO es `porcentajeAdicional`, que sigue siendo el % sobre
+  /// el precio de venta con que se puebla una lista manual.
+  double pctSobreCosto;
+
+  /// Lista en Bs con tasa propia (true) o que sigue la BCV del día.
+  bool tasaFija;
+
+  /// Lista Divisas: tasa manual con que sus listas en Bs llevan el precio
+  /// a bolívares (0 = la BCV del día).
+  double tasaBs;
+
+  /// Precios sin decimales, siempre hacia arriba (22,30 → 23).
+  bool redondearArriba;
+
+  /// % especial por tipo de producto (ver reglas_porcentaje.dart). Solo
+  /// cuenta en modo costo.
+  List<ReglaPorcentaje> reglasPct;
+
+  /// Lista en Bs: id de la lista en divisas de la que toma sus precios
+  /// (orden del dueño 19/10/2026; ver listas_bs_desde_divisas.dart).
+  /// null = como siempre, desde el precio de venta.
+  int? listaBaseId;
+
+  /// Lista en Bs: cómo muestra sus precios (orden del dueño 23/10/2026):
+  /// 'bs' como siempre, 'bcv' solo el precio BCV en $ (base + %) o
+  /// 'bcv_bs' el precio BCV y al lado su equivalente en Bs. Lo guardado
+  /// sigue en Bs; es solo la vista (ver listas_bs_desde_divisas.dart).
+  String vistaBs;
+
   ListaPrecio({
     this.id,
     required this.nombre,
@@ -6951,7 +6707,80 @@ class ListaPrecio {
     this.porcentajeComisionWeppa = 0.0,
     this.porcentajeRecargoCuotas = 0.0,
     this.tieneCuotas = true,
-  }) : columnas = columnas ?? [], items = items ?? [];
+    this.montoAdicionalDolares = 0.0,
+    this.modoPrecios = 'manual',
+    this.pctSobreCosto = 0.0,
+    this.tasaFija = false,
+    this.tasaBs = 0.0,
+    this.redondearArriba = false,
+    List<ReglaPorcentaje>? reglasPct,
+    this.listaBaseId,
+    this.vistaBs = 'bs',
+  })  : columnas = columnas ?? [],
+        items = items ?? [],
+        reglasPct = reglasPct ?? [];
+
+  /// ¿Los precios de esta lista los calcula el servidor desde el costo?
+  bool get esModoCosto => modoPrecios == 'costo';
+
+  /// % que la lista le suma a un producto. En modo costo: el de su regla
+  /// especial si alguna calza, o el % sobre costo (misma cuenta que
+  /// plPctPara del servidor). En modo manual: el % adicional de siempre.
+  double porcentajePara(Producto p) => esModoCosto
+      ? (reglaPara(reglasPct, p.nombre, p.marca)?.pct ?? pctSobreCosto)
+      : porcentajeAdicional;
+
+  /// Redondeo final de un precio de esta lista.
+  double redondearPrecioLista(double v) =>
+      redondearArriba ? aEnteroArriba(v) : redondearPrecio(v);
+
+  /// Tasa con la que se puebla una lista en Bs: la propia si es fija; si
+  /// no, la del sistema (y si no hay, la guardada). Es la regla de siempre
+  /// de `_poblarLista`/`_autoPoblar`.
+  double get tasaParaPoblar {
+    if (!esEnBolivares) return 1.0;
+    if (tasaFija && tasaDelDia > 0) return tasaDelDia;
+    return ConfigSistema.tasaCambio > 0 ? ConfigSistema.tasaCambio : tasaDelDia;
+  }
+
+  /// Precio por defecto de un producto, en dos pasos (USD redondeado →
+  /// Bs redondeado). Con los campos nuevos en su valor por defecto da
+  /// exactamente lo de siempre: venta × (1 + % adicional) [× tasa].
+  /// En modo costo es solo una vista previa: el que vale lo escribe el
+  /// servidor (financiadoras y listas Bs dependen de otras listas).
+  /// Lista en Bs con lista base: parte del precio del producto en la
+  /// lista en divisas (si no está ahí, de la venta, como siempre).
+  double precioPorDefecto(Producto p, [List<ListaPrecio>? listas]) {
+    final partida = precioEnListaBase(this, p, listas) ??
+        (esModoCosto && !esFinanciamiento ? p.precioCosto : p.precioVenta);
+    final usd = redondearPrecioLista(
+        (partida + montoAdicionalDolares) * (1 + porcentajePara(p) / 100));
+    return esEnBolivares ? redondearPrecioLista(usd * tasaParaPoblar) : usd;
+  }
+
+  /// Vuelve TODOS los precios al de partida: columnas sin fórmula al
+  /// precio por defecto y columnas con fórmula a su fórmula (todas, no
+  /// solo las automáticas). Con `respetarManuales` las celdas fijadas a
+  /// mano no se tocan; sin él, se recalculan y pierden la marca.
+  /// Devuelve cuántos precios cambiaron. (Brizuela 70097cb)
+  int recalcularPrecios({bool respetarManuales = true}) {
+    var cambios = 0;
+    for (final item in items) {
+      if (item.fueraDeCatalogo) continue;
+      final porDefecto = precioPorDefecto(item.producto);
+      for (final col in columnas) {
+        if (!respetarManuales) item.marcarManual(col.nombre, manual: false);
+        if (!col.formula.esManual) continue;
+        if (respetarManuales && item.esManual(col.nombre)) continue;
+        final actual = item.preciosPorColumna[col.nombre];
+        if (actual != null && (actual - porDefecto).abs() < 0.0001) continue;
+        item.preciosPorColumna[col.nombre] = porDefecto;
+        cambios++;
+      }
+    }
+    cambios += aplicarFormulas(soloAutomaticas: false);
+    return cambios;
+  }
 
   // ── CONDICIONES EFECTIVAS DE UN PRODUCTO ───────────────────
   // Todo lo que muestra o calcula inicial y cuotas debe pasar por
@@ -7129,6 +6958,9 @@ class ListaPrecio {
       if (soloAutomaticas && !col.formula.auto) continue;
       if (soloColumna != null && col.nombre != soloColumna) continue;
       for (final it in items) {
+        // Una celda fijada a mano no la pisa ninguna fórmula, y un ítem
+        // sin su producto en el catálogo no tiene de dónde calcular.
+        if (it.fueraDeCatalogo || it.esManual(col.nombre)) continue;
         final nuevo = calcularColumna(col, it);
         if (nuevo == null) continue;
         final actual = it.preciosPorColumna[col.nombre];
@@ -7203,8 +7035,9 @@ class ListaPrecio {
   // tiendas + variantes) con `stockVivoDeItem`.
 
   /// Items con stock disponible, en el orden de la lista.
-  List<ItemListaPrecio> get itemsConStock =>
-      items.where((it) => stockVivoDeItem(it) > 0).toList();
+  List<ItemListaPrecio> get itemsConStock => items
+      .where((it) => !it.fueraDeCatalogo && stockVivoDeItem(it) > 0)
+      .toList();
 
   // ── MONTOS FIJADOS A MANO ──────────────────────────────────
   // `inicialManual` y `cuotaManual` congelan montos. Cuando cambian
@@ -7252,8 +7085,10 @@ class ListaPrecio {
     return n;
   }
 
-  Map<String, dynamic> toMap() => {
-    if (id != null) 'id': id,
+  /// Campos de la fila de la lista (sin columnas ni ítems). Separados de
+  /// `toMap` para que la fusión de cambios compare la configuración campo
+  /// a campo (`InstantaneaLista`).
+  Map<String, dynamic> cabeceraMap() => {
     'nombre': nombre,
     'fecha_creacion': fechaCreacion,
     'categoria': categoria,
@@ -7268,6 +7103,22 @@ class ListaPrecio {
     'porcentaje_comision_weppa': porcentajeComisionWeppa,
     'porcentaje_recargo_cuotas': porcentajeRecargoCuotas,
     'tiene_cuotas': tieneCuotas ? 1 : 0,
+    'monto_adicional_dolares': montoAdicionalDolares,
+    // El servidor lo ignora en un guardado normal (solo cambia con el
+    // ensayo); viaja para que la fusión lo compare.
+    'modo_precios': modoPrecios,
+    'pct_sobre_costo': pctSobreCosto,
+    'tasa_fija': tasaFija ? 1 : 0,
+    'tasa_bs': tasaBs,
+    'redondear_arriba': redondearArriba ? 1 : 0,
+    'reglas_pct': reglasAJson(reglasPct),
+    'lista_base_id': listaBaseId ?? 0,
+    'vista_bs': vistaBs,
+  };
+
+  Map<String, dynamic> toMap() => {
+    if (id != null) 'id': id,
+    ...cabeceraMap(),
     // Las columnas e items van en arrays nested que `guardarListaPrecios`
     // del backend procesa como tablas relacionales separadas.
     // Las columnas viajan con su nombre y, cuando tienen una funcion
@@ -7288,9 +7139,17 @@ class ListaPrecio {
     ],
     'items': items.map((it) {
       // Construimos la lista base de "valores" con los precios reales.
-      final valores = it.preciosPorColumna.entries.map((e) => {
+      // Solo de columnas que EXISTEN: un precio suelto de una columna
+      // borrada o renombrada no viaja. `es_manual` = la escribió una
+      // persona (la app 1.0.17 no lo manda y el servidor conserva el
+      // guardado).
+      final nombresCol = {for (final c in columnas) c.nombre};
+      final valores = it.preciosPorColumna.entries
+          .where((e) => nombresCol.contains(e.key))
+          .map((e) => <String, dynamic>{
         'columna_nombre': e.key,
         'precio': e.value,
+        'es_manual': it.esManual(e.key) ? 1 : 0,
       }).toList();
       // Si el item tiene inicial/cuota manuales (modo financiamiento),
       // las persistimos como columnas "virtuales" con prefijo __.
@@ -7398,12 +7257,28 @@ class ListaPrecio {
     if (m['items'] is List) {
       for (final it in (m['items'] as List)) {
         final codigo = '${it['producto_codigo'] ?? ''}';
-        final prod = catalogoGlobal
+        if (codigo.isEmpty) continue;
+        // Si el producto no está en el catálogo de ESTE equipo (todavía
+        // no cargó, o se borró) el ítem se conserva con un producto
+        // mínimo: antes se descartaba y el siguiente guardado lo borraba
+        // del servidor. No se muestra ni se recalcula (fueraDeCatalogo).
+        final enCatalogo = catalogoGlobal
             .where((p) => p.codigo == codigo)
             .firstOrNull;
-        if (prod == null) continue; // producto no existe ya
+        final prod = enCatalogo ??
+            Producto(
+              codigo: codigo,
+              nombre: '${it['producto_nombre'] ?? it['nombre'] ?? codigo}',
+              categoria: '${it['categoria'] ?? ''}',
+              marca: '${it['marca'] ?? ''}',
+              modelo: '${it['modelo'] ?? ''}',
+              tipo: '',
+              precioCosto: toDouble(it['precio_costo']),
+              precioVenta: toDouble(it['precio_venta']),
+            );
         // El mapa usa el NOMBRE de la columna como clave, no el objeto.
         final precios = <String, double>{};
+        final manuales = <String>{};
         double? inicialMan, cuotaMan, pctInicialOv;
         int? cuotasOv;
         if (it['valores'] is List) {
@@ -7434,6 +7309,7 @@ class ListaPrecio {
             // una columna de precios de verdad.
             if (FormulaColumna.esNombreVirtual(colNombre)) continue;
             precios[colNombre] = toDouble(v['precio']);
+            if (toBool(v['es_manual'])) manuales.add(colNombre);
           }
         }
         items.add(ItemListaPrecio(
@@ -7444,6 +7320,8 @@ class ListaPrecio {
           cuotaManual: cuotaMan,
           pctInicialOverride: pctInicialOv,
           cuotasOverride: cuotasOv,
+          columnasManuales: manuales,
+          fueraDeCatalogo: enCatalogo == null,
         ));
       }
     }
@@ -7468,9 +7346,95 @@ class ListaPrecio {
       tieneCuotas: m['tiene_cuotas'] == null
           ? true
           : toBool(m['tiene_cuotas']),
+      // Campos nuevos: un servidor sin ellos deja la lista como siempre.
+      montoAdicionalDolares: toDouble(m['monto_adicional_dolares']),
+      modoPrecios:
+          '${m['modo_precios'] ?? 'manual'}' == 'costo' ? 'costo' : 'manual',
+      pctSobreCosto: toDouble(m['pct_sobre_costo']),
+      tasaFija: toBool(m['tasa_fija']),
+      tasaBs: toDouble(m['tasa_bs']),
+      redondearArriba: toBool(m['redondear_arriba']),
+      reglasPct: reglasDesdeJson(m['reglas_pct']),
+      vistaBs: normalizarVistaBs(m['vista_bs']),
+      listaBaseId: (toInt(m['lista_base_id']) ?? 0) > 0
+          ? toInt(m['lista_base_id'])
+          : null,
       columnas: cols,
       items: items,
     );
+  }
+
+  /// Copia en ESTE objeto el contenido de `otra`, conservando los objetos
+  /// de ítems y columnas que ya existen: los diálogos abiertos guardan una
+  /// referencia al ítem o a la columna, y si se sustituyeran lo escrito
+  /// iría a un objeto que ya no está en la lista. (Brizuela 70097cb)
+  void adoptar(ListaPrecio otra) {
+    if (otra.id != null) id = otra.id;
+    nombre = otra.nombre;
+    fechaCreacion = otra.fechaCreacion;
+    categoria = otra.categoria;
+    marcaFiltro = otra.marcaFiltro;
+    esEnBolivares = otra.esEnBolivares;
+    tasaDelDia = otra.tasaDelDia;
+    porcentajeAdicional = otra.porcentajeAdicional;
+    esFinanciamiento = otra.esFinanciamiento;
+    financiadora = otra.financiadora;
+    porcentajeInicial = otra.porcentajeInicial;
+    numeroCuotas = otra.numeroCuotas;
+    porcentajeComisionWeppa = otra.porcentajeComisionWeppa;
+    porcentajeRecargoCuotas = otra.porcentajeRecargoCuotas;
+    tieneCuotas = otra.tieneCuotas;
+    montoAdicionalDolares = otra.montoAdicionalDolares;
+    modoPrecios = otra.modoPrecios;
+    pctSobreCosto = otra.pctSobreCosto;
+    tasaFija = otra.tasaFija;
+    tasaBs = otra.tasaBs;
+    redondearArriba = otra.redondearArriba;
+    reglasPct = [for (final r in otra.reglasPct) r.copia()];
+    listaBaseId = otra.listaBaseId;
+    vistaBs = otra.vistaBs;
+
+    final colsPorNombre = {for (final c in columnas) c.nombre: c};
+    final nuevasCols = <ColumnaPrecio>[];
+    for (final c in otra.columnas) {
+      final existente = colsPorNombre[c.nombre];
+      if (existente != null) {
+        existente.formula = c.formula.copiar();
+        nuevasCols.add(existente);
+      } else {
+        nuevasCols.add(
+            ColumnaPrecio(nombre: c.nombre, formula: c.formula.copiar()));
+      }
+    }
+    columnas
+      ..clear()
+      ..addAll(nuevasCols);
+
+    final itemsPorCodigo = {for (final it in items) it.producto.codigo: it};
+    final nuevosItems = <ItemListaPrecio>[];
+    for (final o in otra.items) {
+      final it = itemsPorCodigo[o.producto.codigo];
+      // Nuevo, o antes sin su producto y ahora con él: el objeto que llega.
+      if (it == null || (it.fueraDeCatalogo && !o.fueraDeCatalogo)) {
+        nuevosItems.add(o);
+        continue;
+      }
+      it.preciosPorColumna
+        ..clear()
+        ..addAll(o.preciosPorColumna);
+      it.columnasManuales
+        ..clear()
+        ..addAll(o.columnasManuales);
+      it.stockDisponible = o.stockDisponible;
+      it.inicialManual = o.inicialManual;
+      it.cuotaManual = o.cuotaManual;
+      it.pctInicialOverride = o.pctInicialOverride;
+      it.cuotasOverride = o.cuotasOverride;
+      nuevosItems.add(it);
+    }
+    items
+      ..clear()
+      ..addAll(nuevosItems);
   }
 }
 
@@ -7631,14 +7595,14 @@ Future<void> cargarStockParaListas({bool forzar = false}) async {
 /// y `_autoPoblar`.
 double precioPorDefectoEnLista(ListaPrecio lista, double precioVenta,
     {double? tasa}) {
+  // Con el monto fijo en 0 y sin redondeo hacia arriba (lo de siempre)
+  // da exactamente el cálculo anterior.
   final factor = 1 + (lista.porcentajeAdicional / 100);
-  final usd = redondearPrecio(precioVenta * factor);
+  final usd = lista.redondearPrecioLista(
+      (precioVenta + lista.montoAdicionalDolares) * factor);
   if (!lista.esEnBolivares) return usd;
-  final t = tasa ??
-      (ConfigSistema.tasaCambio > 0
-          ? ConfigSistema.tasaCambio
-          : lista.tasaDelDia);
-  return redondearPrecio(usd * t);
+  final t = tasa ?? lista.tasaParaPoblar;
+  return lista.redondearPrecioLista(usd * t);
 }
 
 /// Recalcula el item en la posición [idx] de [lista] cuando el
@@ -7653,8 +7617,13 @@ double precioPorDefectoEnLista(ListaPrecio lista, double precioVenta,
 ///   · Inicial/cuota fijadas a mano: si coincidían con lo que daba el
 ///     cálculo con el precio viejo se liberan (vuelven a calcularse
 ///     solas); si eran otro monto, se respetan.
+///
+/// Lista en Bs con lista base en divisas: sus precios siguen a la base
+/// (`seguirListaBase`), no al precio de venta; [listas] trae la base ya
+/// actualizada.
 int recalcularItemPorCambioDePrecio(
-    ListaPrecio lista, int idx, Producto anterior, Producto nuevo) {
+    ListaPrecio lista, int idx, Producto anterior, Producto nuevo,
+    [List<ListaPrecio>? listas]) {
   final viejo = lista.items[idx];
   var cambios = 0;
 
@@ -7680,7 +7649,17 @@ int recalcularItemPorCambioDePrecio(
     cuotaManual: viejo.cuotaManual,
     pctInicialOverride: viejo.pctInicialOverride,
     cuotasOverride: viejo.cuotasOverride,
+    columnasManuales: {...viejo.columnasManuales},
   );
+
+  // Lista en Bs con base: todo sale de la base (o de la venta nueva si
+  // el producto no está ahí); los ✎ no se tocan.
+  if (listaBaseDe(lista, listas) != null) {
+    lista.items[idx] = it;
+    cambios += seguirListaBase(lista, listas);
+    return cambios + _liberarMontosFijosAutomaticos(
+        lista, it, inicialAutoVieja, cuotaAutoVieja);
+  }
 
   // 1) Columnas manuales que seguían el precio por defecto. En listas
   //    en Bs se prueba con la tasa guardada y con la del sistema (la
@@ -7721,17 +7700,25 @@ int recalcularItemPorCambioDePrecio(
   cambios += lista.aplicarFormulas();
 
   // 3) Montos fijos de financiamiento que eran el cálculo automático.
-  if (lista.esFinanciamiento) {
-    if (it.inicialManual != null &&
-        (it.inicialManual! - inicialAutoVieja).abs() < 0.01) {
-      it.inicialManual = null;
-      cambios++;
-    }
-    if (it.cuotaManual != null &&
-        (it.cuotaManual! - cuotaAutoVieja).abs() < 0.01) {
-      it.cuotaManual = null;
-      cambios++;
-    }
+  return cambios + _liberarMontosFijosAutomaticos(
+      lista, it, inicialAutoVieja, cuotaAutoVieja);
+}
+
+/// Inicial/cuota fijadas que eran el cálculo automático con el precio
+/// viejo: se liberan (vuelven a calcularse solas). Devuelve cuántas.
+int _liberarMontosFijosAutomaticos(ListaPrecio lista, ItemListaPrecio it,
+    double inicialAutoVieja, double cuotaAutoVieja) {
+  if (!lista.esFinanciamiento) return 0;
+  var cambios = 0;
+  if (it.inicialManual != null &&
+      (it.inicialManual! - inicialAutoVieja).abs() < 0.01) {
+    it.inicialManual = null;
+    cambios++;
+  }
+  if (it.cuotaManual != null &&
+      (it.cuotaManual! - cuotaAutoVieja).abs() < 0.01) {
+    it.cuotaManual = null;
+    cambios++;
   }
   return cambios;
 }
@@ -7767,13 +7754,26 @@ Future<int> _actualizarListasPorCambioDePrecio(
     final raw = await _Api.get('listas_precios');
     if (raw is! List) return 0;
     final listas = <ListaPrecio>[];
-    var actualizadas = 0;
+    final mapas = <ListaPrecio, Map<String, dynamic>>{};
     for (final m in raw) {
       if (m is! Map) continue;
       final mapa = Map<String, dynamic>.from(m);
       final lista = ListaPrecio.fromMap(mapa);
       listas.add(lista);
+      mapas[lista] = mapa;
+    }
+    // Primero las listas en divisas: las listas en Bs con base toman el
+    // precio ya actualizado de ellas.
+    final orden = [
+      ...listas.where((l) => !l.esEnBolivares),
+      ...listas.where((l) => l.esEnBolivares),
+    ];
+    var actualizadas = 0;
+    for (final lista in orden) {
+      final mapa = mapas[lista]!;
       if (lista.id == null) continue;
+      // En modo costo los precios los pone el servidor (precios_listas.php).
+      if (lista.esModoCosto) continue;
       final idx = lista.items
           .indexWhere((it) => it.producto.codigo == anterior.codigo);
       if (idx < 0) continue;
@@ -7787,7 +7787,8 @@ Future<int> _actualizarListasPorCambioDePrecio(
             'faltan productos en el catálogo local');
         continue;
       }
-      final n = recalcularItemPorCambioDePrecio(lista, idx, anterior, nuevo);
+      final n = recalcularItemPorCambioDePrecio(
+          lista, idx, anterior, nuevo, listas);
       if (n == 0) continue;
       try {
         await _Api.put('listas_precios', lista.id.toString(), lista.toMap());
@@ -7957,6 +7958,24 @@ bool puedeVerTodasLasTiendas() {
   final rol = usuarioSesion?.rol;
   return rol == 'Administrador' || rol == 'Dueño' || rol == 'Gerente' ||
       rol == 'Maestro'; // el maestro (soporte) tiene acceso total
+}
+
+/// ¿Con [rol] se entra al Panel Corporativo al iniciar sesión en vez de
+/// elegir tienda? Los mismos roles que ven todas las tiendas (orden del
+/// dueño 16/10/2026: «el panel corporativo tal cual lo tiene Brizuela»).
+bool debeEntrarAlPanelCorporativo(String? rol) =>
+    rol == 'Administrador' || rol == 'Dueño' || rol == 'Gerente' ||
+    rol == 'Maestro';
+
+/// ¿El usuario de la sesión puede ver el COSTO de los productos y lo que se
+/// deduce de él (ganancia, margen, utilidad) en Reportes? Solo Dueño,
+/// Administrador, Gerente y Maestro (traído de Brizuela, pedido del
+/// 15/10/2026). El Encargado, que también entra a Reportes, no. Ver
+/// lib/reportes_costos.dart.
+bool puedeVerCostos() {
+  final rol = usuarioSesion?.rol;
+  return rol == 'Dueño' || rol == 'Dueno' || rol == 'Administrador' ||
+      rol == 'Gerente' || rol == 'Maestro';
 }
 
 /// Devuelve la tienda asignada al usuario actual. Vacío = sin restricción
@@ -8711,298 +8730,21 @@ class _MyAppState extends State<MyApp> {
       // se mantiene siempre con la identidad visual clara de Tecno
       // Líder (azul royal + amarillo dorado sobre fondos claros).
       themeMode: ThemeMode.light,
-      theme: _buildAppTheme(Brightness.light),
+      // Todo el aspecto sale de lib/theme/app_theme.dart (estilo de
+      // Brizuela con la marca de Tecno Líder).
+      theme: AppTheme.claro(),
+      // El aviso de actualización va acá para verse en TODAS las pantallas.
+      builder: (context, hijo) => AppTheme.escalarTexto(context,
+          AvisoActualizacion(child: hijo ?? const SizedBox.shrink())),
       home: const LoginPage(),
     );
   }
 }
 
-// ════════════════════════════════════════════════════════════════════
-//  CONSTRUCTOR DEL TEMA — CLARO Y OSCURO
-// ════════════════════════════════════════════════════════════════════
-//  Genera un ThemeData consistente con la identidad visual Tecno
-//  Líder. Toma `Brightness.light` o `Brightness.dark` y configura
-//  todos los componentes (AppBar, botones, inputs, cards, dialogs,
-//  snackbars, FAB) acordes al modo.
-//
-//  Decisiones clave:
-//    · `useMaterial3: true` → usa Material You / M3 (UI moderna)
-//    · ColorScheme generado desde el azul de marca como semilla
-//    · AppBar SIEMPRE en azul royal (refuerza marca, ambos modos)
-//    · FAB SIEMPRE en amarillo (CTA visualmente distintivo)
-//    · Inputs con bordes redondeados y focus en amarillo
-//      (el amarillo "energiza" el campo activo, mejor que azul
-//       sobre azul que se pierde visualmente)
-//    · Card sombra de marca en claro, profunda en oscuro
-// ════════════════════════════════════════════════════════════════════
 /// Tema claro de la app, para `tool/capturas_ipad_test.dart`, que dibuja
 /// las pantallas fuera de la app para las capturas de App Store.
 @visibleForTesting
-ThemeData temaAppClaro() => _buildAppTheme(Brightness.light);
-
-ThemeData _buildAppTheme(Brightness brightness) {
-  final isDark = brightness == Brightness.dark;
-
-  // Superficies que cambian entre modos
-  final surface       = isDark ? AppColors.darkSurface     : AppColors.surfaceCard;
-  final surfaceAlt    = isDark ? AppColors.darkSurfaceAlt  : AppColors.surfaceTintBlueSoft;
-  final scaffoldBg    = isDark ? AppColors.darkBackground  : AppColors.surfaceTintBlue;
-  final textPrimary   = isDark ? AppColors.darkTextPrimary : AppColors.textPrimary;
-  final textSecondary = isDark ? AppColors.darkTextSecondary : AppColors.textSecondary;
-  final divider       = isDark ? AppColors.darkBorder      : AppColors.cardBorderTinted;
-
-  return ThemeData(
-    useMaterial3: true,
-    brightness: brightness,
-    colorScheme: ColorScheme.fromSeed(
-      seedColor: AppColors.brandBlue,
-      brightness: brightness,
-      primary: AppColors.brandBlue,
-      onPrimary: Colors.white,
-      secondary: AppColors.brandYellow,
-      onSecondary: AppColors.brandBlueDeeper,
-      tertiary: AppColors.brandBlueDark,
-      surface: surface,
-      onSurface: textPrimary,
-      error: AppColors.statusRed,
-      onError: Colors.white,
-    ),
-
-    scaffoldBackgroundColor: scaffoldBg,
-    canvasColor: surface,
-
-    // ── AppBar: azul royal con sombra sutil amarilla (marca) ──
-    appBarTheme: const AppBarTheme(
-      backgroundColor: AppColors.brandBlueDark,
-      foregroundColor: Colors.white,
-      surfaceTintColor: Colors.transparent,
-      elevation: 0,
-      scrolledUnderElevation: 4,
-      shadowColor: AppColors.brandBlueDeeper,
-      centerTitle: false,
-      titleTextStyle: TextStyle(
-        color: Colors.white,
-        fontSize: 18,
-        fontWeight: FontWeight.w800,
-        letterSpacing: 0.4,
-      ),
-      iconTheme: IconThemeData(color: Colors.white),
-      actionsIconTheme: IconThemeData(color: Colors.white),
-    ),
-
-    // ── Botón principal: gradient implícito vía estilo ────────
-    elevatedButtonTheme: ElevatedButtonThemeData(
-      style: ElevatedButton.styleFrom(
-        backgroundColor: AppColors.brandBlueDark,
-        foregroundColor: Colors.white,
-        padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 14),
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-        elevation: 0,
-        textStyle: const TextStyle(
-          fontSize: 15, fontWeight: FontWeight.w600, letterSpacing: 0.5),
-      ),
-    ),
-
-    // ── Botón outline ─────────────────────────────────────────
-    outlinedButtonTheme: OutlinedButtonThemeData(
-      style: OutlinedButton.styleFrom(
-        foregroundColor: AppColors.brandBlue,
-        side: const BorderSide(color: AppColors.brandBlue, width: 1.5),
-        padding: const EdgeInsets.symmetric(horizontal: 22, vertical: 13),
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-      ),
-    ),
-
-    // ── Botón texto ───────────────────────────────────────────
-    textButtonTheme: TextButtonThemeData(
-      style: TextButton.styleFrom(
-        foregroundColor: AppColors.brandBlue,
-        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-      ),
-    ),
-
-    // ── Inputs: focus en azul de marca (cohesión total) ──────
-    inputDecorationTheme: InputDecorationTheme(
-      filled: true,
-      fillColor: surfaceAlt,
-      labelStyle: TextStyle(color: textSecondary, fontWeight: FontWeight.w500),
-      hintStyle: TextStyle(color: textSecondary.withValues(alpha: 0.7)),
-      prefixIconColor: AppColors.brandBlue,
-      suffixIconColor: textSecondary,
-      border: OutlineInputBorder(
-        borderRadius: BorderRadius.circular(12),
-        borderSide: BorderSide.none,
-      ),
-      enabledBorder: OutlineInputBorder(
-        borderRadius: BorderRadius.circular(12),
-        borderSide: BorderSide(color: divider, width: 1),
-      ),
-      focusedBorder: OutlineInputBorder(
-        borderRadius: BorderRadius.circular(12),
-        borderSide: const BorderSide(color: AppColors.brandBlue, width: 2),
-      ),
-      errorBorder: OutlineInputBorder(
-        borderRadius: BorderRadius.circular(12),
-        borderSide: const BorderSide(color: AppColors.statusRed, width: 1.5),
-      ),
-      focusedErrorBorder: OutlineInputBorder(
-        borderRadius: BorderRadius.circular(12),
-        borderSide: const BorderSide(color: AppColors.statusRed, width: 2),
-      ),
-      contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 16),
-    ),
-
-    // ── Cards: bordes sutiles azules + sombra cálida ──────────
-    cardTheme: CardThemeData(
-      color: surface,
-      elevation: isDark ? 0 : 1,
-      shadowColor: isDark
-          ? Colors.black.withValues(alpha: 0.3)
-          : AppColors.brandBlue.withValues(alpha: 0.10),
-      surfaceTintColor: Colors.transparent,
-      shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(16),
-        side: BorderSide(
-          color: isDark
-              ? divider
-              : AppColors.brandBlue.withValues(alpha: 0.08),
-          width: 1,
-        ),
-      ),
-      margin: EdgeInsets.zero,
-    ),
-
-    // ── FAB: amarillo de marca (ambos modos) ─────────────────
-    floatingActionButtonTheme: const FloatingActionButtonThemeData(
-      backgroundColor: AppColors.brandYellow,
-      foregroundColor: AppColors.brandBlueDeeper,
-      elevation: 6,
-      focusElevation: 8,
-      hoverElevation: 8,
-      highlightElevation: 4,
-      shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.all(Radius.circular(16)),
-      ),
-    ),
-
-    // ── Chips ─────────────────────────────────────────────────
-    chipTheme: ChipThemeData(
-      backgroundColor: surfaceAlt,
-      selectedColor: AppColors.brandBlue.withValues(alpha: 0.15),
-      labelStyle: TextStyle(color: textPrimary, fontWeight: FontWeight.w500),
-      side: BorderSide(color: divider),
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
-    ),
-
-    // ── SnackBar ──────────────────────────────────────────────
-    snackBarTheme: SnackBarThemeData(
-      behavior: SnackBarBehavior.floating,
-      backgroundColor: isDark ? AppColors.darkSurface : AppColors.brandBlueDark,
-      contentTextStyle: const TextStyle(color: Colors.white),
-      shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.all(Radius.circular(12)),
-      ),
-      actionTextColor: AppColors.brandYellow,
-    ),
-
-    // ── Diálogos ─────────────────────────────────────────────
-    dialogTheme: DialogThemeData(
-      backgroundColor: surface,
-      surfaceTintColor: Colors.transparent,
-      elevation: 8,
-      shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.all(Radius.circular(20)),
-      ),
-      titleTextStyle: TextStyle(
-        color: textPrimary,
-        fontSize: 18,
-        fontWeight: FontWeight.w700,
-      ),
-      contentTextStyle: TextStyle(color: textPrimary, fontSize: 14),
-    ),
-
-    // ── BottomSheet ───────────────────────────────────────────
-    bottomSheetTheme: BottomSheetThemeData(
-      backgroundColor: surface,
-      surfaceTintColor: Colors.transparent,
-      elevation: 8,
-      shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
-      ),
-    ),
-
-    // ── Divider ───────────────────────────────────────────────
-    dividerTheme: DividerThemeData(
-      color: divider,
-      space: 1,
-      thickness: 1,
-    ),
-
-    // ── ListTile ──────────────────────────────────────────────
-    listTileTheme: ListTileThemeData(
-      iconColor: AppColors.brandBlue,
-      textColor: textPrimary,
-      titleTextStyle: TextStyle(
-        color: textPrimary, fontSize: 15, fontWeight: FontWeight.w500),
-      subtitleTextStyle: TextStyle(color: textSecondary, fontSize: 13),
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-    ),
-
-    // ── Switch / Checkbox / Radio: amarillo cuando activo ────
-    switchTheme: SwitchThemeData(
-      thumbColor: WidgetStateProperty.resolveWith(
-        (states) => states.contains(WidgetState.selected)
-            ? AppColors.brandYellow
-            : Colors.grey,
-      ),
-      trackColor: WidgetStateProperty.resolveWith(
-        (states) => states.contains(WidgetState.selected)
-            ? AppColors.brandYellow.withValues(alpha: 0.4)
-            : Colors.grey.withValues(alpha: 0.3),
-      ),
-    ),
-    checkboxTheme: CheckboxThemeData(
-      fillColor: WidgetStateProperty.resolveWith(
-        (states) => states.contains(WidgetState.selected)
-            ? AppColors.brandBlue : Colors.transparent,
-      ),
-      checkColor: const WidgetStatePropertyAll(Colors.white),
-      side: BorderSide(color: divider, width: 1.5),
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(4)),
-    ),
-
-    // ── ProgressIndicator ─────────────────────────────────────
-    progressIndicatorTheme: const ProgressIndicatorThemeData(
-      color: AppColors.brandYellow,
-      linearTrackColor: Color(0x33FFC20E),
-      circularTrackColor: Color(0x22FFC20E),
-    ),
-
-    // ── Tipografía ────────────────────────────────────────────
-    textTheme: TextTheme(
-      headlineLarge:  TextStyle(color: textPrimary, fontWeight: FontWeight.w800),
-      headlineMedium: TextStyle(color: textPrimary, fontWeight: FontWeight.w700),
-      titleLarge:     TextStyle(color: textPrimary, fontWeight: FontWeight.w700),
-      titleMedium:    TextStyle(color: textPrimary, fontWeight: FontWeight.w600),
-      bodyLarge:      TextStyle(color: textPrimary),
-      bodyMedium:     TextStyle(color: textPrimary),
-      bodySmall:      TextStyle(color: textSecondary),
-      labelLarge:     TextStyle(color: textPrimary, fontWeight: FontWeight.w600),
-    ),
-
-    iconTheme: IconThemeData(color: textSecondary),
-    primaryIconTheme: const IconThemeData(color: Colors.white),
-
-    // ── Tab bar ───────────────────────────────────────────────
-    tabBarTheme: const TabBarThemeData(
-      labelColor: Colors.white,
-      unselectedLabelColor: Colors.white70,
-      indicatorColor: AppColors.brandYellow,
-      indicatorSize: TabBarIndicatorSize.label,
-      labelStyle: TextStyle(fontWeight: FontWeight.w700),
-    ),
-  );
-}
+ThemeData temaAppClaro() => AppTheme.claro();
 
 // ============================================================
 //  LOGIN — consulta la base de datos real
@@ -9245,6 +8987,18 @@ class _LoginPageState extends State<LoginPage> with SingleTickerProviderStateMix
       if (!mounted) return;
       ScaffoldMessenger.of(context).hideCurrentSnackBar();
 
+      // ── RUTEO POR ROL (Panel Corporativo, traído de Brizuela) ──
+      // Dueño / Gerente / Administrador (y el Maestro) entran PRIMERO al
+      // panel corporativo, desde donde eligen a qué tienda entrar. Los
+      // demás roles seleccionan su tienda y entran directo a vender.
+      if (debeEntrarAlPanelCorporativo(usuarioSesion?.rol)) {
+        Navigator.pushReplacement(
+          context,
+          MaterialPageRoute(builder: (c) => const PanelCorporativo()),
+        );
+        return;
+      }
+
       // Selección de tienda — si el usuario ya eligió en el formulario
       // del login (selector visible), saltamos este diálogo y vamos
       // directo a Ventas. Si no, se muestra como antes para no romper
@@ -9390,48 +9144,32 @@ class _LoginPageState extends State<LoginPage> with SingleTickerProviderStateMix
 
   @override
   Widget build(BuildContext context) {
-    // El login es una pantalla "branded" — siempre usa el fondo oscuro
-    // azul de la marca, independientemente del tema del sistema.
-    // (El tema oscuro de la app aplica al resto de pantallas.)
+    // Mismo material que Brizuela (estilo del Panel): fondo lavanda,
+    // tarjeta blanca que flota y halos apenas visibles de la marca. Se
+    // conserva el botón ACCEDER amarillo de Tecno Líder.
     final mq = MediaQuery.of(context);
     final isCompact = mq.size.width < 380;
 
     return Scaffold(
-      // backgroundColor se sobrescribe por el gradiente del Stack
+      backgroundColor: AppNeu.base,
       body: Stack(children: [
         // ═══════════════════════════════════════════════════════
-        //  CAPA 1 — Gradiente de marca (azul medio → muy oscuro)
+        //  Halos decorativos (amarillo y azul de la marca, 6 %)
         // ═══════════════════════════════════════════════════════
-        const DecoratedBox(
-          decoration: BoxDecoration(gradient: AppColors.gradientHero),
-          child: SizedBox.expand(),
-        ),
-
-        // ═══════════════════════════════════════════════════════
-        //  CAPA 2 — Decoraciones sutiles (orbs de luz)
-        // ═══════════════════════════════════════════════════════
-        // Orb amarillo arriba-derecha (acento de marca)
         Positioned(
-          top: -120, right: -100,
-          child: Container(width: 280, height: 280,
+          top: -80, right: -80,
+          child: Container(width: 260, height: 260,
             decoration: BoxDecoration(
               shape: BoxShape.circle,
-              gradient: RadialGradient(colors: [
-                AppColors.brandYellow.withValues(alpha: 0.18),
-                AppColors.brandYellow.withValues(alpha: 0.0),
-              ]),
+              color: AppColors.brandYellow.withValues(alpha: 0.06),
             )),
         ),
-        // Orb azul claro abajo-izquierda
         Positioned(
-          bottom: -150, left: -100,
-          child: Container(width: 360, height: 360,
+          bottom: -100, left: -60,
+          child: Container(width: 300, height: 300,
             decoration: BoxDecoration(
               shape: BoxShape.circle,
-              gradient: RadialGradient(colors: [
-                Colors.white.withValues(alpha: 0.06),
-                Colors.white.withValues(alpha: 0.0),
-              ]),
+              color: AppColors.brandBlue.withValues(alpha: 0.06),
             )),
         ),
         // Línea de acento amarilla cruzando sutilmente
@@ -9488,16 +9226,10 @@ class _LoginPageState extends State<LoginPage> with SingleTickerProviderStateMix
                         // ── Wordmark con efecto sutil ──
                         Text('TECNO LÍDER',
                           style: TextStyle(
-                            color: Colors.white,
+                            color: AppColors.brandBlue,
                             fontSize: isCompact ? 26 : 30,
                             fontWeight: FontWeight.w900,
                             letterSpacing: 4,
-                            shadows: [
-                              Shadow(
-                                color: AppColors.brandYellow.withValues(alpha: 0.3),
-                                blurRadius: 12,
-                              ),
-                            ],
                           ),
                         ),
                         const SizedBox(height: 6),
@@ -9510,9 +9242,9 @@ class _LoginPageState extends State<LoginPage> with SingleTickerProviderStateMix
                               color: AppColors.brandYellow,
                             ),
                             const SizedBox(width: 10),
-                            Text('SISTEMA DE GESTIÓN COMERCIAL · v2.2',
+                            const Text('SISTEMA DE GESTIÓN COMERCIAL · v2.2',
                               style: TextStyle(
-                                color: Colors.white.withValues(alpha: 0.75),
+                                color: AppColors.textSecondary,
                                 fontSize: 11,
                                 letterSpacing: 2.2,
                                 fontWeight: FontWeight.w600,
@@ -9528,52 +9260,19 @@ class _LoginPageState extends State<LoginPage> with SingleTickerProviderStateMix
                         const SizedBox(height: 36),
 
                         // ═══════════════════════════════════════
-                        //  CARD DE LOGIN (glassmorphism sutil)
+                        //  CARD DE LOGIN (tarjeta blanca flotante)
                         // ═══════════════════════════════════════
                         Container(
                           padding: const EdgeInsets.all(28),
-                          decoration: BoxDecoration(
-                            color: Colors.white.withValues(alpha: 0.97),
-                            borderRadius: BorderRadius.circular(24),
-                            border: Border.all(
-                              color: Colors.white.withValues(alpha: 0.5),
-                              width: 1,
-                            ),
-                            boxShadow: [
-                              BoxShadow(
-                                color: AppColors.brandBlueDeeper
-                                    .withValues(alpha: 0.4),
-                                blurRadius: 40,
-                                offset: const Offset(0, 20),
-                              ),
-                              BoxShadow(
-                                color: AppColors.brandYellow
-                                    .withValues(alpha: 0.08),
-                                blurRadius: 30,
-                                offset: const Offset(0, 0),
-                              ),
-                            ],
-                          ),
+                          decoration: AppNeu.relieve(
+                            borde: BorderRadius.circular(24), intensidad: 1.3),
                           child: Column(
                             crossAxisAlignment: CrossAxisAlignment.stretch,
                             children: [
                               // Título del card
-                              const Text('Iniciar Sesión',
-                                style: TextStyle(
-                                  fontSize: 22,
-                                  fontWeight: FontWeight.w800,
-                                  color: AppColors.textPrimary,
-                                  letterSpacing: -0.3,
-                                ),
-                              ),
-                              const SizedBox(height: 4),
-                              Text('Ingrese sus credenciales para continuar',
-                                style: TextStyle(
-                                  fontSize: 13,
-                                  color: AppColors.textSecondary,
-                                ),
-                              ),
-                              const SizedBox(height: 24),
+                              const TituloSeccion('Iniciar Sesión',
+                                subtitulo: 'Ingrese sus credenciales para continuar'),
+                              const SizedBox(height: 14),
 
                               // ── Campo: Correo ──
                               _buildCampoCorreo(),
@@ -9598,17 +9297,17 @@ class _LoginPageState extends State<LoginPage> with SingleTickerProviderStateMix
                         // ── Pie: versión + nombre de la empresa ──
                         Text(
                           '${ConfigSistema.nombreEmpresa} · v2.0.0',
-                          style: TextStyle(
-                            color: Colors.white.withValues(alpha: 0.45),
+                          style: const TextStyle(
+                            color: AppColors.textSecondary,
                             fontSize: 11,
                             letterSpacing: 1.5,
                           ),
                         ),
                         const SizedBox(height: 8),
-                        Text(
+                        const Text(
                           'Sistema seguro · Datos cifrados',
                           style: TextStyle(
-                            color: Colors.white.withValues(alpha: 0.35),
+                            color: AppColors.textSecondary,
                             fontSize: 10,
                             letterSpacing: 0.8,
                           ),
@@ -9644,23 +9343,21 @@ class _LoginPageState extends State<LoginPage> with SingleTickerProviderStateMix
         labelText: 'Correo electrónico',
         hintText: 'usuario@tecnolider.com',
         prefixIcon: const Icon(Icons.alternate_email_rounded,
-          color: AppColors.brandBlue, size: 22),
+          color: AppColors.azulVivo, size: 22),
         filled: true,
-        fillColor: AppColors.surfaceGrey,
+        fillColor: AppNeu.hueco,
         border: OutlineInputBorder(
           borderRadius: BorderRadius.circular(14),
-          borderSide: BorderSide.none,
+          borderSide: const BorderSide(color: AppColors.bordeSuave),
         ),
         enabledBorder: OutlineInputBorder(
           borderRadius: BorderRadius.circular(14),
-          borderSide: BorderSide(
-            color: AppColors.cardBorder.withValues(alpha: 0.5),
-          ),
+          borderSide: const BorderSide(color: AppColors.bordeSuave),
         ),
         focusedBorder: OutlineInputBorder(
           borderRadius: BorderRadius.circular(14),
           borderSide: const BorderSide(
-            color: AppColors.brandBlue,
+            color: AppColors.azulVivo,
             width: 2,
           ),
         ),
@@ -9683,7 +9380,7 @@ class _LoginPageState extends State<LoginPage> with SingleTickerProviderStateMix
         labelText: 'Contraseña',
         hintText: '••••••••',
         prefixIcon: const Icon(Icons.lock_outline_rounded,
-          color: AppColors.brandBlue, size: 22),
+          color: AppColors.azulVivo, size: 22),
         suffixIcon: IconButton(
           icon: Icon(
             _verClave
@@ -9696,21 +9393,19 @@ class _LoginPageState extends State<LoginPage> with SingleTickerProviderStateMix
           onPressed: () => setState(() => _verClave = !_verClave),
         ),
         filled: true,
-        fillColor: AppColors.surfaceGrey,
+        fillColor: AppNeu.hueco,
         border: OutlineInputBorder(
           borderRadius: BorderRadius.circular(14),
-          borderSide: BorderSide.none,
+          borderSide: const BorderSide(color: AppColors.bordeSuave),
         ),
         enabledBorder: OutlineInputBorder(
           borderRadius: BorderRadius.circular(14),
-          borderSide: BorderSide(
-            color: AppColors.cardBorder.withValues(alpha: 0.5),
-          ),
+          borderSide: const BorderSide(color: AppColors.bordeSuave),
         ),
         focusedBorder: OutlineInputBorder(
           borderRadius: BorderRadius.circular(14),
           borderSide: const BorderSide(
-            color: AppColors.brandBlue,
+            color: AppColors.azulVivo,
             width: 2,
           ),
         ),
@@ -9734,12 +9429,12 @@ class _LoginPageState extends State<LoginPage> with SingleTickerProviderStateMix
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 4),
       decoration: BoxDecoration(
-        color: AppColors.surfaceGrey,
+        color: AppNeu.hueco,
         borderRadius: BorderRadius.circular(14),
         border: Border.all(
           color: _tiendaSeleccionada != null
               ? AppColors.brandYellow.withValues(alpha: 0.6)
-              : AppColors.cardBorder.withValues(alpha: 0.5),
+              : AppColors.bordeSuave,
           width: _tiendaSeleccionada != null ? 1.5 : 1,
         ),
       ),
@@ -9751,7 +9446,7 @@ class _LoginPageState extends State<LoginPage> with SingleTickerProviderStateMix
             color: AppColors.textSecondary),
           hint: Row(children: const [
             Icon(Icons.storefront_outlined,
-              color: AppColors.brandBlue, size: 22),
+              color: AppColors.azulVivo, size: 22),
             SizedBox(width: 12),
             Text('Punto de venta (opcional)',
               style: TextStyle(
@@ -9860,13 +9555,25 @@ class PantallaBloqueoLicencia extends StatelessWidget {
   Widget build(BuildContext context) {
     final estado = LicenciaService.estadoActual;
 
+    // Mismo material que el login: fondo lavanda y tarjeta blanca.
     return Scaffold(
-      backgroundColor: AppColors.brandBlueDeeper,
+      backgroundColor: AppNeu.base,
       body: Stack(children: [
-        // Fondo con gradiente azul Tecno Líder
-        const DecoratedBox(
-          decoration: BoxDecoration(gradient: AppColors.gradientHero),
-          child: SizedBox.expand(),
+        Positioned(
+          top: -80, right: -80,
+          child: Container(width: 260, height: 260,
+            decoration: BoxDecoration(
+              shape: BoxShape.circle,
+              color: AppColors.brandYellow.withValues(alpha: 0.06),
+            )),
+        ),
+        Positioned(
+          bottom: -100, left: -60,
+          child: Container(width: 300, height: 300,
+            decoration: BoxDecoration(
+              shape: BoxShape.circle,
+              color: AppColors.brandBlue.withValues(alpha: 0.06),
+            )),
         ),
 
         SafeArea(
@@ -9878,27 +9585,19 @@ class PantallaBloqueoLicencia extends StatelessWidget {
                 child: Column(
                   mainAxisAlignment: MainAxisAlignment.center,
                   children: [
-                    // Icono grande de candado con resplandor amarillo
+                    // Icono grande de candado sobre círculo amarillo
+                    // (el amarillo de la marca va de relleno, no de trazo).
                     Container(
                       width: 110, height: 110,
                       decoration: BoxDecoration(
                         shape: BoxShape.circle,
-                        color: AppColors.brandYellow.withValues(alpha: 0.15),
-                        border: Border.all(
-                          color: AppColors.brandYellow.withValues(alpha: 0.4),
-                          width: 2,
-                        ),
-                        boxShadow: [
-                          BoxShadow(
-                            color: AppColors.brandYellow.withValues(alpha: 0.3),
-                            blurRadius: 28,
-                          ),
-                        ],
+                        color: AppColors.brandYellow,
+                        boxShadow: AppColors.shadowYellowGlow(),
                       ),
                       child: const Icon(
                         Icons.lock_outline_rounded,
                         size: 56,
-                        color: AppColors.brandYellow,
+                        color: AppColors.brandBlueDeeper,
                       ),
                     ),
                     const SizedBox(height: 28),
@@ -9906,7 +9605,7 @@ class PantallaBloqueoLicencia extends StatelessWidget {
                     const Text('SERVICIO SUSPENDIDO',
                       textAlign: TextAlign.center,
                       style: TextStyle(
-                        color: Colors.white,
+                        color: AppColors.brandBlue,
                         fontSize: 26,
                         fontWeight: FontWeight.w900,
                         letterSpacing: 2.5,
@@ -9925,17 +9624,8 @@ class PantallaBloqueoLicencia extends StatelessWidget {
                     // Card con el motivo y contacto
                     Container(
                       padding: const EdgeInsets.all(24),
-                      decoration: BoxDecoration(
-                        color: Colors.white.withValues(alpha: 0.95),
-                        borderRadius: BorderRadius.circular(20),
-                        boxShadow: [
-                          BoxShadow(
-                            color: Colors.black.withValues(alpha: 0.4),
-                            blurRadius: 30,
-                            offset: const Offset(0, 14),
-                          ),
-                        ],
-                      ),
+                      decoration: AppNeu.relieve(
+                        borde: BorderRadius.circular(20), intensidad: 1.3),
                       child: Column(children: [
                         Text(
                           estado.motivo,
@@ -10025,10 +9715,10 @@ class PantallaBloqueoLicencia extends StatelessWidget {
                     // Botón "Reintentar" (vuelve al login)
                     TextButton.icon(
                       icon: const Icon(Icons.refresh_rounded,
-                        color: Colors.white70, size: 20),
+                        color: AppColors.royalBlue, size: 20),
                       label: const Text('Reintentar conexión',
                         style: TextStyle(
-                          color: Colors.white70,
+                          color: AppColors.royalBlue,
                           fontWeight: FontWeight.w600,
                         )),
                       onPressed: () {
@@ -10043,8 +9733,8 @@ class PantallaBloqueoLicencia extends StatelessWidget {
                       Text(
                         'Última verificación: '
                         '${_fmtFechaHora(estado.ultimaSincronizacion!)}',
-                        style: TextStyle(
-                          color: Colors.white.withValues(alpha: 0.4),
+                        style: const TextStyle(
+                          color: AppColors.textSecondary,
                           fontSize: 11,
                         ),
                       ),
@@ -10659,6 +10349,35 @@ class _ResumenInicialFactura {
 /// "Sin inicial (promoción)".
 bool _pagoVisibleEnFactura(PagoFactura p) => !esInicialCero(p.monto);
 
+/// Los pagos que salen en la factura impresa: solo lo que el cliente
+/// pagó (y el vuelto). En TecnoLíder lo financiado nunca es un pago.
+List<PagoFactura> pagosEnFacturaImpresa(FacturaModel f) =>
+    f.pagos.where(_pagoVisibleEnFactura).toList();
+
+/// Rótulo de un pago en la factura impresa ("Vuelto · Efectivo \$").
+String rotuloPagoFactura(PagoFactura p, {bool inicial = false}) =>
+    p.restaComoVuelto
+        ? 'Vuelto · ${p.metodo}'
+        : inicial ? '${p.metodo} (Inicial)' : p.metodo;
+
+/// Tasa con la que se COBRÓ la factura (la que se imprime): la guardada
+/// en la factura (`tasa_bcv`), o la de sus pagos; solo una factura sin
+/// ningún dato cae a la tasa del día. Antes se imprimía siempre la del
+/// día, y al reimprimir una factura vieja salía otra tasa.
+double tasaDeFactura(FacturaModel f) {
+  if (f.tasaBcv != null && f.tasaBcv! > 0) return f.tasaBcv!;
+  for (final p in f.pagos) {
+    if (p.tasaCambio != null && p.tasaCambio! > 0) return p.tasaCambio!;
+  }
+  return ConfigSistema.tasaCambio;
+}
+
+/// Monto de un pago en la factura impresa. El vuelto se le devolvió al
+/// cliente: sale con signo menos ("-$5.00", "-400,00 Bs.").
+String montoPagoFacturaTexto(PagoFactura p) => p.restaComoVuelto
+    ? '-${_fmtMontoFactura(p.monto.abs(), p.metodo)}'
+    : _fmtMontoFactura(p.monto, p.metodo);
+
 /// Devuelve el resumen de inicial de la factura, o null si la venta no
 /// es financiada (venta de contado normal → no hay "Inicial").
 _ResumenInicialFactura? _resumenInicialFactura(
@@ -10673,7 +10392,10 @@ _ResumenInicialFactura? _resumenInicialFactura(
   if (!esFinanciada) return null;
 
   final marcados = pagos.where((p) => p.esInicial).toList();
-  final pagosInicial = marcados.isNotEmpty ? marcados : List.of(pagos);
+  // El vuelto resta de lo que el cliente pagó (ya viene en negativo).
+  final pagosInicial = marcados.isNotEmpty
+      ? [...marcados, ...pagos.where((p) => p.restaComoVuelto && !p.esInicial)]
+      : List.of(pagos);
 
   double inicialUsd = 0;
   double inicialBs = 0;
@@ -10705,6 +10427,12 @@ _ResumenInicialFactura? _resumenInicialFactura(
   for (final p in [if (conCuotas != null) conCuotas, ...pagos]) {
     final f = (p.financiadora ?? '').trim();
     if (f.isNotEmpty) { financiadora = f; break; }
+  }
+
+  // La factura nueva guarda la inicial que cuadró (facturas.inicial): es
+  // la exacta, sin el contado de los accesorios de la misma factura.
+  if (factura.inicial != null && factura.inicial! >= 0) {
+    inicialUsd = factura.inicial!;
   }
 
   return _ResumenInicialFactura(
@@ -14442,7 +14170,8 @@ Add-Type -TypeDefinition $source -Language CSharp
 Future<File?> generarFacturaPDF(FacturaModel factura) async {
   if (kIsWeb) return null; // File no disponible en web
   final pdf = pw.Document();
-  final tasa = ConfigSistema.tasaCambio;
+  // La tasa con la que se cobró, no la del día (ver tasaDeFactura).
+  final tasa = tasaDeFactura(factura);
   // Total en Bs: los pagos en bolívares ya vienen en Bs (NO se
   // multiplican por la tasa); solo los pagos en divisas se convierten.
   // Antes se hacía `factura.total * tasa`, que multiplicaba también
@@ -14491,6 +14220,10 @@ Future<File?> generarFacturaPDF(FacturaModel factura) async {
                   ? pw.Text("Vendedor: ${_resolverNombreVendedor(factura.vendedor)}", style: const pw.TextStyle(fontSize: 11))
                   : pw.SizedBox()),
             ]),
+            if (factura.direccion.isNotEmpty) ...[
+              pw.SizedBox(height: 3),
+              pw.Text("Dirección: ${factura.direccion}", style: const pw.TextStyle(fontSize: 11)),
+            ],
           ]),
         ),
         pw.SizedBox(height: 14),
@@ -14580,10 +14313,12 @@ Future<File?> generarFacturaPDF(FacturaModel factura) async {
                 children: [
                   pw.Row(mainAxisAlignment: pw.MainAxisAlignment.spaceBetween, children: [
                     pw.Text(
-                      (resumenIni?.esPagoInicial(p) ?? false)
-                          ? "• Inicial · ${p.metodo}" : "• ${p.metodo}",
+                      p.restaComoVuelto
+                          ? "• Vuelto · ${p.metodo}"
+                          : (resumenIni?.esPagoInicial(p) ?? false)
+                              ? "• Inicial · ${p.metodo}" : "• ${p.metodo}",
                       style: const pw.TextStyle(fontSize: 11)),
-                    pw.Text(_fmtMontoFactura(p.monto, p.metodo),
+                    pw.Text(montoPagoFacturaTexto(p),
                       style: pw.TextStyle(fontSize: 11, fontWeight: pw.FontWeight.bold)),
                   ]),
                   // Las cuotas ya NO se repiten bajo cada pago: con dos
@@ -14834,6 +14569,15 @@ FacturaModel construirFacturaModelDesdeJson(Map<String, dynamic> j) {
       telefonoPagador: _strONull(map['telefono_pagador']),
       telefonoDestino: _strONull(map['telefono_destino']),
       fechaPago      : _strONull(map['fecha_pago']),
+      // ── Moneda y vuelto (facturación oct-2026) ──
+      // Sin esto, al EDITAR la factura el vuelto volvía como pago normal.
+      moneda         : _strONull(map['moneda'])?.toUpperCase(),
+      esVuelto       : map['es_vuelto'] == true || map['es_vuelto'] == 1
+          || map['es_vuelto']?.toString() == '1'
+          || (double.tryParse(map['monto'].toString()) ?? 0) < 0,
+      montoUsd       : map['monto_usd'] == null
+          ? null
+          : double.tryParse(map['monto_usd'].toString()),
     );
   }).toList();
 
@@ -14852,6 +14596,10 @@ FacturaModel construirFacturaModelDesdeJson(Map<String, dynamic> j) {
     vendedorPorImei  : vendedorPorImei,
     vendedorPorCodigo: vendedorPorCodigo,
     creadorRol       : (j['creador_rol'] ?? '').toString(),
+    inicial          : double.tryParse(j['inicial']?.toString() ?? ''),
+    montoFinanciado  : double.tryParse(j['monto_financiado']?.toString() ?? ''),
+    tasaBcv          : double.tryParse(j['tasa_bcv']?.toString() ?? ''),
+    direccion        : (j['direccion'] ?? '').toString(),
   );
 }
 
@@ -14864,7 +14612,8 @@ Future<void> imprimirFactura(FacturaModel factura, [BuildContext? context]) asyn
     formato = elegido;
   }
 
-  final tasa = ConfigSistema.tasaCambio;
+  // La tasa con la que se cobró, no la del día (ver tasaDeFactura).
+  final tasa = tasaDeFactura(factura);
   final totalBs = factura.total * tasa;
   final pdf = pw.Document();
 
@@ -15030,6 +14779,8 @@ Future<void> imprimirFactura(FacturaModel factura, [BuildContext? context]) asyn
           _lineaDato("C.I.", factura.cedula, fs),
         if (factura.telefono.isNotEmpty)
           _lineaDato("Tel.", factura.telefono, fs),
+        if (factura.direccion.isNotEmpty)
+          _lineaDato("Dir.", factura.direccion, fs),
 
         pw.SizedBox(height: 4),
 
@@ -15188,11 +14939,13 @@ Future<void> imprimirFactura(FacturaModel factura, [BuildContext? context]) asyn
                       pw.Expanded(child: pw.Text(
                         // Si el pago forma parte de la inicial (venta
                         // financiada), se anexa "(Inicial)" al método.
-                        esIni ? "${p.metodo} (Inicial)" : p.metodo,
+                        p.restaComoVuelto
+                            ? "Vuelto · ${p.metodo}"
+                            : esIni ? "${p.metodo} (Inicial)" : p.metodo,
                         style: pw.TextStyle(fontSize: fs(8.5)),
                         maxLines: 1, overflow: pw.TextOverflow.clip)),
                       pw.SizedBox(width: 4),
-                      pw.Text(_fmtMontoFactura(p.monto, p.metodo),
+                      pw.Text(montoPagoFacturaTexto(p),
                         style: pw.TextStyle(
                           fontSize: fs(9),
                           fontWeight: pw.FontWeight.bold)),
@@ -15214,6 +14967,12 @@ Future<void> imprimirFactura(FacturaModel factura, [BuildContext? context]) asyn
                 ]),
             );
           }),
+          // Tasa con la que se cobró (si hubo pagos en Bs).
+          if (tasa > 0 && factura.pagos.any((p) => _esMetodoBsFactura(p.metodo)))
+            pw.Align(
+              alignment: pw.Alignment.centerRight,
+              child: pw.Text("Tasa BCV: ${tasa.toStringAsFixed(2)} Bs/USD",
+                style: pw.TextStyle(fontSize: fs(8)))),
           pw.SizedBox(height: 3),
         ],
 
@@ -15337,6 +15096,10 @@ Future<void> imprimirFactura(FacturaModel factura, [BuildContext? context]) asyn
                       ? _pdfDato("Vendedor", _resolverNombreVendedor(factura.vendedor))
                       : pw.SizedBox()),
                 ]),
+                if (factura.direccion.isNotEmpty) ...[
+                  pw.SizedBox(height: 5),
+                  _pdfDato("Dirección", factura.direccion),
+                ],
               ]),
           ),
           pw.SizedBox(height: 16),
@@ -15479,10 +15242,12 @@ Future<void> imprimirFactura(FacturaModel factura, [BuildContext? context]) asyn
                                 pw.Text(
                                   // Anexar "(Inicial)" si el pago forma parte
                                   // de la inicial de una venta financiada.
-                                  esIni ? "${p.metodo} (Inicial)" : p.metodo,
+                                  p.restaComoVuelto
+                                      ? "Vuelto · ${p.metodo}"
+                                      : esIni ? "${p.metodo} (Inicial)" : p.metodo,
                                   style: const pw.TextStyle(fontSize: 10)),
                               ]),
-                              pw.Text(_fmtMontoFactura(p.monto, p.metodo),
+                              pw.Text(montoPagoFacturaTexto(p),
                                 style: pw.TextStyle(
                                   fontSize: 10,
                                   fontWeight: pw.FontWeight.bold)),
@@ -15504,6 +15269,12 @@ Future<void> imprimirFactura(FacturaModel factura, [BuildContext? context]) asyn
                         ]),
                     );
                   }),
+                  // Tasa con la que se cobró (si hubo pagos en Bs).
+                  if (tasa > 0 && factura.pagos.any((p) => _esMetodoBsFactura(p.metodo)))
+                    pw.Padding(
+                      padding: const pw.EdgeInsets.only(top: 4),
+                      child: pw.Text("Tasa BCV: ${tasa.toStringAsFixed(2)} Bs/USD",
+                        style: const pw.TextStyle(fontSize: 9))),
                 ]),
             ),
           ],
@@ -15610,7 +15381,11 @@ Future<void> imprimirFactura(FacturaModel factura, [BuildContext? context]) asyn
 // ============================================================
 class VentasPrincipal extends StatefulWidget {
   final String tienda;
-  const VentasPrincipal({super.key, required this.tienda});
+  // Si true, esta pantalla se abrió desde el Panel Corporativo. En ese
+  // caso el botón de la barra regresa al panel (no abre uno nuevo) y no se
+  // muestra otra vez el acceso "Panel Corporativo" en el menú.
+  final bool desdePanel;
+  const VentasPrincipal({super.key, required this.tienda, this.desdePanel = false});
   @override State<VentasPrincipal> createState() => _VentasPrincipalState();
 }
 
@@ -15621,6 +15396,19 @@ class _VentasPrincipalState extends State<VentasPrincipal> {
   /// Filtro de tienda visible sólo para roles altos.
   /// 'Todas' = ver todas; '' inicial se normaliza.
   String _tiendaFiltro = 'Todas';
+
+  // ── BÚSQUEDA EN TODO EL HISTORIAL (facturación oct-2026) ──
+  // `_facturasRaw` son solo las 1000 más recientes (el servidor no manda
+  // más). Antes el buscador miraba SOLO esas, y una factura vieja «no
+  // existía». Ahora, con 2+ letras, se le pregunta al servidor
+  // (GET facturas?q=), que busca en la tabla completa; mientras responde
+  // se muestran las coincidencias locales.
+  final TextEditingController _buscarCtrl = TextEditingController();
+  List<Map<String,dynamic>> _resultadosBusqueda = [];
+  String _queryDeResultados = '';
+  bool _buscandoServidor = false;
+  String _errorBusqueda = '';
+  Timer? _debounceBusqueda;
 
   /// Devuelve true si el usuario actual tiene uno de los roles indicados.
   /// El UsuarioMaestro (rol 'Maestro') SIEMPRE tiene acceso — no importa
@@ -15701,16 +15489,79 @@ class _VentasPrincipalState extends State<VentasPrincipal> {
   }
 
   @override
+  void dispose() {
+    _debounceBusqueda?.cancel();
+    _buscarCtrl.dispose();
+    super.dispose();
+  }
+
+  /// Cada tecla del buscador: se espera a que deje de escribir (350 ms) y
+  /// con menos de 2 caracteres no se consulta al servidor.
+  void _onBuscar(String v) {
+    final q = v.trim();
+    _debounceBusqueda?.cancel();
+    setState(() {
+      _searchQuery = v;
+      _errorBusqueda = '';
+      _buscandoServidor = q.length >= 2;
+      if (q.length < 2) {
+        _resultadosBusqueda = [];
+        _queryDeResultados = '';
+      }
+    });
+    if (q.length < 2) return;
+    _debounceBusqueda = Timer(const Duration(milliseconds: 350),
+        () => _buscarEnServidor(q));
+  }
+
+  /// Busca en TODAS las facturas (sin límite de fecha). El filtro de
+  /// tienda se sigue aplicando al mostrar.
+  Future<void> _buscarEnServidor(String q) async {
+    try {
+      // Quien solo ve su tienda busca solo en ella (es un límite de
+      // permisos, no de fecha).
+      final miTienda = tiendaUsuarioActual();
+      final raw = await _Api.get('facturas', {
+        'q': q,
+        if (!puedeVerTodasLasTiendas() && miTienda.isNotEmpty) 'tienda': miTienda,
+      });
+      final lista = List<Map<String, dynamic>>.from(
+          (raw as List? ?? []).map((e) => e as Map<String, dynamic>));
+      // Si el usuario siguió escribiendo, esta respuesta ya no vale.
+      if (!mounted || q != _searchQuery.trim()) return;
+      setState(() {
+        _resultadosBusqueda = lista;
+        _queryDeResultados = q;
+        _buscandoServidor = false;
+      });
+    } catch (e) {
+      debugPrint('[_buscarEnServidor] $e');
+      if (!mounted || q != _searchQuery.trim()) return;
+      // Un fallo de red no es «no existe»: se dice.
+      setState(() {
+        _buscandoServidor = false;
+        _errorBusqueda = 'No se pudo buscar en el historial completo; '
+            'se muestran solo las facturas recientes.';
+      });
+    }
+  }
+
+  @override
   Widget build(BuildContext context) {
+    // Con texto, la fuente es el servidor (todo el historial); mientras
+    // responde, o si falla, lo que ya está en memoria.
+    final q = _searchQuery.trim();
+    final hayServidor = q.length >= 2 && _queryDeResultados == q;
+    final base = hayServidor ? _resultadosBusqueda : _facturasRaw;
     // Aplica el filtro de tienda antes del de búsqueda.
     // Vendedor/Activador/Encargado ven sólo su tienda.
     // Administrador/Dueño/Gerente pueden elegir (por defecto 'Todas').
     final facturasPorTienda = filtrarPorTienda(
-      _facturasRaw,
+      base,
       tiendaFiltro: _tiendaFiltro,
     );
 
-    final filtradas = facturasPorTienda.where((v) =>
+    final filtradas = hayServidor ? facturasPorTienda : facturasPorTienda.where((v) =>
       (v['cliente']??'').toLowerCase().contains(_searchQuery.toLowerCase()) ||
       (v['cedula']??'').toLowerCase().contains(_searchQuery.toLowerCase()) ||
       (v['nro_factura']??'').toLowerCase().contains(_searchQuery.toLowerCase()) ||
@@ -15718,17 +15569,29 @@ class _VentasPrincipalState extends State<VentasPrincipal> {
 
     return Scaffold(
       appBar: AppBar(
-        backgroundColor: AppColors.royalBlue,
+        // Barra blanca del tema (estilo Brizuela) con la línea amarilla
+        // de la marca debajo: es la pantalla de inicio de Tecno Líder.
         title: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
           Text(widget.tienda, style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
-          Text(usuarioSesion?.nombre ?? '', style: const TextStyle(fontSize: 11, color: Colors.white70)),
+          Text(usuarioSesion?.nombre ?? '', style: const TextStyle(fontSize: 11, color: AppColors.textSecondary)),
         ]),
+        bottom: const PreferredSize(
+          preferredSize: Size.fromHeight(3),
+          child: SizedBox(height: 3, width: double.infinity,
+            child: ColoredBox(color: AppColors.brandYellow)),
+        ),
         actions: [
           // Calculadora rápida ($ ↔ Bs): para no salir de la app.
           const BotonCalculadora(),
           const TasaBCVBadge(),
           const SizedBox(width: 4),
           IconButton(icon: const Icon(Icons.refresh), tooltip: "Actualizar", onPressed: _cargarFacturas),
+          // Botón de volver al panel corporativo (solo si se entró desde él).
+          if (widget.desdePanel)
+            IconButton(
+              icon: const Icon(Icons.grid_view_rounded),
+              tooltip: 'Volver al panel corporativo',
+              onPressed: () => Navigator.pop(context)),
         ],
       ),
       drawer: _buildDrawer(),
@@ -15738,20 +15601,27 @@ class _VentasPrincipalState extends State<VentasPrincipal> {
           color: Colors.white,
           padding: const EdgeInsets.fromLTRB(12, 8, 12, 12),
           child: TextField(
+            controller: _buscarCtrl,
             style: const TextStyle(color: AppColors.textPrimary),
             decoration: InputDecoration(
               hintText: "Buscar por cliente, cédula, factura o vendedor...",
+              helperText: _errorBusqueda.isNotEmpty
+                  ? _errorBusqueda
+                  : (_buscandoServidor ? 'Buscando en todo el historial…' : null),
               hintStyle: const TextStyle(color: AppColors.textSecondary, fontSize: 13),
               prefixIcon: const Icon(Icons.search, color: AppColors.primaryBlue),
               suffixIcon: _searchQuery.isNotEmpty
-                ? IconButton(icon: const Icon(Icons.clear, size: 18), onPressed: () => setState(() => _searchQuery = ''))
+                ? IconButton(icon: const Icon(Icons.clear, size: 18), onPressed: () {
+                    _buscarCtrl.clear();
+                    _onBuscar('');
+                  })
                 : null,
               filled: true,
               fillColor: AppColors.surfaceGrey,
               contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 0),
               border: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: BorderSide.none),
             ),
-            onChanged: (v) => setState(() => _searchQuery = v),
+            onChanged: _onBuscar,
           ),
         ),
         // ── Selector de tienda (sólo roles altos) ──────────────
@@ -15894,15 +15764,15 @@ class _VentasPrincipalState extends State<VentasPrincipal> {
             ),
           )),
       ]),
+      // FAB amarillo de la marca (tema): texto azul oscuro.
       floatingActionButton: FloatingActionButton.extended(
-        backgroundColor: AppColors.primaryBlue,
         onPressed: () async {
           final res = await Navigator.push(context,
             MaterialPageRoute(builder: (c) => FormularioFactura(tienda: widget.tienda)));
           if (res != null) _cargarFacturas();
         },
-        icon: const Icon(Icons.add, color: Colors.white),
-        label: const Text("Nueva Factura", style: TextStyle(color: Colors.white, fontWeight: FontWeight.w600)),
+        icon: const Icon(Icons.add),
+        label: const Text("Nueva Factura", style: TextStyle(fontWeight: FontWeight.w700)),
       ),
     );
   }
@@ -16452,8 +16322,11 @@ class _VentasPrincipalState extends State<VentasPrincipal> {
     return AppColors.primaryBlue;
   }
 
+  // Estilo de Brizuela (Panel): fondo lavanda, cabecera en tarjeta
+  // blanca que flota e iconos en cuadrito azul. Se conservan el logo a
+  // color y el avatar amarillo de Tecno Líder.
   Widget _buildDrawer() => Drawer(
-    backgroundColor: AppColors.brandBlueDark,
+    backgroundColor: AppNeu.base,
     width: 290,
     elevation: 0,
     shape: const RoundedRectangleBorder(
@@ -16463,19 +16336,8 @@ class _VentasPrincipalState extends State<VentasPrincipal> {
       ),
     ),
     child: Container(
-      // Gradiente "marca": azul medio → azul oscuro → casi negro
-      // Refleja la identidad visual del logo Tecno Líder.
       decoration: const BoxDecoration(
-        gradient: LinearGradient(
-          begin: Alignment.topCenter,
-          end: Alignment.bottomCenter,
-          colors: [
-            AppColors.brandBlue,
-            AppColors.brandBlueDark,
-            AppColors.brandBlueDeeper,
-          ],
-          stops: [0.0, 0.55, 1.0],
-        ),
+        color: AppNeu.base,
         borderRadius: BorderRadius.only(
           topRight: Radius.circular(24),
           bottomRight: Radius.circular(24),
@@ -16487,16 +16349,10 @@ class _VentasPrincipalState extends State<VentasPrincipal> {
           // ═══════════════════════════════════════════════════════
           //  HEADER — Logo vectorial + datos del usuario + ranking
           // ═══════════════════════════════════════════════════════
-          Container(
-            padding: const EdgeInsets.fromLTRB(20, 50, 20, 20),
-            decoration: BoxDecoration(
-              border: Border(
-                bottom: BorderSide(
-                  color: AppColors.brandYellow.withValues(alpha: 0.3),
-                  width: 1.5,
-                ),
-              ),
-            ),
+          SafeArea(bottom: false, child: Container(
+            margin: const EdgeInsets.fromLTRB(12, 12, 12, 0),
+            padding: const EdgeInsets.all(16),
+            decoration: AppNeu.relieve(borde: BorderRadius.circular(20)),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
@@ -16511,7 +16367,7 @@ class _VentasPrincipalState extends State<VentasPrincipal> {
                       children: const [
                         Text('TECNO LÍDER',
                           style: TextStyle(
-                            color: Colors.white,
+                            color: AppColors.royalBlue,
                             fontSize: 16,
                             fontWeight: FontWeight.w900,
                             letterSpacing: 2,
@@ -16519,7 +16375,7 @@ class _VentasPrincipalState extends State<VentasPrincipal> {
                         SizedBox(height: 2),
                         Text('Sistema de Gestión',
                           style: TextStyle(
-                            color: Colors.white70,
+                            color: AppColors.textSecondary,
                             fontSize: 10,
                             letterSpacing: 1,
                             fontWeight: FontWeight.w500,
@@ -16536,18 +16392,12 @@ class _VentasPrincipalState extends State<VentasPrincipal> {
                     width: 56, height: 56,
                     decoration: BoxDecoration(
                       shape: BoxShape.circle,
-                      gradient: const LinearGradient(
-                        colors: [AppColors.brandYellow, AppColors.brandYellowDark],
-                      ),
-                      border: Border.all(
-                        color: Colors.white.withValues(alpha: 0.3),
-                        width: 2,
-                      ),
+                      color: AppColors.brandYellow,
                       boxShadow: [
                         BoxShadow(
-                          color: AppColors.brandYellow.withValues(alpha: 0.4),
-                          blurRadius: 14,
-                          spreadRadius: 1,
+                          color: AppColors.brandYellow.withValues(alpha: 0.35),
+                          blurRadius: 10,
+                          offset: const Offset(0, 4),
                         ),
                       ],
                     ),
@@ -16572,9 +16422,9 @@ class _VentasPrincipalState extends State<VentasPrincipal> {
                         Text(
                           usuarioSesion?.nombre ?? "Usuario",
                           style: const TextStyle(
-                            color: Colors.white,
+                            color: AppColors.textPrimary,
                             fontSize: 15,
-                            fontWeight: FontWeight.w700,
+                            fontWeight: FontWeight.w800,
                           ),
                           overflow: TextOverflow.ellipsis,
                         ),
@@ -16583,17 +16433,13 @@ class _VentasPrincipalState extends State<VentasPrincipal> {
                           padding: const EdgeInsets.symmetric(
                             horizontal: 10, vertical: 3),
                           decoration: BoxDecoration(
-                            color: AppColors.brandYellow.withValues(alpha: 0.15),
-                            borderRadius: BorderRadius.circular(8),
-                            border: Border.all(
-                              color: AppColors.brandYellow.withValues(alpha: 0.5),
-                              width: 1,
-                            ),
+                            color: AppColors.lilaTenue,
+                            borderRadius: BorderRadius.circular(20),
                           ),
                           child: Text(
                             usuarioSesion?.rol ?? '',
                             style: const TextStyle(
-                              color: AppColors.brandYellow,
+                              color: AppColors.azulVivo,
                               fontSize: 10,
                               fontWeight: FontWeight.w800,
                               letterSpacing: 0.5,
@@ -16629,10 +16475,10 @@ class _VentasPrincipalState extends State<VentasPrincipal> {
                       const SizedBox(width: 6),
                       Text(
                         'Posición #$pos en rendimiento',
-                        style: TextStyle(
-                          color: Colors.white.withValues(alpha: 0.75),
-                          fontSize: 10,
-                          fontWeight: FontWeight.w500,
+                        style: const TextStyle(
+                          color: AppColors.textSecondary,
+                          fontSize: 11,
+                          fontWeight: FontWeight.w600,
                         ),
                       ),
                     ]),
@@ -16640,9 +16486,45 @@ class _VentasPrincipalState extends State<VentasPrincipal> {
                 }),
               ],
             ),
-          ),
+          )),
 
           const SizedBox(height: 8),
+
+          // ── Panel Corporativo ──
+          // Solo para roles que ven todas las tiendas Y que no entraron ya
+          // desde el panel (para no apilar pantallas).
+          if (puedeVerTodasLasTiendas() && !widget.desdePanel)
+            Container(
+              margin: const EdgeInsets.fromLTRB(12, 4, 12, 8),
+              decoration: AppNeu.relieve(borde: BorderRadius.circular(16), intensidad: 0.7),
+              // Material propio: si no, la caja blanca tapa el efecto al tocar.
+              child: Material(
+                type: MaterialType.transparency,
+                child: ListTile(
+                leading: Container(
+                  width: 36, height: 36,
+                  decoration: BoxDecoration(
+                    gradient: const LinearGradient(
+                      colors: [AppColors.lila, AppColors.azulVivo],
+                      begin: Alignment.topLeft, end: Alignment.bottomRight),
+                    borderRadius: BorderRadius.circular(10),
+                  ),
+                  child: const Icon(Icons.business_center, color: Colors.white, size: 20),
+                ),
+                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+                title: const Text('Panel Corporativo',
+                  style: TextStyle(color: AppColors.textPrimary, fontWeight: FontWeight.w800)),
+                subtitle: const Text('Todas las tiendas',
+                  style: TextStyle(color: AppColors.textSecondary, fontSize: 11.5)),
+                onTap: () {
+                  Navigator.pop(context); // cierra el menú
+                  Navigator.push(context,
+                    MaterialPageRoute(builder: (c) => const PanelCorporativo()))
+                    .then((_) { if (mounted) setState((){}); });
+                },
+              ),
+              ),
+            ),
 
           // ═══════════════════════════════════════════════════════
           //  ITEMS DE NAVEGACIÓN
@@ -16760,13 +16642,20 @@ class _VentasPrincipalState extends State<VentasPrincipal> {
       if (checkAccess(['Administrador','Dueño','Gerente']))
         _itemDrawer(Icons.request_quote_outlined, "Cotizaciones", () =>
           Navigator.push(context, MaterialPageRoute(builder: (c) => const VentanaCotizacion()))),
+      // ── Buscar actualización (manual) ────────────────────────
+      // La revisión automática corre cada 30 minutos; este botón consulta
+      // ya y avisa también cuando se está al día. (_itemDrawer ya cierra
+      // el menú.)
+      _itemDrawer(Icons.system_update_outlined, "Buscar actualización", () {
+        verificarActualizacionApp(context, silencioso: false);
+      }),
       // ── Conectar Impresora: accesible para TODOS los roles,
       //    sin exponer el resto de la configuración del sistema ──
       _itemDrawer(Icons.print_outlined, "Conectar Impresora", () =>
         Navigator.push(context, MaterialPageRoute(builder: (c) => const VentanaConectarImpresora()))
         .then((_) => setState((){}))),
       if (checkAccess(['Administrador','Dueño'])) ...[
-        const Divider(color: Colors.white24, thickness: 0.5, indent: 16, endIndent: 16),
+        const Divider(color: AppColors.bordeSuave, thickness: 1, indent: 16, endIndent: 16),
         _itemDrawer(Icons.admin_panel_settings_outlined, "Panel Administrativo", () =>
           Navigator.push(context, MaterialPageRoute(builder: (c) => const VentanaPanelAdmin()))
           .then((_) => setState((){}))),
@@ -16789,7 +16678,7 @@ class _VentasPrincipalState extends State<VentasPrincipal> {
           Navigator.push(context, MaterialPageRoute(builder: (c) => const VentanaPanelMaestro()))
           .then((_) => setState((){}))),
       ],
-      const Divider(color: Colors.white24, thickness: 0.5, indent: 16, endIndent: 16),
+      const Divider(color: AppColors.bordeSuave, thickness: 1, indent: 16, endIndent: 16),
       _itemDrawer(Icons.logout, "Cerrar Sesión", () async {
         final confirmar = await showDialog<bool>(
           context: context,
@@ -16821,15 +16710,18 @@ class _VentasPrincipalState extends State<VentasPrincipal> {
         Navigator.pushAndRemoveUntil(context,
           MaterialPageRoute(builder: (context) => const LoginPage()),
           (route) => false);
-      }, color: Colors.red[300]!),
+      }, color: AppColors.statusRed),
       const SizedBox(height: 16),
         ], // children del ListView
       ), // ListView
-    ), // Container con gradiente
+    ), // Container
   ); // Drawer
 
-  Widget _itemDrawer(IconData icon, String title, VoidCallback onTap, {Color color = Colors.white}) {
-    final esRojo = color != Colors.white;
+  /// Una opción del cajón con el icono en su cuadrito de color, como los
+  /// indicadores del panel. `color` solo se pasa para lo que avisa (cerrar
+  /// sesión en rojo); lo demás va en el azul de acción.
+  Widget _itemDrawer(IconData icon, String title, VoidCallback onTap, {Color? color}) {
+    final acento = color ?? AppColors.azulVivo;
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 1),
       child: Material(
@@ -16837,32 +16729,23 @@ class _VentasPrincipalState extends State<VentasPrincipal> {
         child: InkWell(
           onTap: () { Navigator.pop(context); onTap(); },
           borderRadius: BorderRadius.circular(12),
-          // Hover/splash con tinte amarillo (acento de marca)
-          hoverColor: AppColors.brandYellow.withValues(alpha: 0.1),
-          splashColor: AppColors.brandYellow.withValues(alpha: 0.2),
-          highlightColor: AppColors.brandYellow.withValues(alpha: 0.08),
+          hoverColor: AppColors.lilaTenue,
+          splashColor: acento.withValues(alpha: 0.12),
+          highlightColor: acento.withValues(alpha: 0.06),
           child: Container(
-            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 10),
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
             child: Row(
               children: [
                 // Icono dentro de un cuadradito redondeado con tinte
                 Container(
-                  width: 38, height: 38,
+                  width: 36, height: 36,
                   decoration: BoxDecoration(
-                    color: esRojo
-                        ? color.withValues(alpha: 0.18)
-                        : AppColors.brandYellow.withValues(alpha: 0.12),
+                    color: acento.withValues(alpha: 0.12),
                     borderRadius: BorderRadius.circular(10),
-                    border: Border.all(
-                      color: esRojo
-                          ? color.withValues(alpha: 0.3)
-                          : AppColors.brandYellow.withValues(alpha: 0.25),
-                      width: 1,
-                    ),
                   ),
                   child: Icon(
                     icon,
-                    color: esRojo ? color : AppColors.brandYellow,
+                    color: acento,
                     size: 20,
                   ),
                 ),
@@ -16872,17 +16755,16 @@ class _VentasPrincipalState extends State<VentasPrincipal> {
                   child: Text(
                     title,
                     style: TextStyle(
-                      color: esRojo ? color : Colors.white,
+                      color: color ?? AppColors.textPrimary,
                       fontWeight: FontWeight.w600,
                       fontSize: 14,
-                      letterSpacing: 0.2,
                     ),
                   ),
                 ),
                 // Flecha sutil a la derecha
                 Icon(
                   Icons.chevron_right_rounded,
-                  color: Colors.white.withValues(alpha: 0.3),
+                  color: AppColors.textSecondary.withValues(alpha: 0.5),
                   size: 18,
                 ),
               ],
@@ -17554,46 +17436,33 @@ class _VentanaServicioTecnicoState extends State<VentanaServicioTecnico> {
         ],
       ),
       body: Column(children: [
-        // ── Banner resumen con KPIs (cobrado / costos / ganancia) ──
-        Container(
-          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 14),
-          decoration: const BoxDecoration(
-            gradient: LinearGradient(
-              colors: [AppColors.brandBlue, AppColors.brandBlueDark],
-              begin: Alignment.topLeft, end: Alignment.bottomRight,
-            ),
-          ),
-          width: double.infinity,
-          child: Column(
-            children: [
-              // Fila 1: Cobrado / Abonado / Pendiente
-              Row(mainAxisAlignment: MainAxisAlignment.spaceAround, children: [
-                _kpi("Cobrado", formatCurrency(total), Colors.white),
-                Container(width: 1, height: 34, color: Colors.white24),
-                _kpi("Abonado", formatCurrency(totalAbonos), AppColors.brandYellow),
-                Container(width: 1, height: 34, color: Colors.white24),
-                _kpi("Pendiente", formatCurrency(totalPendiente), Colors.white70),
-                Container(width: 1, height: 34, color: Colors.white24),
-                _kpi("Servicios", "${servicios.length}", Colors.white),
-              ]),
-              const SizedBox(height: 10),
-              const Divider(color: Colors.white12, height: 1),
-              const SizedBox(height: 10),
-              // Fila 2: Cobrado / Costos / Ganancia
-              Row(mainAxisAlignment: MainAxisAlignment.spaceAround, children: [
-                _kpi("Costo Repuestos", formatCurrency(totalCostos), Colors.orangeAccent),
-                Container(width: 1, height: 34, color: Colors.white24),
-                _kpi("Ganancia",
-                    formatCurrency(totalGanancia),
-                    totalGanancia >= 0 ? AppColors.brandYellow : Colors.redAccent),
-                Container(width: 1, height: 34, color: Colors.white24),
-                _kpi("Margen",
-                    total > 0 ? "${(totalGanancia / total * 100).toStringAsFixed(1)}%" : "0%",
-                    totalGanancia >= 0 ? Colors.greenAccent : Colors.redAccent),
-              ]),
-            ],
-          ),
-        ),
+        // ── Indicadores (estilo Brizuela / Panel Corporativo) ──
+        // Antes: un bloque azul con cifras blancas. El color de cada
+        // tarjeta sigue diciendo el estado.
+        // Fila 1: Cobrado / Abonado / Pendiente / Servicios
+        FilaIndicadores([
+          Indicador("Cobrado", formatCurrency(total),
+              icono: Icons.payments_rounded),
+          Indicador("Abonado", formatCurrency(totalAbonos),
+              icono: Icons.savings_rounded, color: AppColors.statusGreen),
+          Indicador("Pendiente", formatCurrency(totalPendiente),
+              icono: Icons.hourglass_bottom_rounded,
+              color: totalPendiente > 0 ? AppColors.statusOrange : AppColors.azulVivo),
+          Indicador("Servicios", "${servicios.length}",
+              icono: Icons.build_rounded, color: AppColors.lila),
+        ]),
+        // Fila 2: Costos / Ganancia / Margen
+        FilaIndicadores(padding: const EdgeInsets.fromLTRB(12, 0, 12, 6), [
+          Indicador("Costo Repuestos", formatCurrency(totalCostos),
+              icono: Icons.settings_suggest_rounded, color: AppColors.statusOrange),
+          Indicador("Ganancia", formatCurrency(totalGanancia),
+              icono: Icons.trending_up_rounded,
+              color: totalGanancia >= 0 ? AppColors.statusGreen : AppColors.statusRed),
+          Indicador("Margen",
+              total > 0 ? "${(totalGanancia / total * 100).toStringAsFixed(1)}%" : "0%",
+              icono: Icons.percent_rounded,
+              color: totalGanancia >= 0 ? AppColors.statusGreen : AppColors.statusRed),
+        ]),
 
         // ── Buscador ──
         Container(
@@ -17639,16 +17508,11 @@ class _VentanaServicioTecnicoState extends State<VentanaServicioTecnico> {
       ]),
       floatingActionButton: FloatingActionButton.extended(
         onPressed: _mostrarFormularioNuevo,
-        icon: const Icon(Icons.add, color: Colors.white),
-        label: const Text("Nuevo", style: TextStyle(color: Colors.white)),
+        icon: const Icon(Icons.add),
+        label: const Text("Nuevo"),
       ),
     );
   }
-
-  Widget _kpi(String label, String value, Color color) => Column(children: [
-    Text(label, style: const TextStyle(color: Colors.white70, fontSize: 10)),
-    Text(value, style: TextStyle(color: color, fontSize: 15, fontWeight: FontWeight.bold)),
-  ]);
 
   Widget _buildCardServicio(ServicioTecnico s) {
     final estadoColor = {
@@ -18844,60 +18708,60 @@ class _DetalleServicioTecnicoState extends State<_DetalleServicioTecnico> {
       body: ListView(
         padding: const EdgeInsets.all(16),
         children: [
-          // ── Banner superior con montos ──
-          Container(
-            padding: const EdgeInsets.all(16),
-            decoration: BoxDecoration(
-              gradient: const LinearGradient(
-                colors: [AppColors.royalBlue, AppColors.primaryBlue]),
-              borderRadius: BorderRadius.circular(14),
-            ),
-            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-              Row(children: [
-                const Icon(Icons.build_circle, color: Colors.white, size: 28),
-                const SizedBox(width: 10),
+          // ── Encabezado con montos (estilo Brizuela / Panel) ──
+          Card(
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(16, 14, 16, 14),
+              child: Row(children: [
+                Container(
+                  padding: const EdgeInsets.all(8),
+                  decoration: BoxDecoration(
+                    gradient: const LinearGradient(
+                      colors: [AppColors.lila, AppColors.azulVivo]),
+                    borderRadius: BorderRadius.circular(12)),
+                  child: const Icon(Icons.build_circle, color: Colors.white, size: 24)),
+                const SizedBox(width: 12),
                 Expanded(child: Text(
                   s.nombreCliente.isNotEmpty ? s.nombreCliente : '(sin nombre)',
-                  style: const TextStyle(color: Colors.white,
-                    fontSize: 18, fontWeight: FontWeight.bold))),
+                  style: const TextStyle(color: AppColors.textPrimary,
+                    fontSize: 18, fontWeight: FontWeight.w800))),
                 Container(
                   padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
                   decoration: BoxDecoration(
-                    color: Colors.white.withValues(alpha: 0.25),
+                    color: estadoColor.withValues(alpha: 0.12),
                     borderRadius: BorderRadius.circular(10)),
                   child: Text(s.estado,
                     style: TextStyle(color: estadoColor, fontSize: 11,
                       fontWeight: FontWeight.bold)),
                 ),
               ]),
-              const SizedBox(height: 14),
-              Row(children: [
-                _montoBox("Total", formatCurrency(s.monto), Colors.white),
-                const SizedBox(width: 8),
-                _montoBox("Abono", formatCurrency(s.abono),
-                  s.abono > 0 ? AppColors.statusYellow : Colors.white70),
-                const SizedBox(width: 8),
-                _montoBox("Resta", formatCurrency(s.resta),
-                  s.resta > 0 ? AppColors.statusRed : AppColors.statusGreen),
-              ]),
-              if (s.pagado) ...[
-                const SizedBox(height: 10),
-                Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-                  decoration: BoxDecoration(
-                    color: AppColors.statusGreen,
-                    borderRadius: BorderRadius.circular(8)),
-                  child: const Row(mainAxisSize: MainAxisSize.min, children: [
-                    Icon(Icons.verified, color: Colors.white, size: 16),
-                    SizedBox(width: 6),
-                    Text("PAGADO COMPLETAMENTE",
-                      style: TextStyle(color: Colors.white, fontSize: 11,
-                        fontWeight: FontWeight.bold)),
-                  ]),
-                ),
-              ],
-            ]),
+            ),
           ),
+          FilaIndicadores(padding: const EdgeInsets.fromLTRB(0, 8, 0, 4), [
+            Indicador("Total", formatCurrency(s.monto), icono: Icons.payments_rounded),
+            Indicador("Abono", formatCurrency(s.abono), icono: Icons.savings_rounded,
+                color: s.abono > 0 ? AppColors.statusGreen : AppColors.azulVivo),
+            Indicador("Resta", formatCurrency(s.resta), icono: Icons.hourglass_bottom_rounded,
+                color: s.resta > 0 ? AppColors.statusRed : AppColors.statusGreen),
+          ]),
+          if (s.pagado)
+            Align(
+              alignment: Alignment.centerLeft,
+              child: Container(
+                margin: const EdgeInsets.only(top: 4),
+                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                decoration: BoxDecoration(
+                  color: AppColors.verdeTenue,
+                  borderRadius: BorderRadius.circular(8)),
+                child: const Row(mainAxisSize: MainAxisSize.min, children: [
+                  Icon(Icons.verified, color: AppColors.statusGreen, size: 16),
+                  SizedBox(width: 6),
+                  Text("PAGADO COMPLETAMENTE",
+                    style: TextStyle(color: AppColors.statusGreen, fontSize: 11,
+                      fontWeight: FontWeight.bold)),
+                ]),
+              ),
+            ),
           const SizedBox(height: 12),
           // ── Cobros (método, tasa, referencia) + comprobante ──
           SeccionCobrosServicio(
@@ -19013,20 +18877,6 @@ class _DetalleServicioTecnicoState extends State<_DetalleServicioTecnico> {
     );
   }
 
-  Widget _montoBox(String label, String value, Color color) {
-    return Expanded(child: Container(
-      padding: const EdgeInsets.symmetric(vertical: 10, horizontal: 8),
-      decoration: BoxDecoration(
-        color: Colors.white.withValues(alpha: 0.15),
-        borderRadius: BorderRadius.circular(10)),
-      child: Column(children: [
-        Text(label, style: const TextStyle(color: Colors.white70, fontSize: 11)),
-        const SizedBox(height: 2),
-        Text(value, style: TextStyle(color: color, fontSize: 14,
-          fontWeight: FontWeight.bold)),
-      ]),
-    ));
-  }
 
   /// Grid de fotos de recepción. Cada foto es un thumbnail que al
   /// tocarse abre un viewer a pantalla completa con zoom y deslizar
@@ -20021,6 +19871,11 @@ class _ViewerFotosServicioState extends State<_ViewerFotosServicio> {
       appBar: AppBar(
         backgroundColor: Colors.black,
         foregroundColor: Colors.white,
+        // El tema fija iconos y título azules (barra blanca); el visor de
+        // fotos es negro y los necesita blancos.
+        iconTheme: const IconThemeData(color: Colors.white),
+        actionsIconTheme: const IconThemeData(color: Colors.white),
+        titleTextStyle: const TextStyle(color: Colors.white, fontSize: 17, fontWeight: FontWeight.w700),
         title: Text("${_indice + 1} / ${widget.fotos.length}"),
       ),
       body: PageView.builder(
@@ -20793,24 +20648,14 @@ class _VentanaCuentasPorCobrarState extends State<VentanaCuentasPorCobrar> {
         actions: [IconButton(icon: const Icon(Icons.refresh), tooltip: "Actualizar", onPressed: _cargar)],
       ),
       body: Column(children: [
-        // Banner
-        Container(
-          width: double.infinity,
-          padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 14),
-          color: AppColors.royalBlue,
-          child: Row(children: [
-            Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-              const Text("TOTAL POR COBRAR", style: TextStyle(color: Colors.white70, fontSize: 11, letterSpacing: 1)),
-              Text(formatCurrency(totalPendiente),
-                style: const TextStyle(color: Colors.white, fontSize: 28, fontWeight: FontWeight.bold)),
-            ]),
-            const Spacer(),
-            Column(crossAxisAlignment: CrossAxisAlignment.end, children: [
-              const Text("Cuentas", style: TextStyle(color: Colors.white70, fontSize: 11)),
-              Text("${_filtradas.length}", style: const TextStyle(color: Colors.white, fontSize: 22, fontWeight: FontWeight.bold)),
-            ]),
-          ]),
-        ),
+        // Indicadores (estilo Brizuela / Panel Corporativo)
+        FilaIndicadores([
+          Indicador("Total por cobrar", formatCurrency(totalPendiente),
+              icono: Icons.account_balance_wallet_rounded,
+              color: totalPendiente > 0 ? AppColors.statusRed : AppColors.statusGreen),
+          Indicador("Cuentas", "${_filtradas.length}",
+              icono: Icons.people_alt_rounded, color: AppColors.lila),
+        ]),
         // Búsqueda
         Padding(
           padding: const EdgeInsets.all(12),
@@ -22250,7 +22095,7 @@ class _DetalleCuentaCobrarState extends State<DetalleCuentaCobrar> {
                         style: TextStyle(
                             color: saldado ? AppColors.statusGreen : AppColors.statusRed,
                             fontWeight: FontWeight.w600, fontSize: 12, letterSpacing: 0.5)),
-                    Text(formatCurrency(cuenta.saldoRestante),
+                    TextoQueCuenta(formatCurrency(cuenta.saldoRestante),
                         style: TextStyle(
                             color: saldado ? AppColors.statusGreen : AppColors.statusRed,
                             fontWeight: FontWeight.bold, fontSize: 22)),
@@ -23505,7 +23350,7 @@ class _DetalleCuentaPorPagarState extends State<DetalleCuentaPorPagar> {
                     Text("SALDO RESTANTE", style: TextStyle(
                         color: saldado ? AppColors.statusGreen : AppColors.statusRed,
                         fontWeight: FontWeight.w600, fontSize: 12, letterSpacing: 0.5)),
-                    Text(formatCurrency(cuenta.saldoRestante), style: TextStyle(
+                    TextoQueCuenta(formatCurrency(cuenta.saldoRestante), style: TextStyle(
                         color: saldado ? AppColors.statusGreen : AppColors.statusRed,
                         fontWeight: FontWeight.bold, fontSize: 22)),
                   ]),
@@ -24361,7 +24206,7 @@ class _DetalleCuentaProveedorState extends State<DetalleCuentaProveedor> {
                         style: TextStyle(
                             color: saldado ? AppColors.statusGreen : AppColors.statusRed,
                             fontWeight: FontWeight.w600, fontSize: 12, letterSpacing: 0.5)),
-                    Text(formatCurrency(cuenta.saldoRestante),
+                    TextoQueCuenta(formatCurrency(cuenta.saldoRestante),
                         style: TextStyle(
                             color: saldado ? AppColors.statusGreen : AppColors.statusRed,
                             fontWeight: FontWeight.bold, fontSize: 22)),
@@ -24594,6 +24439,42 @@ class VentanaInventario extends StatefulWidget {
 
 class _VentanaInventarioState extends State<VentanaInventario> {
   List<Producto> _productos = [];
+  /// Estado de la ficha técnica por código ('manual', 'auto'). Sin entrada
+  /// = sin ficha. Si el servidor no responde, queda vacío y el botón de la
+  /// ficha se ve igual.
+  Map<String, String> _fichas = {};
+
+  bool get _puedeEditarFichas => kRolesFicha.contains(usuarioSesion?.rol ?? '');
+
+  Future<void> _cargarFichas() async {
+    try {
+      final r = await _Api.get('ficha_tecnica');
+      final lista = r is Map && r['fichas'] is List ? r['fichas'] as List : const [];
+      final m = <String, String>{
+        for (final f in lista.whereType<Map>())
+          (f['codigo'] ?? '').toString(): (f['origen'] ?? '').toString(),
+      };
+      if (mounted) setState(() => _fichas = m);
+    } catch (e) {
+      debugPrint('[VentanaInventario] fichas técnicas: $e');
+    }
+  }
+
+  Future<void> _abrirFicha(Producto p) async {
+    await Navigator.push(context, MaterialPageRoute(
+        builder: (_) => VentanaFichaTecnica(
+              codigo: p.codigo,
+              nombre: p.nombre,
+              leer: _Api.get,
+              // El servidor no tiene sesiones: comprueba el rol con el correo.
+              enviar: (r, cuerpo) => _Api.post(r, {
+                ...cuerpo,
+                'usuario_correo': usuarioSesion?.correo ?? '',
+              }),
+              puedeEditar: _puedeEditarFichas,
+            )));
+    if (mounted) _cargarFichas();
+  }
   /// IMEIs cargados (para filtros por tienda/ubicación).
   List<ImeiRegistro> _imeis = [];
   bool _cargando = true;
@@ -24761,6 +24642,7 @@ class _VentanaInventarioState extends State<VentanaInventario> {
 
   Future<void> _cargar() async {
     setState(() => _cargando = true);
+    _cargarFichas();
     try {
       // Traer productos, IMEIs y tiendas en paralelo
       final results = await Future.wait([
@@ -24929,30 +24811,30 @@ class _VentanaInventarioState extends State<VentanaInventario> {
               Container(
                 padding: const EdgeInsets.all(16),
                 decoration: const BoxDecoration(
-                  color: AppColors.royalBlue,
+                  color: AppColors.lilaTenue,
                   borderRadius: BorderRadius.vertical(
                       top: Radius.circular(16)),
                 ),
                 child: Row(children: [
                   const Icon(Icons.qr_code_scanner,
-                      color: Colors.white, size: 26),
+                      color: AppColors.azulVivo, size: 26),
                   const SizedBox(width: 10),
                   Expanded(child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: const [
                         Text('Categorías con IMEI',
                             style: TextStyle(
-                                color: Colors.white,
+                                color: AppColors.textPrimary,
                                 fontSize: 17,
                                 fontWeight: FontWeight.bold)),
                         Text(
                             'Activa el switch para que los productos '
                             'de esa categoría usen IMEI',
                             style: TextStyle(
-                                color: Colors.white70, fontSize: 11)),
+                                color: AppColors.textSecondary, fontSize: 11)),
                       ])),
                   IconButton(
-                    icon: const Icon(Icons.close, color: Colors.white),
+                    icon: const Icon(Icons.close, color: AppColors.textSecondary),
                     onPressed: () => Navigator.pop(ctx),
                   ),
                 ]),
@@ -25432,10 +25314,6 @@ class _VentanaInventarioState extends State<VentanaInventario> {
     }).toList();
   }
 
-  Widget _buildTotalInfo(String label, String value, Color valueColor) => Column(children: [
-    Text(label, style: const TextStyle(color: Colors.white70, fontSize: 10)),
-    Text(value, style: TextStyle(color: valueColor, fontSize: 18, fontWeight: FontWeight.bold)),
-  ]);
 
   @override
   Widget build(BuildContext context) {
@@ -25537,18 +25415,15 @@ class _VentanaInventarioState extends State<VentanaInventario> {
         ],
       ),
       body: Column(children: [
-        // Banner KPI
-        Container(
-          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-          color: AppColors.royalBlue,
-          child: Row(mainAxisAlignment: MainAxisAlignment.spaceAround, children: [
-            _buildTotalInfo("COSTO TOTAL", formatCurrency(totalCosto), Colors.white),
-            Container(width: 1, height: 40, color: Colors.white24),
-            _buildTotalInfo("VENTA PROYECTADA", formatCurrency(totalVenta), AppColors.statusYellow),
-            Container(width: 1, height: 40, color: Colors.white24),
-            _buildTotalInfo("PRODUCTOS", "${filtrados.length}", Colors.white70),
-          ]),
-        ),
+        // Indicadores (estilo Brizuela / Panel Corporativo)
+        FilaIndicadores([
+          Indicador("Costo total", formatCurrency(totalCosto),
+              icono: Icons.inventory_rounded),
+          Indicador("Venta proyectada", formatCurrency(totalVenta),
+              icono: Icons.trending_up_rounded, color: AppColors.statusGreen),
+          Indicador("Productos", "${filtrados.length}",
+              icono: Icons.category_rounded, color: AppColors.lila),
+        ]),
         // Búsqueda + filtros
         Container(
           color: Colors.white,
@@ -25871,6 +25746,28 @@ class _VentanaInventarioState extends State<VentanaInventario> {
                       ],
                       const SizedBox(width: 6),
 
+                      // ── Ficha técnica (todos la ven) ─────────
+                      // El color dice cómo está: gris sin ficha,
+                      // naranja cargada automáticamente (revisar),
+                      // verde revisada a mano.
+                      Builder(builder: (_) {
+                        final origen = _fichas[p.codigo] ?? '';
+                        final color = switch (origen) {
+                          'manual' => AppColors.statusGreen,
+                          'auto' || 'ia' => AppColors.statusOrange,
+                          _ => AppColors.textSecondary,
+                        };
+                        return IconButton(
+                          icon: Icon(Icons.description_outlined,
+                              color: color, size: 20),
+                          tooltip: "Ficha técnica · "
+                              "${estadoFicha(origen, origen.isEmpty ? 0 : 1).$1}",
+                          padding: EdgeInsets.zero,
+                          constraints: const BoxConstraints(),
+                          onPressed: () => _abrirFicha(p));
+                      }),
+                      const SizedBox(width: 2),
+
                       // ── Botón editar ─────────────────────────
                       // Si el producto sólo existe en OTRA tienda (se
                       // ve por la búsqueda, es informativo) no se edita
@@ -26176,8 +26073,6 @@ class _VentanaIngresoStockState extends State<VentanaIngresoStock> {
     return Scaffold(
       backgroundColor: AppColors.surfaceTintBlue,
       appBar: AppBar(
-        backgroundColor: AppColors.royalBlue,
-        foregroundColor: Colors.white,
         title: Text(_tienda.isEmpty
             ? 'Ingreso rápido de stock'
             : 'Ingreso de stock · $_tienda'),
@@ -26714,8 +26609,6 @@ class _VentanaInventarioFisicoState
 
     return Scaffold(
       appBar: AppBar(
-        backgroundColor: AppColors.royalBlue,
-        foregroundColor: Colors.white,
         title: const Text('Inventario Físico'),
         actions: [
           IconButton(
@@ -26727,28 +26620,26 @@ class _VentanaInventarioFisicoState
       body: _cargando
           ? const Center(child: CircularProgressIndicator())
           : Column(children: [
-              // ── Banner de progreso ──
-              Container(
-                color: AppColors.royalBlue,
-                padding: const EdgeInsets.all(12),
+              // ── Progreso (estilo Brizuela / Panel Corporativo) ──
+              FilaIndicadores([
+                Indicador('Contados', '$totalContados',
+                    icono: Icons.check_circle_rounded),
+                Indicador('Total', '$totalEsperados',
+                    icono: Icons.inventory_2_rounded, color: AppColors.lila),
+                Indicador('Faltan', faltantes < 0 ? '0' : '$faltantes',
+                    icono: Icons.pending_actions_rounded,
+                    color: faltantes > 0
+                        ? AppColors.statusYellow
+                        : AppColors.statusGreen),
+                Indicador('Sobran', '${_noReconocidos.length}',
+                    icono: Icons.report_problem_rounded,
+                    color: _noReconocidos.isEmpty
+                        ? AppColors.azulVivo
+                        : AppColors.statusOrange),
+              ]),
+              Padding(
+                padding: const EdgeInsets.fromLTRB(16, 4, 16, 10),
                 child: Column(children: [
-                  Row(mainAxisAlignment: MainAxisAlignment.spaceAround,
-                      children: [
-                    _kpiInvFisico('CONTADOS', '$totalContados',
-                        Colors.white),
-                    _kpiInvFisico('TOTAL', '$totalEsperados',
-                        Colors.white70),
-                    _kpiInvFisico('FALTAN',
-                        faltantes < 0 ? '0' : '$faltantes',
-                        faltantes > 0
-                            ? AppColors.statusYellow
-                            : AppColors.statusGreen),
-                    _kpiInvFisico('SOBRAN', '${_noReconocidos.length}',
-                        _noReconocidos.isEmpty
-                            ? Colors.white70
-                            : AppColors.statusOrange),
-                  ]),
-                  const SizedBox(height: 12),
                   // Barra de progreso
                   ClipRRect(
                     borderRadius: BorderRadius.circular(8),
@@ -26757,7 +26648,7 @@ class _VentanaInventarioFisicoState
                           ? totalContados / totalEsperados
                           : 0,
                       minHeight: 8,
-                      backgroundColor: Colors.white24,
+                      backgroundColor: AppNeu.hueco,
                       valueColor: AlwaysStoppedAnimation(
                           porcentaje >= 100
                               ? AppColors.statusGreen
@@ -26767,7 +26658,7 @@ class _VentanaInventarioFisicoState
                   const SizedBox(height: 4),
                   Text('${porcentaje.toStringAsFixed(1)}% completado',
                       style: const TextStyle(
-                          color: Colors.white, fontSize: 12)),
+                          color: AppColors.textSecondary, fontSize: 12)),
                 ]),
               ),
               // ── Campo de entrada ──
@@ -26842,9 +26733,6 @@ class _VentanaInventarioFisicoState
                   Material(
                     color: Colors.white,
                     child: TabBar(
-                      labelColor: AppColors.royalBlue,
-                      unselectedLabelColor: AppColors.textSecondary,
-                      indicatorColor: AppColors.royalBlue,
                       tabs: [
                         Tab(text: 'A inventariar ($totalEsperados)'),
                         Tab(text: 'Sobrantes (${_noReconocidos.length})'),
@@ -26863,15 +26751,6 @@ class _VentanaInventarioFisicoState
     );
   }
 
-  Widget _kpiInvFisico(String label, String valor, Color color) {
-    return Column(children: [
-      Text(valor,
-          style: TextStyle(
-              fontSize: 20, fontWeight: FontWeight.bold, color: color)),
-      Text(label,
-          style: TextStyle(fontSize: 10, color: color.withValues(alpha: 0.8))),
-    ]);
-  }
 
   /// Tab con la lista de productos pendientes de inventariar.
   Widget _tabAInventariar() {
@@ -26951,7 +26830,7 @@ class _VentanaInventarioFisicoState
 
     return ListView.builder(
       itemCount: filas.length,
-      itemBuilder: (c, i) {
+      itemBuilder: conAparecer((c, i) {
         final f = filas[i];
         final prod = f['producto'] as Producto;
         final contados = f['contados'] as int;
@@ -26997,7 +26876,7 @@ class _VentanaInventarioFisicoState
                             : Colors.grey[600]))),
           ),
         );
-      },
+      }),
     );
   }
 
@@ -27015,7 +26894,7 @@ class _VentanaInventarioFisicoState
     }
     return ListView.builder(
       itemCount: _noReconocidos.length,
-      itemBuilder: (c, i) {
+      itemBuilder: conAparecer((c, i) {
         final cod = _noReconocidos[i];
         return ListTile(
           dense: true,
@@ -27030,7 +26909,7 @@ class _VentanaInventarioFisicoState
                 setState(() => _noReconocidos.removeAt(i)),
           ),
         );
-      },
+      }),
     );
   }
 
@@ -27043,7 +26922,7 @@ class _VentanaInventarioFisicoState
     }
     return ListView.builder(
       itemCount: _historialEscaneos.length,
-      itemBuilder: (c, i) {
+      itemBuilder: conAparecer((c, i) {
         final h = _historialEscaneos[i];
         final t = h['tipo'] as String;
         return ListTile(
@@ -27067,7 +26946,7 @@ class _VentanaInventarioFisicoState
               style: const TextStyle(
                   fontSize: 10, color: AppColors.textSecondary)),
         );
-      },
+      }),
     );
   }
 
@@ -28684,9 +28563,9 @@ class _VentanaImeiState extends State<VentanaImei> {
               child: Container(
                 padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
                 decoration: BoxDecoration(
-                  color: Colors.white.withValues(alpha: 0.18),
+                  color: AppColors.ambarTenue,
                   borderRadius: BorderRadius.circular(12),
-                  border: Border.all(color: Colors.white.withValues(alpha: 0.3)),
+                  border: Border.all(color: AppColors.statusYellow.withValues(alpha: 0.3)),
                 ),
                 child: Row(mainAxisSize: MainAxisSize.min, children: [
                   const Icon(Icons.admin_panel_settings, size: 13, color: AppColors.statusYellow),
@@ -28706,27 +28585,22 @@ class _VentanaImeiState extends State<VentanaImei> {
         ],
       ),
       body: Column(children: [
-        // Barra de búsqueda y filtros
+        // Barra de búsqueda y filtros (en blanco, estilo Brizuela)
         Container(
           padding: const EdgeInsets.fromLTRB(12, 12, 12, 8),
-          color: AppColors.royalBlue,
+          color: AppNeu.superficie,
           child: Column(children: [
             TextField(
               controller: _search,
               onChanged: (v) => setState(() {}),
-              style: const TextStyle(color: Colors.white),
               decoration: InputDecoration(
                 hintText: "Buscar por IMEI, modelo o proveedor...",
-                hintStyle: const TextStyle(color: Colors.white70),
-                prefixIcon: const Icon(Icons.search, color: Colors.white),
+                prefixIcon: const Icon(Icons.search, color: AppColors.azulVivo),
                 suffixIcon: _search.text.isNotEmpty
                   ? IconButton(
-                      icon: const Icon(Icons.clear, color: Colors.white70, size: 18),
+                      icon: const Icon(Icons.clear, size: 18),
                       onPressed: () => setState(() => _search.clear()))
                   : null,
-                filled: true,
-                fillColor: Colors.white.withValues(alpha: 0.12),
-                border: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: BorderSide.none),
                 contentPadding: const EdgeInsets.symmetric(vertical: 0, horizontal: 16),
               ),
             ),
@@ -28737,12 +28611,8 @@ class _VentanaImeiState extends State<VentanaImei> {
                 children: ["Todos", ..._ubicacionesDisponibles].map((u) => Padding(
                   padding: const EdgeInsets.only(right: 8),
                   child: ChoiceChip(
-                    label: Text(u, style: TextStyle(
-                      color: _filtroUbicacion == u ? Colors.white : Colors.white70,
-                      fontSize: 12)),
+                    label: Text(u, style: const TextStyle(fontSize: 12)),
                     selected: _filtroUbicacion == u,
-                    selectedColor: AppColors.primaryBlue,
-                    backgroundColor: Colors.white.withValues(alpha: 0.1),
                     onSelected: (val) => setState(() => _filtroUbicacion = u),
                   ),
                 )).toList(),
@@ -28751,9 +28621,9 @@ class _VentanaImeiState extends State<VentanaImei> {
             const SizedBox(height: 6),
             // Estadísticas rápidas
             Row(children: [
-              _statChip(Icons.check_circle_outline, "$totalDisponibles disponibles", Colors.greenAccent),
+              _statChip(Icons.check_circle_outline, "$totalDisponibles disponibles", AppColors.statusGreen),
               const SizedBox(width: 8),
-              _statChip(Icons.sell_outlined, "$totalVendidos vendidos", Colors.orange.shade200),
+              _statChip(Icons.sell_outlined, "$totalVendidos vendidos", AppColors.statusOrange),
             ]),
           ]),
         ),
@@ -30185,6 +30055,9 @@ class _FormularioFacturaState extends State<FormularioFactura>
     with WidgetsBindingObserver {
   final _telCtrl=TextEditingController();
   final _correoClienteCtrl=TextEditingController();
+  // Dirección del cliente: la factura nueva la pide (orden del dueño
+  // 23/10/2026).
+  final _direccionCtrl=TextEditingController();
   final _codigo=TextEditingController(), _montoPago=TextEditingController();
   final _deudaFpb=TextEditingController(); // monto de deuda para FPB
   String _metodo = ConfigSistema.metodossPago.isNotEmpty ? ConfigSistema.metodossPago.first : "Punto de venta";
@@ -30238,6 +30111,16 @@ class _FormularioFacturaState extends State<FormularioFactura>
   // producto se atribuya al vendedor correcto.
   final Map<int, String> _vendedorEquipo      = {};   // identityHash → nombre vendedor
   final Map<int, String> _vendedorItem        = {};
+  // ── Inicial aprobada por la financiadora, POR LÍNEA financiada ──
+  // (facturación oct-2026, lib/factura_cuadre.dart). La factura no se
+  // emite si los pagos no suman Σ contado + Σ inicial.
+  final Map<int, double> _inicialEquipo       = {};   // identityHash → inicial $
+  final Map<int, double> _inicialItem         = {};
+  /// Identifica ESTE intento de factura ante el servidor: si la red corta
+  /// después de guardar y se reintenta, el servidor devuelve la factura ya
+  /// guardada en vez de crear otra. Solo cambia tras guardar con éxito.
+  String _claveIdempotencia =
+      nuevaClaveIdempotencia(math.Random.secure().nextInt);
 
   @override
   void initState() {
@@ -30266,6 +30149,7 @@ class _FormularioFacturaState extends State<FormularioFactura>
       // factura "no cargó los datos del cliente". Ahora se restauran
       // todos los campos.
       _telCtrl.text = widget.facturaAEditar!.telefono;
+      _direccionCtrl.text = widget.facturaAEditar!.direccion;
 
       // ── REHIDRATAR maps de Financiado/Contado, cuotas, lista y
       //    vendedor para cada equipo e ítem ──
@@ -30320,11 +30204,17 @@ class _FormularioFacturaState extends State<FormularioFactura>
     final cuotas       = pagoFinanciado?.numeroCuotas ?? 0;
     final montoCuota   = pagoFinanciado?.montoCuota ?? 0.0;
     final lista        = pagoFinanciado?.nombreLista ?? '';
+    // El chip F/D lleva la financiadora (Cashea/Krece/Weppa), no la
+    // palabra «Financiado» (que ningún cálculo reconocía). Y, como en el
+    // reporte de ventas, en una venta financiada los equipos son los
+    // financiados y los productos sin IMEI van de contado (si no hay
+    // equipos, todos los productos son financiados).
+    final tipoFin = normalizarFinanciadoraAud(financiadora) ?? 'Financiado';
 
     // ── Rehidratar equipos ──
     for (final e in _equipos) {
       final hash = identityHashCode(e);
-      _tipoVentaEquipo[hash] = esFinanciada ? 'Financiado' : 'Contado';
+      _tipoVentaEquipo[hash] = esFinanciada ? tipoFin : 'Contado';
       if (esFinanciada && financiadora.isNotEmpty) {
         _financiadorEquipo[hash] = financiadora;
       }
@@ -30337,9 +30227,10 @@ class _FormularioFacturaState extends State<FormularioFactura>
     }
 
     // ── Rehidratar items ──
+    final itemsFinanciados = esFinanciada && _equipos.isEmpty;
     for (final it in _items) {
       final hash = identityHashCode(it);
-      _tipoVentaItem[hash] = esFinanciada ? 'Financiado' : 'Contado';
+      _tipoVentaItem[hash] = itemsFinanciados ? tipoFin : 'Contado';
       if (esFinanciada && financiadora.isNotEmpty) {
         _financiadorItem[hash] = financiadora;
       }
@@ -30350,6 +30241,157 @@ class _FormularioFacturaState extends State<FormularioFactura>
       final v = f.vendedorPorCodigo[it.codigo];
       if (v != null && v.isNotEmpty) _vendedorItem[hash] = v;
     }
+    if (esFinanciada) _rehidratarInicial(f);
+  }
+
+  /// La inicial de una factura que se edita: la guardada (facturas.inicial)
+  /// o, en una factura vieja, la que pagó el cliente (los pagos marcados
+  /// como inicial; si no hay, lo pagado menos el contado). Va completa en
+  /// la primera línea financiada; el vendedor la puede corregir.
+  void _rehidratarInicial(FacturaModel f) {
+    final tasa = tasaDeFactura(f);
+    double enUsd(PagoFactura p) => p.monedaEfectiva == kMonedaBs
+        ? (tasa > 0 ? p.monto / tasa : 0)
+        : p.monto;
+    double ini;
+    if (f.inicial != null) {
+      ini = f.inicial!;
+    } else {
+      final marcados = f.pagos.where((p) => p.esInicial).toList();
+      if (marcados.isNotEmpty) {
+        ini = marcados.fold<double>(0, (s, p) => s + enUsd(p));
+      } else {
+        final contado = _items
+            .where((it) => !_esLineaFinanciada(_tipoVentaItem[identityHashCode(it)]))
+            .fold<double>(0, (s, it) => s + it.precioVenta);
+        ini = f.pagos.fold<double>(0, (s, p) => s + enUsd(p)) - contado;
+      }
+    }
+    if (ini < 0) ini = 0;
+    var primera = true;
+    for (final e in _equipos) {
+      final h = identityHashCode(e);
+      if (!_esLineaFinanciada(_tipoVentaEquipo[h])) continue;
+      _inicialEquipo[h] = primera ? redondear2(ini) : 0;
+      primera = false;
+    }
+    for (final it in _items) {
+      final h = identityHashCode(it);
+      if (!_esLineaFinanciada(_tipoVentaItem[h])) continue;
+      _inicialItem[h] = primera ? redondear2(ini) : 0;
+      primera = false;
+    }
+  }
+
+  // ════════════════════════════════════════════════════════════
+  //  CUADRE DE LA FACTURA (facturación oct-2026)
+  //  Contado/financiado POR PRODUCTO (chip F/D). Lo que paga el
+  //  cliente: Σ precio de contado + Σ inicial de las financiadas. Ver
+  //  lib/factura_cuadre.dart; el servidor repite la cuenta.
+  // ════════════════════════════════════════════════════════════
+
+  /// Cashea / Weppa / Krece (o «Financiado» de una factura vieja). FPB y
+  /// Contado no: se cobran a precio de contado.
+  static bool _esLineaFinanciada(String? tv) =>
+      tv == 'Cashea' || tv == 'Weppa' || tv == 'Krece' || tv == 'Financiado';
+
+  bool get _esFpb => _tipoVenta == "FPB";
+
+  /// Tasa del cuadre: la de la factura que se edita, o la BCV del día.
+  double get _tasaFactura => widget.facturaAEditar != null
+      ? tasaDeFactura(widget.facturaAEditar!)
+      : ConfigSistema.tasaCambio;
+
+  LineaCuadre _lineaCuadre(Producto p, {required String ref,
+      required bool esEquipo, String? tipoVenta, String? lista, double? inicial}) {
+    final fin = _esLineaFinanciada(tipoVenta);
+    // Precio BCV (lista o columna «BCV») y el de la financiadora, con la
+    // misma búsqueda que la auditoría.
+    final precios = preciosReferenciaDe(
+      codigo: p.codigo,
+      precioVenta: p.precioVenta,
+      listas: listasPreciosGlobal,
+      financiadora: fin ? tipoVenta : null,
+      nombreLista: lista,
+    );
+    return LineaCuadre(
+      ref: ref,
+      nombre: p.nombre,
+      esEquipo: esEquipo,
+      financiada: fin,
+      precioDivisa: p.precioVenta,
+      precioBcv: precios.bcv,
+      precioFinanciadora: fin ? precios.financiadora : null,
+      inicial: fin ? inicial : null,
+    );
+  }
+
+  /// Líneas del cuadre en el MISMO orden en que viajan (equipos, items).
+  List<LineaCuadre> _lineasCuadre() => [
+    for (final e in _equipos)
+      _lineaCuadre(e.producto, ref: e.imei, esEquipo: true,
+          tipoVenta: _tipoVentaEquipo[identityHashCode(e)],
+          lista: _listaEquipo[identityHashCode(e)],
+          inicial: _inicialEquipo[identityHashCode(e)]),
+    for (final p in _items)
+      _lineaCuadre(p, ref: p.codigo, esEquipo: false,
+          tipoVenta: _tipoVentaItem[identityHashCode(p)],
+          lista: _listaItem[identityHashCode(p)],
+          inicial: _inicialItem[identityHashCode(p)]),
+  ];
+
+  CuadreFactura _cuadre() => CuadreFactura.calcular(
+    lineas: _lineasCuadre(),
+    pagos: [
+      for (final p in _pagos)
+        PagoCuadre(monto: p.monto, moneda: p.monedaEfectiva,
+            esVuelto: p.esVuelto, metodo: p.metodo),
+    ],
+    tasa: _tasaFactura,
+    fpb: _esFpb,
+  );
+
+  /// Deuda FPB: la que escribió el vendedor o, si dejó el campo vacío, la
+  /// propuesta (total − pagado).
+  double _deudaFpbFinal(CuadreFactura c) {
+    final t = _deudaFpb.text.trim().replaceAll(',', '.');
+    if (t.isEmpty) return c.deudaFpbPropuesta;
+    return double.tryParse(t) ?? -1;
+  }
+
+  /// Cuerpo de la factura para el servidor: el de siempre más el precio
+  /// de cada línea, el bloque `cuadre`, la clave de idempotencia y (FPB)
+  /// la deuda, que el servidor crea en la misma petición.
+  Map<String, dynamic> _apiMapFactura(FacturaModel f, CuadreFactura c,
+      {required bool alta, double deudaFpb = 0}) {
+    final m = agregarCuadreAlCuerpo(f.toApiMap(), _lineasCuadre(), c);
+    if (alta) m['clave_idempotencia'] = _claveIdempotencia;
+    if (alta && _esFpb && deudaFpb > 0) {
+      m['fpb'] = {
+        'deuda': redondear2(deudaFpb),
+        'cuotas': <Map<String, dynamic>>[],
+        // Mismo criterio de antes para la financiadora de la cuenta.
+        'financiadora': _pagos
+            .map((p) => (p.financiador ?? '').trim())
+            .firstWhere((x) => x.isNotEmpty, orElse: () => 'FPB'),
+      };
+    }
+    return m;
+  }
+
+  /// Registra el vuelto (solo efectivo o divisas): un pago NEGATIVO.
+  void _agregarVuelto(String metodo, double monto) {
+    final moneda = monedaDeMetodo(metodo);
+    final tasa = _tasaFactura;
+    setState(() => _pagos.add(PagoFactura(
+      metodo: metodo,
+      monto: -monto.abs(),
+      tipo: 'Contado',
+      esVuelto: true,
+      moneda: moneda,
+      tasaCambio: tasa > 0 ? tasa : null,
+      montoUsd: montoUsdDePago(-monto.abs(), moneda, tasa),
+    )));
   }
 
   @override
@@ -30380,6 +30422,7 @@ class _FormularioFacturaState extends State<FormularioFactura>
         'cedula': _cedula.text,
         'telefono': _telCtrl.text,
         'correo': _correoClienteCtrl.text,
+        'direccion': _direccionCtrl.text,
         'nro': _nro.text,
         'tipoVenta': _tipoVenta,
         'deudaFpb': _deudaFpb.text,
@@ -30435,6 +30478,7 @@ class _FormularioFacturaState extends State<FormularioFactura>
       _cedula.text = (data['cedula'] ?? '').toString();
       _telCtrl.text = (data['telefono'] ?? '').toString();
       _correoClienteCtrl.text = (data['correo'] ?? '').toString();
+      _direccionCtrl.text = (data['direccion'] ?? '').toString();
       if ((data['nro'] ?? '').toString().isNotEmpty) {
         _nro.text = data['nro'].toString();
       }
@@ -30544,6 +30588,7 @@ class _FormularioFacturaState extends State<FormularioFactura>
     WidgetsBinding.instance.removeObserver(this);
     _telCtrl.dispose();
     _correoClienteCtrl.dispose();
+    _direccionCtrl.dispose();
     _codigo.dispose();
     _montoPago.dispose();
     _deudaFpb.dispose();
@@ -30840,8 +30885,12 @@ class _FormularioFacturaState extends State<FormularioFactura>
           '_cuotasEquipo=$_cuotasEquipo | '
           '_montoCuotaEquipo=$_montoCuotaEquipo');
 
+      final monedaPago = monedaDeMetodo(_metodo);
       _pagos.add(PagoFactura(
         metodo: _metodo, monto: monto,
+        // Moneda y monto en $ (a BCV) de cada pago (facturación oct-2026).
+        moneda: monedaPago,
+        montoUsd: montoUsdDePago(monto, monedaPago, _tasaFactura),
         tipo: esFinanciado ? "Financiado" : "Contado",
         financiador: financiadorDerivado,
         financiadora: financiadoraDerivada,
@@ -30964,6 +31013,7 @@ class _FormularioFacturaState extends State<FormularioFactura>
     final clienteNombre = _cliente.text.trim();
     final clienteCedula = _cedula.text.trim();
     final clienteTel    = _telCtrl.text.trim();
+    final clienteDir    = _direccionCtrl.text.trim();
 
     if (clienteNombre.isEmpty) {
       _mostrarValidacion("Ingrese el nombre del cliente.");
@@ -30982,6 +31032,12 @@ class _FormularioFacturaState extends State<FormularioFactura>
       _mostrarValidacion("La cédula debe tener entre 6 y 8 dígitos.");
       return;
     }
+    // Orden del dueño (23/10/2026): la factura pide la dirección del
+    // cliente. Solo a las nuevas: una factura vieja se edita sin ella.
+    if (widget.facturaAEditar == null && clienteDir.length < 3) {
+      _mostrarValidacion("Ingrese la dirección del cliente.");
+      return;
+    }
     if (_equipos.isEmpty && _items.isEmpty) {
       _mostrarValidacion("Agregue al menos un producto a la factura.");
       return;
@@ -30997,19 +31053,41 @@ class _FormularioFacturaState extends State<FormularioFactura>
       if (ok != true || !mounted) return;
       _registrarPagoSinInicial();
       sinInicialConfirmada = _pagos.isNotEmpty;
+      // Sin inicial = inicial 0 en las líneas financiadas que no la tienen.
+      setState(() {
+        for (final e in _equipos) {
+          final h = identityHashCode(e);
+          if (_esLineaFinanciada(_tipoVentaEquipo[h])) _inicialEquipo.putIfAbsent(h, () => 0);
+        }
+        for (final it in _items) {
+          final h = identityHashCode(it);
+          if (_esLineaFinanciada(_tipoVentaItem[h])) _inicialItem.putIfAbsent(h, () => 0);
+        }
+      });
     }
-    if (_pagos.isEmpty) {
+    // FPB sale con lo que pague el cliente, aunque sea nada: todo queda
+    // de deuda (dueño, facturación oct-2026).
+    if (_pagos.isEmpty && !_esFpb) {
       _mostrarValidacion("Agregue al menos un método de pago.");
       return;
     }
 
-    // Validar que el total de pagos coincida con el total de productos
-    final totalProductos = _equipos.fold(0.0, (s, e) => s + e.producto.precioVenta)
-        + _items.fold(0.0, (s, p) => s + p.precioVenta);
-    final totalPagos = _pagos.fold(0.0, (s, p) => s + p.monto);
+    // ── CUADRE OBLIGATORIO (facturación oct-2026) ──
+    // Ya no existe «Diferencia en totales» con «Continuar»: si lo que
+    // paga el cliente no es Σ contado + Σ inicial (cada pago en su
+    // moneda, el contado en Bs a precio BCV), la factura NO se emite.
+    // Antes además se sumaban $ y Bs crudos.
+    final cuadre = _cuadre();
+    // Al EDITAR una factura ya emitida (los precios del catálogo pueden
+    // haber cambiado desde entonces) se avisa como antes y se deja seguir:
+    // ver el informe de esta mejora (decisión pendiente del dueño).
+    final esEdicionCuadre = widget.facturaAEditar?.id != null;
+    if (!cuadre.cuadra && !esEdicionCuadre) {
+      _mostrarValidacion(cuadre.problema!);
+      return;
+    }
     // (Sin inicial ya se confirmó arriba: no se pregunta dos veces.)
-    if (!sinInicialConfirmada &&
-        (totalPagos - totalProductos).abs() > 0.10) { // tolerancia de $0.10
+    if (!sinInicialConfirmada && !cuadre.cuadra) {
       final confirmar = await showDialog<bool>(
         context: context,
         builder: (ctx) => AlertDialog(
@@ -31020,8 +31098,12 @@ class _FormularioFacturaState extends State<FormularioFactura>
           ]),
           content: Column(mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.start, children: [
-            Text("Total productos: ${formatCurrency(totalProductos)}"),
-            Text("Total pagos: ${formatCurrency(totalPagos)}"),
+            Text("A cobrar: ${formatCurrency(cuadre.objetivoUsd)}"
+                " (o ${formatBolivares(cuadre.objetivoBs)})"),
+            Text("Pagado: ${formatTotalesPorMoneda(cuadre.pagadoUsd, cuadre.pagadoBs)}"),
+            const SizedBox(height: 6),
+            Text(cuadre.problema ?? '',
+                style: const TextStyle(color: AppColors.statusRed)),
             const SizedBox(height: 8),
             const Text("¿Desea continuar de todas formas?",
               style: TextStyle(fontWeight: FontWeight.w500)),
@@ -31040,15 +31122,14 @@ class _FormularioFacturaState extends State<FormularioFactura>
       if (confirmar != true || !mounted) return;
     }
 
-    // Validación específica para FPB
-    if (_tipoVenta == "FPB") {
-      final deuda = double.tryParse(_deudaFpb.text.trim());
-      if (deuda == null || deuda <= 0) {
-        _mostrarValidacion(
-          "Ingrese el monto de la deuda del cliente para FPB.",
-          color: AppColors.statusOrange);
-        return;
-      }
+    // FPB: la deuda propuesta es total − pagado y el vendedor la puede
+    // cambiar. Si el cliente pagó todo no queda deuda ni cuenta.
+    final deudaFpb = _esFpb ? _deudaFpbFinal(cuadre) : 0.0;
+    if (_esFpb && deudaFpb < 0) {
+      _mostrarValidacion(
+        "La deuda FPB no es un número válido.",
+        color: AppColors.statusOrange);
+      return;
     }
 
     // ── Mostrar indicador de carga ───────────────────────────
@@ -31096,6 +31177,7 @@ class _FormularioFacturaState extends State<FormularioFactura>
         cliente      : clienteNombre,
         cedula       : clienteCedula,
         telefono     : clienteTel,
+        direccion    : clienteDir,
         nroFactura   : _nro.text.trim(),
         equipos      : _equipos,
         itemsSinImei : _items,
@@ -31127,12 +31209,16 @@ class _FormularioFacturaState extends State<FormularioFactura>
       // ejecutan los efectos secundarios (pasos 2, 3, 4): marcar IMEIs,
       // decrementar stock manual y crear CxC para FPB.
       final esEdicion = widget.facturaAEditar?.id != null;
+      // Cuerpo y respuesta del alta (para confirmar la deuda FPB).
+      Map<String, dynamic>? cuerpoAlta;
+      dynamic respuestaAlta;
 
       if (esEdicion) {
         // Conservar id original para no romper relaciones (factura_equipos,
         // factura_items, factura_pagos siguen apuntando a ese id).
         nuevaFactura.id = widget.facturaAEditar!.id;
-        await _Api.put('facturas', nuevaFactura.id!.toString(), nuevaFactura.toApiMap());
+        await _Api.put('facturas', nuevaFactura.id!.toString(),
+            _apiMapFactura(nuevaFactura, cuadre, alta: false));
       } else {
         // ── POST con reintento automático si hay duplicado ────────
         // Si el backend responde con error 1062 ("Duplicate entry for
@@ -31146,7 +31232,11 @@ class _FormularioFacturaState extends State<FormularioFactura>
             // ── DEBUG: imprimir el JSON que se manda al backend ──
             // Útil para verificar que numero_cuotas y monto_cuota están
             // viajando dentro del array `pagos`.
-            final body = nuevaFactura.toApiMap();
+            // Misma clave de idempotencia en todo reintento (también los
+            // que hace _Api por red): el servidor no duplica la factura.
+            final body = _apiMapFactura(nuevaFactura, cuadre,
+                alta: true, deudaFpb: deudaFpb);
+            cuerpoAlta = body;
             debugPrint('[Factura] Enviando POST facturas. '
                 'pagos=${body['pagos']}');
             data = await _Api.post('facturas', body);
@@ -31171,6 +31261,7 @@ class _FormularioFacturaState extends State<FormularioFactura>
                 cliente      : nuevaFactura.cliente,
                 cedula       : nuevaFactura.cedula,
                 telefono     : nuevaFactura.telefono,
+                direccion    : nuevaFactura.direccion,
                 nroFactura   : nuevoNro,
                 equipos      : nuevaFactura.equipos,
                 itemsSinImei : nuevaFactura.itemsSinImei,
@@ -31198,6 +31289,7 @@ class _FormularioFacturaState extends State<FormularioFactura>
             nuevaFactura.id = idRaw is int ? idRaw : int.tryParse(idRaw.toString());
           }
         }
+        respuestaAlta = data;
         // Foto de precios y tasas de esta venta (la BD no guarda el
         // precio por renglón). En segundo plano: si falla, la factura
         // ya está guardada.
@@ -31224,6 +31316,7 @@ class _FormularioFacturaState extends State<FormularioFactura>
           nombre: clienteNombre,
           telefono: clienteTel,
           correo: _correoClienteCtrl.text.trim(),
+          direccion: clienteDir,
         );
         final idx = clientesGlobal.indexWhere((c) =>
             _normalizarCedula(c.cedula) == _normalizarCedula(clienteCedula));
@@ -31237,6 +31330,9 @@ class _FormularioFacturaState extends State<FormularioFactura>
             correo: clienteData.correo.isNotEmpty
                 ? clienteData.correo
                 : previo.correo,
+            direccion: clienteData.direccion.isNotEmpty
+                ? clienteData.direccion
+                : previo.direccion,
           );
         } else {
           clientesGlobal.add(clienteData);
@@ -31331,32 +31427,22 @@ class _FormularioFacturaState extends State<FormularioFactura>
       // Solo en creación. En edición no se crea una nueva cuenta por
       // cobrar; la original ya existe (o nunca existió si la venta no
       // era FPB cuando se creó).
-      if (!esEdicion && _tipoVenta == "FPB") {
-        final deuda = double.tryParse(_deudaFpb.text.trim()) ?? 0;
-        if (deuda > 0) {
-          // Resolver la financiadora de los pagos: el primer pago con
-          // `financiador` no vacío gana. Si no hay ninguno, queda 'FPB'.
-          final financiadora = _pagos
-              .map((p) => (p.financiador ?? '').trim())
-              .firstWhere((f) => f.isNotEmpty, orElse: () => 'FPB');
-          try {
-            await _Api.post('cuentas_cobrar', {
-              'cedula'      : clienteCedula,
-              'nombre'      : clienteNombre,
-              'telefono'    : clienteTel,
-              'correo'      : '',
-              'monto_total' : deuda,
-              'financiadora': financiadora,
-              'notas'       : 'Generado automáticamente desde factura ${_nro.text.trim()}',
-            });
-            if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-              content: Text("✅ Cuenta por cobrar creada: $clienteNombre — ${formatCurrency(deuda)}"),
-              backgroundColor: AppColors.statusGreen,
-              duration: const Duration(seconds: 4)));
-          } catch (e) {
-            debugPrint('Error creando CxC para FPB: $e');
-          }
-        }
+      // La deuda viaja CON la factura y, con la llave del servidor
+      // encendida, el servidor la crea en la misma petición (idempotente,
+      // con factura_id). Si no, la crea la app, ahora con factura_id,
+      // número y tienda. Si no queda creada se AVISA y se puede
+      // reintentar: antes el error se tragaba y el cliente quedaba sin
+      // deuda.
+      if (!esEdicion && _esFpb && deudaFpb > 0) {
+        await _asegurarDeudaFpb(
+          deuda: deudaFpb,
+          cuerpoAlta: cuerpoAlta,
+          respuesta: respuestaAlta,
+          facturaId: nuevaFactura.id,
+          cedula: clienteCedula,
+          nombre: clienteNombre,
+          telefono: clienteTel,
+        );
       }
 
       // ── 5. MOSTRAR ADVERTENCIAS SI LAS HAY ───────────────
@@ -31409,6 +31495,8 @@ class _FormularioFacturaState extends State<FormularioFactura>
       // al abrir una nueva factura no aparezca un "borrador restaurado"
       // con datos antiguos.
       _borrarBorrador();
+      // La próxima factura es otro intento: otra clave.
+      _claveIdempotencia = nuevaClaveIdempotencia(math.Random.secure().nextInt);
       Navigator.pop(context, nuevaFactura);
 
     } catch (e) {
@@ -31419,6 +31507,96 @@ class _FormularioFacturaState extends State<FormularioFactura>
         backgroundColor: AppColors.statusRed,
         duration: const Duration(seconds: 6),
       ));
+    }
+  }
+
+  /// Deja creada la deuda de una venta FPB recién facturada (ver arriba).
+  Future<void> _asegurarDeudaFpb({
+    required double deuda,
+    required Map<String, dynamic>? cuerpoAlta,
+    required dynamic respuesta,
+    required int? facturaId,
+    required String cedula,
+    required String nombre,
+    required String telefono,
+  }) async {
+    final nro = _nro.text.trim();
+    var resp = respuesta;
+    final financiadora = _pagos
+        .map((p) => (p.financiador ?? '').trim())
+        .firstWhere((f) => f.isNotEmpty, orElse: () => 'FPB');
+    while (mounted) {
+      if (!mounted) return;
+      String error;
+      if (resp is Map && resp['cxc'] is Map) {
+        final monto = double.tryParse('${(resp['cxc'] as Map)['monto']}') ?? deuda;
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text("✅ Cuenta por cobrar creada: $nombre — ${formatCurrency(monto)}"),
+          backgroundColor: AppColors.statusGreen,
+          duration: const Duration(seconds: 4)));
+        return;
+      } else if (resp is Map && resp['cxc_error'] != null) {
+        error = '${resp['cxc_error']}';
+      } else {
+        // El servidor no la creó (llave apagada): la crea la app.
+        try {
+          await _Api.post('cuentas_cobrar', {
+            'cedula'      : cedula,
+            'nombre'      : nombre,
+            'telefono'    : telefono,
+            'correo'      : '',
+            'monto_total' : deuda,
+            'financiadora': financiadora,
+            if (facturaId != null) 'factura_id': facturaId,
+            'nro_factura' : nro,
+            'tienda'      : widget.tienda,
+            'notas'       : 'Generado automáticamente desde factura $nro',
+          });
+          if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+            content: Text("✅ Cuenta por cobrar creada: $nombre — ${formatCurrency(deuda)}"),
+            backgroundColor: AppColors.statusGreen,
+            duration: const Duration(seconds: 4)));
+          return;
+        } catch (e) {
+          error = e.toString().replaceFirst('Exception: ', '');
+        }
+      }
+      if (!mounted) return;
+      final reintentar = await showDialog<bool>(
+        context: context,
+        barrierDismissible: false,
+        builder: (ctx) => AlertDialog(
+          title: const Row(children: [
+            Icon(Icons.warning_amber_rounded, color: AppColors.statusRed),
+            SizedBox(width: 8),
+            Expanded(child: Text("La deuda FPB no se creó")),
+          ]),
+          content: Text(
+            "La factura $nro SÍ quedó guardada, pero la cuenta por cobrar "
+            "de ${formatCurrency(deuda)} no:\n\n$error\n\n"
+            "Reintente; si no se puede, créela a mano en Cuentas por Cobrar."),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text("La creo después")),
+            ElevatedButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text("Reintentar")),
+          ],
+        ),
+      );
+      if (reintentar != true) return;
+      if (resp is Map && resp['cxc_error'] != null && cuerpoAlta != null) {
+        // Misma factura, misma clave: el servidor la reconoce como ya
+        // guardada y solo completa la deuda (sin duplicar nada).
+        try {
+          resp = await _Api.post('facturas', cuerpoAlta);
+        } catch (e) {
+          resp = {'cxc_error': e.toString().replaceFirst('Exception: ', '')};
+        }
+      } else {
+        resp = null;
+      }
     }
   }
 
@@ -31447,12 +31625,12 @@ class _FormularioFacturaState extends State<FormularioFactura>
       backgroundColor: AppColors.surfaceTintBlue,
       appBar: AppBar(
         elevation: 0,
-        leading: IconButton(icon: const Icon(Icons.arrow_back, color: Colors.white), onPressed: () => Navigator.pop(context)),
-        title: const Text("Factura Nueva", style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
+        leading: IconButton(icon: const Icon(Icons.arrow_back), onPressed: () => Navigator.pop(context)),
+        title: const Text("Factura Nueva"),
         actions: [
-          IconButton(icon: const Icon(Icons.delete_outline, color: Colors.white), onPressed: () {
+          IconButton(icon: const Icon(Icons.delete_outline), onPressed: () {
             setState(() { _equipos.clear(); _items.clear(); _pagos.clear(); }); }),
-          IconButton(icon: const Icon(Icons.refresh, color: Colors.white), onPressed: () async {
+          IconButton(icon: const Icon(Icons.refresh), onPressed: () async {
             await cargarTodosLosDatos();
             if (mounted) setState(() {});
           }),
@@ -31477,6 +31655,9 @@ class _FormularioFacturaState extends State<FormularioFactura>
                 }
                 if (_correoClienteCtrl.text.trim().isEmpty) {
                   _correoClienteCtrl.text = existente.correo;
+                }
+                if (_direccionCtrl.text.trim().isEmpty) {
+                  _direccionCtrl.text = existente.direccion;
                 }
               });
               final compras = contarComprasCliente(cedula);
@@ -31543,6 +31724,7 @@ class _FormularioFacturaState extends State<FormularioFactura>
         }),
         _buildTextField("NOMBRE Y APELLIDO", _cliente),
         _buildTextField("TELEFONO", _telCtrl),
+        _buildTextField("DIRECCIÓN", _direccionCtrl),
         _buildTextField("CORREO", _correoClienteCtrl),
         // ── Opción FPB a nivel de factura (única que sigue siendo global) ──
         // FPB queda aquí porque afecta a TODA la factura: genera una
@@ -31591,15 +31773,22 @@ class _FormularioFacturaState extends State<FormularioFactura>
                                   color: AppColors.statusOrange))),
                     ]),
                     const SizedBox(height: 10),
+                    // Deuda propuesta = total − pagado; el vendedor la puede
+                    // cambiar (vacío = la propuesta). Facturación oct-2026.
                     TextField(
                       controller: _deudaFpb,
                       keyboardType: const TextInputType.numberWithOptions(
                           decimal: true),
-                      decoration: const InputDecoration(
-                          labelText: "Monto de la deuda del cliente *",
-                          prefixIcon: Icon(Icons.attach_money,
+                      onChanged: (_) => setState(() {}),
+                      decoration: InputDecoration(
+                          labelText: "Monto de la deuda del cliente",
+                          hintText: _cuadre().deudaFpbPropuesta
+                              .toStringAsFixed(2),
+                          helperText: "Propuesta: ${formatCurrency(_cuadre().deudaFpbPropuesta)}"
+                              " (total − pagado). Vacío = la propuesta.",
+                          prefixIcon: const Icon(Icons.attach_money,
                               color: AppColors.statusOrange),
-                          border: OutlineInputBorder(),
+                          border: const OutlineInputBorder(),
                           isDense: true),
                     ),
                   ]),
@@ -31618,11 +31807,12 @@ class _FormularioFacturaState extends State<FormularioFactura>
         Align(alignment: Alignment.centerRight,
           child: TextButton(onPressed: () => _mostrarDialogoPago(),
             child: const Text("Agregar", style: TextStyle(color: AppColors.primaryBlue, fontWeight: FontWeight.bold)))),
+        // Cuadre: cuánto se cobra, cuánto falta o cuánto es el vuelto.
+        _buildCuadrePanel(),
         const SizedBox(height: 100),
       ]),
       floatingActionButton: FloatingActionButton(
-        backgroundColor: AppColors.primaryBlue,
-        child: const Icon(Icons.save, color: Colors.white),
+        child: const Icon(Icons.save),
         onPressed: _guardarFactura),
     );
   }
@@ -31849,6 +32039,9 @@ class _FormularioFacturaState extends State<FormularioFactura>
                 Text(formatCurrency(e.producto.precioVenta, symbol: ''), style: const TextStyle(fontSize: 11, color: AppColors.primaryBlue, fontWeight: FontWeight.bold)),
                 // Chip F/D por equipo (bug #1)
                 Align(alignment: Alignment.centerLeft, child: chipFD(tv)),
+                // Inicial aprobada (solo financiadas): entra en el cuadre.
+                if (_esLineaFinanciada(tv))
+                  _chipInicial(_inicialEquipo, identityHashCode(e), e.producto.nombre),
                 // ── Chip de vendedor asignado ──
                 // Si está vacío usa "(Yo)" indicando que el vendedor
                 // es el creador. Tocando el chip se abre un selector.
@@ -31897,6 +32090,7 @@ class _FormularioFacturaState extends State<FormularioFactura>
                 _tipoVentaEquipo.remove(identityHashCode(e));
                 _financiadorEquipo.remove(identityHashCode(e));
                 _vendedorEquipo.remove(identityHashCode(e));
+                _inicialEquipo.remove(identityHashCode(e));
               }),
               child: const Padding(padding: EdgeInsets.symmetric(vertical: 10), child: Icon(Icons.remove_circle_outline, color: Colors.red, size: 20))),
           ]);
@@ -31912,6 +32106,8 @@ class _FormularioFacturaState extends State<FormularioFactura>
                 Text(formatCurrency(p.precioVenta, symbol: ''), style: const TextStyle(fontSize: 11, color: AppColors.primaryBlue, fontWeight: FontWeight.bold)),
                 // Chip F/D por producto (bug #1)
                 Align(alignment: Alignment.centerLeft, child: chipFD(tv)),
+                if (_esLineaFinanciada(tv))
+                  _chipInicial(_inicialItem, identityHashCode(p), p.nombre),
                 // ── Chip de vendedor asignado ──
                 const SizedBox(height: 3),
                 Align(
@@ -31958,11 +32154,195 @@ class _FormularioFacturaState extends State<FormularioFactura>
                 _tipoVentaItem.remove(identityHashCode(p));
                 _financiadorItem.remove(identityHashCode(p));
                 _vendedorItem.remove(identityHashCode(p));
+                _inicialItem.remove(identityHashCode(p));
               }),
               child: const Padding(padding: EdgeInsets.symmetric(vertical: 10), child: Icon(Icons.remove_circle_outline, color: Colors.red, size: 20))),
           ]);
         }),
       ]);
+  }
+
+  /// Chip «Inicial: $X» de una línea financiada; tocarlo la cambia.
+  Widget _chipInicial(Map<int, double> mapa, int hash, String nombre) {
+    final ini = mapa[hash];
+    final falta = ini == null;
+    return Padding(
+      padding: const EdgeInsets.only(top: 3),
+      child: InkWell(
+        onTap: () => _editarInicial(mapa, hash, nombre),
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+          decoration: BoxDecoration(
+            color: falta
+                ? AppColors.statusRed.withValues(alpha: 0.10)
+                : AppColors.brandYellow.withValues(alpha: 0.18),
+            borderRadius: BorderRadius.circular(4),
+            border: Border.all(
+                color: falta ? AppColors.statusRed : AppColors.brandYellow,
+                width: 0.6),
+          ),
+          child: Text(
+            ini == null
+                ? "Escribir inicial aprobada"
+                : esInicialCero(ini) ? kTextoSinInicial : "Inicial: ${formatCurrency(ini)}",
+            style: TextStyle(
+                fontSize: 10,
+                fontWeight: FontWeight.w700,
+                color: falta ? AppColors.statusRed : AppColors.textPrimary)),
+        ),
+      ),
+    );
+  }
+
+  Future<void> _editarInicial(Map<int, double> mapa, int hash, String nombre) async {
+    final ctrl = TextEditingController(
+        text: mapa[hash] == null ? '' : mapa[hash]!.toStringAsFixed(2));
+    final v = await showDialog<double>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text("Inicial aprobada"),
+        content: Column(mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Text(nombre, style: const TextStyle(fontSize: 12, color: Colors.grey)),
+          const SizedBox(height: 8),
+          TextField(
+            controller: ctrl,
+            autofocus: true,
+            keyboardType: const TextInputType.numberWithOptions(decimal: true),
+            decoration: const InputDecoration(
+              labelText: "Inicial (\$, a BCV)",
+              helperText: "0 = venta sin inicial (promoción)",
+              prefixIcon: Icon(Icons.attach_money),
+              border: OutlineInputBorder(),
+              isDense: true),
+          ),
+        ]),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text("Cancelar")),
+          ElevatedButton(
+            onPressed: () {
+              final x = double.tryParse(ctrl.text.trim().replaceAll(',', '.'));
+              if (x == null || x < 0) return;
+              Navigator.pop(ctx, x);
+            },
+            child: const Text("Guardar")),
+        ],
+      ),
+    );
+    ctrl.dispose();
+    if (v == null || !mounted) return;
+    setState(() => mapa[hash] = redondear2(v));
+  }
+
+  /// Cuánto se cobra, cuánto se pagó y qué falta o sobra (vuelto). La
+  /// factura no se guarda hasta que cuadre (salvo FPB: lo que falta es la
+  /// deuda).
+  Widget _buildCuadrePanel() {
+    if (_equipos.isEmpty && _items.isEmpty) return const SizedBox.shrink();
+    final c = _cuadre();
+    final ok = c.cuadra;
+    final color = ok ? AppColors.statusGreen : AppColors.statusRed;
+    Widget fila(String a, String b, {bool fuerte = false}) => Padding(
+      padding: const EdgeInsets.symmetric(vertical: 1.5),
+      child: Row(children: [
+        Expanded(child: Text(a, style: TextStyle(fontSize: 12,
+            fontWeight: fuerte ? FontWeight.w700 : FontWeight.w400))),
+        Text(b, style: TextStyle(fontSize: 12.5,
+            fontWeight: fuerte ? FontWeight.w800 : FontWeight.w600)),
+      ]),
+    );
+    return Container(
+      margin: const EdgeInsets.only(top: 6),
+      padding: const EdgeInsets.all(10),
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.06),
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: color.withValues(alpha: 0.45)),
+      ),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+        if (c.hayFinanciadas) ...[
+          fila("Contado", formatCurrency(c.contadoDivisa)),
+          fila("Inicial (financiadas)", formatCurrency(c.inicialTotal)),
+          fila("Lo cubre la financiadora", formatCurrency(c.montoFinanciado)),
+        ],
+        fila("A cobrar en \$", formatCurrency(c.objetivoUsd), fuerte: true),
+        if (c.tasa > 0)
+          fila("o todo en Bs (BCV ${c.tasa.toStringAsFixed(2)})",
+              formatBolivares(c.objetivoBs)),
+        fila("Pagado", formatTotalesPorMoneda(c.pagadoUsd, c.pagadoBs)),
+        if (_esFpb && c.deudaFpbPropuesta > 0)
+          fila("Deuda FPB propuesta", formatCurrency(c.deudaFpbPropuesta), fuerte: true),
+        const SizedBox(height: 4),
+        Row(children: [
+          Icon(ok ? Icons.check_circle : Icons.error_outline, size: 16, color: color),
+          const SizedBox(width: 6),
+          Expanded(child: Text(
+            ok ? (_esFpb && c.deudaFpbPropuesta > 0
+                    ? "Cuadra: lo que falta queda como deuda FPB."
+                    : "Cuadra: se puede guardar.")
+               : c.problema!,
+            style: TextStyle(fontSize: 12, color: color, fontWeight: FontWeight.w600))),
+        ]),
+        if (c.sobraUsd > 0)
+          Align(
+            alignment: Alignment.centerRight,
+            child: TextButton.icon(
+              icon: const Icon(Icons.currency_exchange, size: 16),
+              label: const Text("Registrar vuelto"),
+              onPressed: () => _dialogoVuelto(c)),
+          ),
+      ]),
+    );
+  }
+
+  /// Vuelto: solo en efectivo o divisas (decisión del dueño). Propone lo
+  /// que sobra en la moneda del método elegido.
+  Future<void> _dialogoVuelto(CuadreFactura c) async {
+    final metodos = ConfigSistema.metodossPago.where(metodoPermiteVuelto).toList();
+    if (metodos.isEmpty) metodos.addAll(const ['Efectivo \$', 'Efectivo Bs']);
+    var metodo = metodos.first;
+    final ctrl = TextEditingController(
+        text: c.vueltoSugerido(monedaDeMetodo(metodo)).toStringAsFixed(2));
+    final r = await showDialog<double>(
+      context: context,
+      builder: (ctx) => StatefulBuilder(builder: (ctx, setD) => AlertDialog(
+        title: const Text("Registrar vuelto"),
+        content: Column(mainAxisSize: MainAxisSize.min, children: [
+          DropdownButtonFormField<String>(
+            initialValue: metodo,
+            isExpanded: true,
+            decoration: const InputDecoration(labelText: "Se devuelve en"),
+            items: metodos.map((m) => DropdownMenuItem(value: m, child: Text(m))).toList(),
+            onChanged: (v) => setD(() {
+              metodo = v ?? metodo;
+              ctrl.text = c.vueltoSugerido(monedaDeMetodo(metodo)).toStringAsFixed(2);
+            }),
+          ),
+          const SizedBox(height: 10),
+          TextField(
+            controller: ctrl,
+            keyboardType: const TextInputType.numberWithOptions(decimal: true),
+            decoration: InputDecoration(
+              labelText: monedaDeMetodo(metodo) == kMonedaBs ? "Vuelto (Bs)" : "Vuelto (\$)",
+              border: const OutlineInputBorder(),
+              isDense: true),
+          ),
+        ]),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text("Cancelar")),
+          ElevatedButton(
+            onPressed: () {
+              final x = double.tryParse(ctrl.text.trim().replaceAll(',', '.'));
+              if (x == null || x <= 0) return;
+              Navigator.pop(ctx, x);
+            },
+            child: const Text("Registrar")),
+        ],
+      )),
+    );
+    ctrl.dispose();
+    if (r == null || !mounted) return;
+    _agregarVuelto(metodo, r);
   }
 
   Widget _buildPagosTable() {
@@ -31989,7 +32369,8 @@ class _FormularioFacturaState extends State<FormularioFactura>
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Text(p.metodo, style: const TextStyle(fontSize: 13)),
+                  Text(p.restaComoVuelto ? "Vuelto · ${p.metodo}" : p.metodo,
+                      style: const TextStyle(fontSize: 13)),
                   // Badge de conciliación BDV (sólo cuando hay un intento)
                   if (p.conciliadoBDV != null) ...[
                     const SizedBox(height: 3),
@@ -32064,6 +32445,8 @@ class _FormularioFacturaState extends State<FormularioFactura>
     int? numeroCuotasSeleccionado;
     double? montoCuotaSeleccionado;
     String? listaSeleccionada;  // Nombre de la lista de precios elegida
+    // Inicial aprobada por la financiadora (entra en el cuadre).
+    double? inicialSeleccionada;
     final cuotasCtrl = TextEditingController();
     final montoCuotaCtrl = TextEditingController();
 
@@ -32195,7 +32578,8 @@ class _FormularioFacturaState extends State<FormularioFactura>
                               financiadorSeleccionado,
                               numeroCuotasSeleccionado,
                               montoCuotaSeleccionado,
-                              listaSeleccionada);
+                              listaSeleccionada,
+                              inicialSeleccionada);
                           Navigator.pop(c);
                         }
                       }),
@@ -32454,6 +32838,24 @@ class _FormularioFacturaState extends State<FormularioFactura>
                         }),
                       )),
                     ]),
+                    const SizedBox(height: 10),
+                    // ── Inicial aprobada (facturación oct-2026) ──
+                    // Lo que el cliente paga hoy por este producto. La
+                    // factura cuadra con Σ contado + Σ inicial.
+                    TextField(
+                      keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                      decoration: const InputDecoration(
+                        labelText: "Inicial aprobada (\$, a BCV)",
+                        hintText: "0 = sin inicial (promoción)",
+                        border: OutlineInputBorder(),
+                        isDense: true,
+                        prefixIcon: Icon(Icons.star_outline),
+                      ),
+                      onChanged: (v) => setS(() {
+                        inicialSeleccionada =
+                            double.tryParse(v.trim().replaceAll(',', '.'));
+                      }),
+                    ),
                   ],
                 ],
               ],
@@ -32478,7 +32880,8 @@ class _FormularioFacturaState extends State<FormularioFactura>
                           financiadorSeleccionado,
                           numeroCuotasSeleccionado,
                           montoCuotaSeleccionado,
-                          listaSeleccionada);
+                          listaSeleccionada,
+                          inicialSeleccionada);
                       Navigator.pop(c);
                     }
                   : null,
@@ -32497,9 +32900,15 @@ class _FormularioFacturaState extends State<FormularioFactura>
       String? financiador,
       [int? numeroCuotas,
       double? montoCuota,
-      String? nombreLista]) {
+      String? nombreLista,
+      double? inicial]) {
     final val = _codigo.text.trim();
     if (val.isEmpty) return;
+    // Un producto marcado FPB vuelve FPB la factura (la deuda FPB es de
+    // toda la factura: ver el interruptor «¿Generar FPB?»).
+    if (tipoVenta == 'FPB' && _tipoVenta != 'FPB') {
+      setState(() => _tipoVenta = 'FPB');
+    }
 
     final imei = _buscarImei(val);
     if (imei != null) {
@@ -32527,6 +32936,9 @@ class _FormularioFacturaState extends State<FormularioFactura>
         }
         if (nombreLista != null && nombreLista.isNotEmpty) {
           _listaEquipo[h] = nombreLista;
+        }
+        if (inicial != null && inicial >= 0 && _esLineaFinanciada(tipoVenta)) {
+          _inicialEquipo[h] = redondear2(inicial);
         }
       });
       _codigo.clear();
@@ -32561,6 +32973,9 @@ class _FormularioFacturaState extends State<FormularioFactura>
         }
         if (nombreLista != null && nombreLista.isNotEmpty) {
           _listaItem[h] = nombreLista;
+        }
+        if (inicial != null && inicial >= 0 && _esLineaFinanciada(tipoVenta)) {
+          _inicialItem[h] = redondear2(inicial);
         }
       });
       _codigo.clear();
@@ -32611,7 +33026,12 @@ class _FormularioFacturaState extends State<FormularioFactura>
     final ctrlNumeroCuotas = TextEditingController();
     final ctrlMontoCuota   = TextEditingController();
 
-    showDialog(context: context, builder: (c) => StatefulBuilder(builder: (context, setS) {
+    // La ruta del diálogo: sus controladores se liberan cuando termina de
+    // cerrarse (ver el .then de abajo).
+    ModalRoute<dynamic>? rutaDialogo;
+    showDialog(context: context, builder: (c) {
+      rutaDialogo ??= ModalRoute.of(c);
+      return StatefulBuilder(builder: (context, setS) {
       final esPagoMovil = _esPagoMovil(_metodo);
 
       // ── Acción: aceptar el pago ──
@@ -32974,11 +33394,24 @@ class _FormularioFacturaState extends State<FormularioFactura>
             child: const Text("Confirmar",
                 style: TextStyle(color: Colors.white))),
         ]);
-    })).then((_) {
-      // Limpiar controllers locales al cerrar el diálogo
-      ctrlReferencia.dispose();
-      ctrlCedulaPagador.dispose();
-      ctrlTelefonoPagador.dispose();
+    });
+    }).then((_) async {
+      // Limpiar controllers locales al cerrar el diálogo. NO apenas se
+      // cierra: el diálogo sigue dibujado durante su animación de salida y
+      // sus TextField usaban controladores ya liberados («A
+      // TextEditingController was used after being disposed», con Pago
+      // Móvil). Se espera a que la ruta termine de cerrarse y a un cuadro
+      // más, cuando sus campos ya no están montados.
+      final ruta = rutaDialogo;
+      if (ruta != null) await ruta.completed;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        ctrlReferencia.dispose();
+        ctrlCedulaPagador.dispose();
+        ctrlTelefonoPagador.dispose();
+        ctrlNumeroCuotas.dispose();
+        ctrlMontoCuota.dispose();
+      });
+      WidgetsBinding.instance.scheduleFrame();
     });
   }
 
@@ -33569,7 +34002,7 @@ class _VentanaConsultaRapidaPreciosState
                         style: const TextStyle(
                             fontSize: 13, fontWeight: FontWeight.w600)),
                     subtitle: Text(
-                        '${lista.esEnBolivares ? "Bs" : "\$"}'
+                        '${lista.etiquetaVista}'
                         '${lista.esFinanciamiento ? " · ${lista.financiadora ?? "Financiamiento"}" : ""}'
                         ' · ${lista.items.length} producto'
                         '${lista.items.length == 1 ? "" : "s"}',
@@ -33657,8 +34090,11 @@ class _VentanaConsultaRapidaPreciosState
           'lista': lista.nombre,
           'columna': col.nombre,
           'varias_columnas': variasColumnas,
-          'precio': precio,
-          'moneda': lista.esEnBolivares ? 'Bs' : '\$',
+          // Lista en Bs con vista BCV (23/10/2026): precio BCV en $ y,
+          // si la lista lo pide, el equivalente en Bs al lado.
+          'precio': lista.aVista(precio),
+          'precio_bs': lista.muestraBsAlLado ? precio : null,
+          'moneda': lista.monedaVista,
           'es_financ': lista.esFinanciamiento,
           'financiadora': lista.financiadora,
           // Condiciones DE ESTE producto: una lista puede tener un
@@ -33666,10 +34102,10 @@ class _VentanaConsultaRapidaPreciosState
           'inicial_pct': lista.esColumnaBase(col)
               ? lista.pctInicialEfectivo(item)
               : lista.pctInicialDe(item),
-          'inicial': lista.inicialEnColumna(item, col),
+          'inicial': lista.aVista(lista.inicialEnColumna(item, col)),
           'tiene_cuotas': lista.tieneCuotas,
           'n_cuotas': lista.cuotasDe(item),
-          'cuota': lista.cuotaEnColumna(item, col),
+          'cuota': lista.aVista(lista.cuotaEnColumna(item, col)),
         });
       }
     }
@@ -33691,8 +34127,6 @@ class _VentanaConsultaRapidaPreciosState
     return Scaffold(
       appBar: AppBar(
         title: const Text("Consulta Rápida de Precios"),
-        backgroundColor: AppColors.royalBlue,
-        foregroundColor: Colors.white,
         actions: [
           // Elegir qué listas se muestran: sólo el dueño.
           if (_puedeElegirListas)
@@ -33942,6 +34376,9 @@ class _VentanaConsultaRapidaPreciosState
                                                   fontSize: 10,
                                                   color: AppColors.textSecondary)),
                                       ])),
+                                  Column(
+                                      crossAxisAlignment: CrossAxisAlignment.end,
+                                      children: [
                                   Text(
                                       moneda == 'Bs'
                                           ? "${precio.toStringAsFixed(2)} Bs"
@@ -33952,6 +34389,13 @@ class _VentanaConsultaRapidaPreciosState
                                           color: esFinanc
                                               ? AppColors.royalBlue
                                               : Colors.black87)),
+                                  if (pr['precio_bs'] != null)
+                                    Text(
+                                        "${(pr['precio_bs'] as double).toStringAsFixed(2)} Bs",
+                                        style: const TextStyle(
+                                            fontSize: 11,
+                                            color: AppColors.textSecondary)),
+                                  ]),
                                 ]),
                               );
                             }).toList(),
@@ -33982,6 +34426,9 @@ class _VentanaListasPreciosState extends State<VentanaListasPrecios> {
   /// Hash simple de la versión del servidor para detectar cambios y
   /// evitar setState innecesarios cuando no hubo modificaciones.
   String _ultimoHashServidor = '';
+
+  /// Marcas `actualizado_en` del último refresco completo (sondeo barato).
+  String _ultimasMarcas = '';
 
   @override
   void initState() {
@@ -34017,11 +34464,25 @@ class _VentanaListasPreciosState extends State<VentanaListasPrecios> {
         ? Future<void>.value()
         : cargarStockParaListas(forzar: true);
     try {
+      // Sondeo barato: solo id + actualizado_en. Si ninguna marca cambió
+      // no se descarga nada. Sin la columna en el servidor (marcas
+      // vacías) se sigue con el refresco completo de siempre.
+      String marcas = '';
+      try {
+        final m = await leerMarcasListas();
+        if (m.isNotEmpty && m.values.every((v) => v.isNotEmpty)) {
+          marcas = (m.entries.toList()..sort((a, b) => a.key.compareTo(b.key)))
+              .map((e) => '${e.key}=${e.value}')
+              .join('|');
+        }
+      } catch (_) {/* backend viejo: refresco completo */}
+      if (silencioso && marcas.isNotEmpty && marcas == _ultimasMarcas) return;
       // `ListaPrecio.fromMap` necesita el catálogo para resolver los
       // productos: si todavía no hay, se espera a que llegue.
       if (catalogoGlobal.isEmpty) await fStock;
       final raw = await _Api.get('listas_precios');
       await fStock;
+      _ultimasMarcas = marcas;
       if (raw is List) {
         // Hash PROFUNDO: incluye precios, %, items, financiadora.
         // Antes solo se hashaba id+nombre+fecha_creacion → el polling
@@ -34083,9 +34544,15 @@ class _VentanaListasPreciosState extends State<VentanaListasPrecios> {
   /// Persiste una lista al backend (solo metadatos, sin re-poblar
   /// productos). Usado por _editarLista cuando solo se cambian
   /// nombre, %, número de cuotas, financiadora, etc.
-  Future<void> _guardarListaEnBackend(ListaPrecio lista) async {
+  Future<void> _guardarListaEnBackend(ListaPrecio lista,
+      {InstantaneaLista? base}) async {
     try {
-      if (lista.id != null) {
+      if (base != null) {
+        // Solo lo que se cambió acá, sobre la versión actual del
+        // servidor: no pisa lo que otro equipo guardó mientras tanto.
+        await guardarCambiosDeLista(lista, base);
+        _ultimasMarcas = '';
+      } else if (lista.id != null) {
         await _Api.put('listas_precios', lista.id.toString(),
             lista.toMap());
       } else {
@@ -34114,12 +34581,15 @@ class _VentanaListasPreciosState extends State<VentanaListasPrecios> {
     //    hay hoy en las tiendas.
     await cargarStockParaListas(forzar: true);
     if (!mounted) return;
+    // Foto ANTES de repoblar: se guarda solo lo que cambió el repoblado.
+    final base = InstantaneaLista.de(lista);
     // 1) Re-poblar localmente
     setState(() => _poblarLista(lista));
-    // 2) Persistir en BD: si ya tiene id, hacemos PUT; si no, POST.
+    // 2) Persistir en BD: si ya tiene id, fusión; si no, POST.
     try {
       if (lista.id != null) {
-        await _Api.put('listas_precios', lista.id.toString(), lista.toMap());
+        await guardarCambiosDeLista(lista, base);
+        _ultimasMarcas = '';
       } else {
         final resp = await _Api.post('listas_precios', lista.toMap());
         if (resp is Map && resp['id'] != null) {
@@ -34184,133 +34654,7 @@ class _VentanaListasPreciosState extends State<VentanaListasPrecios> {
   ///
   /// Esto evita que el admin pierda horas de trabajo editando precios
   /// solo porque pulsó "Actualizar" en la lista.
-  void _poblarLista(ListaPrecio lista) {
-    // Calcular tasa a usar (BCV si está disponible)
-    final tasa = lista.esEnBolivares
-        ? (ConfigSistema.tasaCambio > 0 ? ConfigSistema.tasaCambio : lista.tasaDelDia)
-        : 1.0;
-
-    // Filtrar productos según categoría y marca
-    // PUNTO 2: Excluir subproductos (variantes) — solo productos padre.
-    final productosFiltrados = catalogoGlobal.where((p) {
-      if (p.esSubproducto) return false; // NO tomar subproductos/variantes
-      final coincideCategoria = lista.categoria == "Todos" || p.categoria == lista.categoria;
-      final coincideMarca = lista.marcaFiltro == "Todas" ||
-          p.marca.toLowerCase() == lista.marcaFiltro.toLowerCase();
-      return coincideCategoria && coincideMarca;
-    }).toList();
-
-    // Ordenar por marca → modelo
-    productosFiltrados.sort((a, b) {
-      final marcaCmp = a.marca.toLowerCase().compareTo(b.marca.toLowerCase());
-      return marcaCmp != 0 ? marcaCmp : a.nombre.toLowerCase().compareTo(b.nombre.toLowerCase());
-    });
-
-    // Crear columna por defecto si la lista está vacía de columnas
-    if (lista.columnas.isEmpty) {
-      lista.columnas.add(ColumnaPrecio(nombre: lista.esEnBolivares ? "Precio (Bs)" : "Precio (\$)"));
-    }
-
-    // ── Indexar items existentes por código de producto ──
-    // Esto nos permite RECONOCER productos que ya estaban en la lista
-    // y conservar sus precios/configuraciones manuales.
-    final existentes = <String, ItemListaPrecio>{};
-    for (final it in lista.items) {
-      existentes[it.producto.codigo] = it;
-    }
-
-    final nuevaListaItems = <ItemListaPrecio>[];
-    int agregados = 0;
-    int preservados = 0;
-    int sinStockOmitidos = 0;
-    // El catálogo trae una fila por tienda del mismo código: el
-    // producto entra una sola vez (su stock ya suma todas las tiendas).
-    final codigosVistos = <String>{};
-
-    for (final p in productosFiltrados) {
-      if (!codigosVistos.add(p.codigo)) continue;
-      // Stock disponible real: TODAS las tiendas + variantes.
-      final int stock = stockGlobalDeProducto(p);
-
-      // ── ¿El producto ya estaba en la lista? ──
-      final itemExistente = existentes[p.codigo];
-      // Producto NUEVO y agotado: no se agrega (las listas sólo deben
-      // ofrecer lo que hay). Cuando vuelva a tener stock entra en el
-      // próximo "Actualizar". Los que YA estaban se conservan aunque
-      // estén agotados (se ocultan al mostrar/exportar) para no perder
-      // los precios que el admin les puso.
-      if (itemExistente == null && stock <= 0) {
-        sinStockOmitidos++;
-        continue;
-      }
-      if (itemExistente != null) {
-        // PRESERVAR: el admin pudo haber editado precios e iniciales
-        // manuales. Solo actualizamos el stock (info, no precio).
-        itemExistente.stockDisponible = stock;
-        // Asegurar que tenga TODAS las columnas actuales (por si se
-        // agregó una columna nueva). Las columnas nuevas reciben el
-        // precio calculado por defecto; las existentes se preservan.
-        final factorAdicional = 1 + (lista.porcentajeAdicional / 100);
-        // Cálculo EXACTO en 2 pasos (USD redondeado → Bs redondeado)
-        final precioUsdConMargen = redondearPrecio(p.precioVenta * factorAdicional);
-        final precioPorDefecto = lista.esEnBolivares
-            ? redondearPrecio(precioUsdConMargen * tasa)
-            : precioUsdConMargen;
-        for (final col in lista.columnas) {
-          itemExistente.preciosPorColumna.putIfAbsent(
-              col.nombre, () => precioPorDefecto);
-        }
-        nuevaListaItems.add(itemExistente);
-        preservados++;
-      } else {
-        // NUEVO: producto que no estaba en la lista → agregar con
-        // precio calculado del catálogo. Mismo cálculo exacto.
-        final factorAdicional = 1 + (lista.porcentajeAdicional / 100);
-        final precioUsdConMargen = redondearPrecio(p.precioVenta * factorAdicional);
-        final precioBase = lista.esEnBolivares
-            ? redondearPrecio(precioUsdConMargen * tasa)
-            : precioUsdConMargen;
-
-        nuevaListaItems.add(ItemListaPrecio(
-          producto: p,
-          stockDisponible: stock,
-          preciosPorColumna: {
-            for (var col in lista.columnas) col.nombre: precioBase
-          },
-        ));
-        agregados++;
-      }
-    }
-
-    // Productos agregados A MANO que no entran en el filtro de la lista
-    // (ej. televisores y aires agregados a la lista de teléfonos): se
-    // conservan mientras sigan en el catálogo. Antes "Actualizar" los
-    // descartaba por categoría/marca y parecía que se quitaban solos.
-    final enCatalogo = {for (final p in catalogoGlobal) p.codigo};
-    for (final it in lista.items) {
-      final c = it.producto.codigo;
-      if (codigosVistos.contains(c) || !enCatalogo.contains(c)) continue;
-      codigosVistos.add(c);
-      it.stockDisponible = stockGlobalDeProducto(it.producto);
-      nuevaListaItems.add(it);
-      preservados++;
-    }
-
-    // Reemplazar la lista — esto AUTOMÁTICAMENTE elimina productos
-    // que ya no están en el catálogo (no se incluyeron en el bucle).
-    final eliminados = lista.items.length - preservados;
-    lista.items
-      ..clear()
-      ..addAll(nuevaListaItems);
-    // Las columnas con función automática mandan sobre el precio por
-    // defecto de los productos recién agregados (y siguen al precio de
-    // venta actual en los que ya estaban).
-    lista.aplicarFormulas();
-
-    debugPrint('[_poblarLista] ${lista.nombre}: '
-        '$preservados preservados, $agregados nuevos, '
-        '$eliminados eliminados, $sinStockOmitidos sin stock omitidos');
-  }
+  void _poblarLista(ListaPrecio lista) => poblarListaDesdeCatalogo(lista);
 
   // ── Diálogo de creación ───────────────────────────────────────
   /// Edita la configuración de una lista existente (nombre, %,
@@ -34318,6 +34662,8 @@ class _VentanaListasPreciosState extends State<VentanaListasPrecios> {
   /// ni los productos ya guardados. Después de guardar, persiste
   /// al backend para que el cambio se vea en todos los dispositivos.
   void _editarLista(ListaPrecio lista) {
+    // Foto antes de tocar nada: al guardar solo viaja lo que se cambió.
+    var base = InstantaneaLista.de(lista);
     final nombreCtrl = TextEditingController(text: lista.nombre);
     final tasaCtrl = TextEditingController(
         text: lista.tasaDelDia.toStringAsFixed(2));
@@ -34336,6 +34682,8 @@ class _VentanaListasPreciosState extends State<VentanaListasPrecios> {
     bool esBs = lista.esEnBolivares;
     bool esFinanc = lista.esFinanciamiento;
     bool tieneCuotas = lista.tieneCuotas;
+    int? listaBaseId = lista.listaBaseId;
+    String vistaBs = lista.vistaBs;
 
     showDialog(context: context, builder: (ctx) => StatefulBuilder(
       builder: (ctx, setDlg) => AlertDialog(
@@ -34386,21 +34734,62 @@ class _VentanaListasPreciosState extends State<VentanaListasPrecios> {
                     border: OutlineInputBorder(),
                     isDense: true),
                 ),
+                // Orden del dueño (19/10/2026): la lista en Bs toma el
+                // precio de una lista en divisas y le suma SU %.
+                const SizedBox(height: 10),
+                selectorListaBase(
+                  molde: lista,
+                  valor: listaBaseId,
+                  onChanged: (v) => setDlg(() => listaBaseId = v),
+                ),
+                // Orden del dueño (23/10/2026): solo el precio BCV, BCV
+                // y Bs, o solo Bs.
+                const SizedBox(height: 10),
+                selectorVistaBs(
+                  valor: vistaBs,
+                  onChanged: (v) => setDlg(() => vistaBs = v),
+                ),
               ],
               const SizedBox(height: 10),
               // ── % adicional ──
               TextField(
                 controller: pctAdicionalCtrl,
                 keyboardType: const TextInputType.numberWithOptions(decimal: true),
-                decoration: const InputDecoration(
+                decoration: InputDecoration(
                   labelText: "% adicional sobre el precio base",
                   hintText: "Ej: 15",
-                  prefixIcon: Icon(Icons.trending_up),
-                  border: OutlineInputBorder(),
+                  prefixIcon: const Icon(Icons.trending_up),
+                  border: const OutlineInputBorder(),
                   isDense: true,
-                  helperText: "Este % se aplica al precio venta. "
-                    "Ejemplo: precio \$100 + 15% = \$115",
+                  helperText: esBs && listaBaseId != null
+                      ? "Este % se aplica al precio de la lista en divisas. "
+                        "Ejemplo: \$100 en divisas + 15% = \$115 × tasa"
+                      : "Este % se aplica al precio venta. "
+                        "Ejemplo: precio \$100 + 15% = \$115",
                   helperMaxLines: 2),
+              ),
+              const SizedBox(height: 8),
+              // Cómo se calculan los precios: a mano (hoy) o desde el
+              // costo, monto fijo, redondeo y % especial por tipo.
+              SizedBox(
+                width: double.infinity,
+                child: OutlinedButton.icon(
+                  icon: Icon(
+                      lista.esModoCosto ? Icons.calculate : Icons.edit_note,
+                      size: 18),
+                  label: Text(
+                      lista.esModoCosto
+                          ? 'Precios: desde el costo (${lista.pctSobreCosto.toStringAsFixed(lista.pctSobreCosto % 1 == 0 ? 0 : 2)} %)'
+                          : 'Precios: a mano · cambiar…',
+                      style: const TextStyle(fontSize: 13)),
+                  onPressed: () async {
+                    final cambio = await mostrarPreciosDeLista(ctx, lista);
+                    if (!cambio || !mounted) return;
+                    base = InstantaneaLista.de(lista);
+                    setState(() {});
+                    setDlg(() {});
+                  },
+                ),
               ),
               const SizedBox(height: 12),
               // ── Toggle financiamiento ──
@@ -34519,7 +34908,8 @@ class _VentanaListasPreciosState extends State<VentanaListasPrecios> {
                       final cambio =
                           await ajustarCondicionesPorMarcaModelo(ctx, lista);
                       if (!cambio) return;
-                      await _guardarListaEnBackend(lista);
+                      await _guardarListaEnBackend(lista, base: base);
+                      base = InstantaneaLista.de(lista);
                       if (!mounted) return;
                       setState(() {});
                       setDlg(() {});
@@ -34607,13 +34997,19 @@ class _VentanaListasPreciosState extends State<VentanaListasPrecios> {
               } else {
                 lista.financiadora = null;
               }
+              // Lista en Bs con lista base: se recalcula ya con la base,
+              // su % y la tasa (los ✎ no se tocan).
+              lista.listaBaseId = esBs ? listaBaseId : null;
+              lista.vistaBs = esBs ? vistaBs : 'bs';
+              final recalculados = seguirListaBase(lista);
               Navigator.pop(ctx);
               // Persistir el cambio al backend (multidispositivo)
-              await _guardarListaEnBackend(lista);
+              await _guardarListaEnBackend(lista, base: base);
               if (mounted) {
                 setState(() {});
                 ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-                  content: Text("Lista \"${lista.nombre}\" actualizada"),
+                  content: Text("Lista \"${lista.nombre}\" actualizada"
+                      "${recalculados > 0 ? ' · $recalculados precio(s) recalculados desde «${listaBaseDe(lista)?.nombre ?? ''}»' : ''}"),
                   backgroundColor: AppColors.statusGreen));
               }
             },
@@ -34637,6 +35033,8 @@ class _VentanaListasPreciosState extends State<VentanaListasPrecios> {
     bool esBs           = false;
     bool esFinanc       = false;  // ¿Es lista de financiamiento?
     bool tieneCuotas    = true;   // ¿La financiadora maneja cuotas?
+    int? listaBaseId;             // Lista en Bs: lista en divisas de la que toma precios
+    String vistaBs = 'bs';        // Lista en Bs: solo Bs, solo BCV o BCV + Bs
 
     List<String> _marcasDisponibles(String cat) {
       final marcas = catalogoGlobal
@@ -34733,6 +35131,24 @@ class _VentanaListasPreciosState extends State<VentanaListasPrecios> {
                       helperText: TasaBCVScheduler.ultimaTasa != null
                           ? "BCV hoy: ${TasaBCVScheduler.ultimaTasa!.valorFormateado}"
                           : null),
+                  ),
+                  const SizedBox(height: 12),
+                  selectorListaBase(
+                    molde: ListaPrecio(
+                        nombre: '',
+                        fechaCreacion: '',
+                        categoria: categoria,
+                        marcaFiltro: marcaFiltro,
+                        esEnBolivares: true,
+                        esFinanciamiento: esFinanc,
+                        financiadora: financiadoraCtrl.text.trim()),
+                    valor: listaBaseId,
+                    onChanged: (v) => setDlg(() => listaBaseId = v),
+                  ),
+                  const SizedBox(height: 10),
+                  selectorVistaBs(
+                    valor: vistaBs,
+                    onChanged: (v) => setDlg(() => vistaBs = v),
                   ),
                 ],
                 const SizedBox(height: 14),
@@ -35015,6 +35431,8 @@ class _VentanaListasPreciosState extends State<VentanaListasPrecios> {
                     porcentajeComisionWeppa: pctComisionWeppa,
                     porcentajeRecargoCuotas: pctRecargoCuotas,
                     tieneCuotas: esFinanc ? tieneCuotas : true,
+                    listaBaseId: esBs ? listaBaseId : null,
+                    vistaBs: esBs ? vistaBs : 'bs',
                     columnas: [ColumnaPrecio(nombre: "Precio")],
                   );
                   _poblarLista(nueva);
@@ -35075,11 +35493,10 @@ class _VentanaListasPreciosState extends State<VentanaListasPrecios> {
 
   @override
   Widget build(BuildContext context) {
-    // Administrador, Dueño y Maestro pueden editar listas y crear/eliminar.
-    // Los demás roles ven la lista en modo lectura.
-    final esAdmin = (usuarioSesion?.rol == "Administrador" ||
-                     usuarioSesion?.rol == "Dueño" ||
-                     usuarioSesion?.rol == "Maestro");
+    // Dueño, Administrador, Gerente y Maestro pueden editar listas y
+    // crear/eliminar (un solo sitio: puedeGestionarListasPrecios). Los
+    // demás roles ven la lista en modo lectura.
+    final esAdmin = puedeGestionarListasPrecios();
     return Scaffold(
       appBar: AppBar(
         title: const Text("Listas de Precios"),
@@ -35110,7 +35527,7 @@ class _VentanaListasPreciosState extends State<VentanaListasPrecios> {
                     title: Text(lista.nombre, style: const TextStyle(fontWeight: FontWeight.bold)),
                     subtitle: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
                       Text("${lista.categoria} · ${lista.marcaFiltro == 'Todas' ? 'Todas las marcas' : lista.marcaFiltro}"),
-                      Text("${lista.itemsConStock.length} con stock · ${lista.esEnBolivares ? 'Bs (tasa ${lista.tasaDelDia.toStringAsFixed(2)})' : '\$ Divisas'} · ${lista.fechaCreacion}",
+                      Text("${lista.itemsConStock.length} con stock · ${lista.esEnBolivares ? '${lista.etiquetaVista} (tasa ${lista.tasaDelDia.toStringAsFixed(2)})' : '\$ Divisas'} · ${lista.fechaCreacion}",
                         style: const TextStyle(fontSize: 11, color: Colors.grey)),
                     ]),
                     trailing: Row(mainAxisSize: MainAxisSize.min, children: [
@@ -35173,7 +35590,7 @@ class _VentanaListasPreciosState extends State<VentanaListasPrecios> {
                   ),
                 );
               }),
-      floatingActionButton: FloatingActionButton.extended(
+      floatingActionButton: !esAdmin ? null : FloatingActionButton.extended(
         backgroundColor: AppColors.primaryBlue,
         icon: const Icon(Icons.add_chart, color: Colors.white),
         label: const Text("Nueva Lista", style: TextStyle(color: Colors.white)),
@@ -35276,11 +35693,11 @@ Future<bool> ajustarCondicionesPorMarcaModelo(
             Container(
               padding: const EdgeInsets.all(16),
               decoration: const BoxDecoration(
-                color: AppColors.royalBlue,
+                color: AppColors.lilaTenue,
                 borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
               ),
               child: Row(children: [
-                const Icon(Icons.tune, color: Colors.white),
+                const Icon(Icons.tune, color: AppColors.azulVivo),
                 const SizedBox(width: 10),
                 Expanded(
                   child: Column(
@@ -35288,7 +35705,7 @@ Future<bool> ajustarCondicionesPorMarcaModelo(
                       children: [
                         const Text('Inicial y cuotas por marca o modelo',
                             style: TextStyle(
-                                color: Colors.white,
+                                color: AppColors.textPrimary,
                                 fontSize: 16,
                                 fontWeight: FontWeight.bold)),
                         Text(
@@ -35297,11 +35714,11 @@ Future<bool> ajustarCondicionesPorMarcaModelo(
                             'inicial'
                             '${lista.tieneCuotas ? " · ${lista.numeroCuotas} cuotas" : ""}',
                             style: const TextStyle(
-                                color: Colors.white70, fontSize: 11)),
+                                color: AppColors.textSecondary, fontSize: 11)),
                       ]),
                 ),
                 IconButton(
-                  icon: const Icon(Icons.close, color: Colors.white),
+                  icon: const Icon(Icons.close, color: AppColors.textSecondary),
                   onPressed: () => Navigator.pop(ctx, false),
                 ),
               ]),
@@ -35581,9 +35998,37 @@ class _DetalleListaPrecioState extends State<DetalleListaPrecio> {
   /// vea los cambios hechos por otros dispositivos.
   Timer? _timerSyncDetalle;
 
+  // ── Guardado sin pérdidas (Brizuela 1.0.38 / 70097cb) ──────────
+  /// Versión del servidor sobre la que trabaja esta pantalla: al guardar
+  /// solo viaja lo que se cambió respecto de ella.
+  late InstantaneaLista _base;
+
+  /// Lo que muestra el indicador de la barra superior.
+  EstadoGuardado _estadoGuardado = EstadoGuardado.limpio;
+
+  /// Llegó una edición mientras otra escritura estaba en vuelo: se manda
+  /// en cuanto termine (antes se perdía).
+  bool _reenvioPendiente = false;
+
+  /// Fallos seguidos del guardado: al primero se reintenta solo a los 3 s.
+  int _intentosFallidos = 0;
+
+  /// Marca `actualizado_en` conocida (sondeo barato) y sondeos sin refrescar.
+  String _ultimaMarcaServidor = '';
+  int _sondeosSinRefresco = 0;
+
+  /// ¿Hay algo sin confirmar en el servidor?
+  bool get _hayCambiosSinGuardar =>
+      _estadoGuardado == EstadoGuardado.pendiente ||
+      _estadoGuardado == EstadoGuardado.error ||
+      (_debouncePersistir?.isActive ?? false) ||
+      _reenvioPendiente ||
+      _guardandoBackend;
+
   @override
   void initState() {
     super.initState();
+    _base = InstantaneaLista.de(widget.lista);
     _iniciarSincronizacion();
     // AUTOPOBLAR si la lista entró vacía. Antes el usuario tenía que
     // hacer clic en "Poblar automáticamente" cada vez que abría una
@@ -35609,6 +36054,12 @@ class _DetalleListaPrecioState extends State<DetalleListaPrecio> {
       if (!mounted) return;
       refrescarProductosDeLista(widget.lista);
       setState(() => _cargandoStock = false);
+      // Listas guardadas antes de `es_manual`: las celdas que no tienen el
+      // precio por defecto se marcan como fijadas a mano (una sola vez).
+      if (puedeGestionarListasPrecios() &&
+          migrarMarcasManuales(widget.lista) > 0) {
+        _persistirLista();
+      }
       // Aplicar las funciones automaticas con los datos ya cargados
       if (widget.lista.items.isNotEmpty && widget.lista.tieneFormulas) {
         final n = widget.lista.aplicarFormulas();
@@ -35620,6 +36071,12 @@ class _DetalleListaPrecioState extends State<DetalleListaPrecio> {
       if (widget.lista.items.isEmpty &&
           widget.lista.columnas.isNotEmpty) {
         _autoPoblar();
+      } else if (listaBaseDe(widget.lista) != null) {
+        // Lista en Bs con lista base en divisas (orden del dueño
+        // 19/10/2026): se pone al día con su base y con la tasa.
+        var n = 0;
+        setState(() => n = seguirListaBase(widget.lista));
+        if (n > 0) _persistirLista();
       } else if (widget.lista.esEnBolivares) {
         // ── DETECCIÓN DE TASA DESACTUALIZADA ──
         // Si la lista está en Bs y su tasaDelDia es DIFERENTE a la
@@ -35639,6 +36096,8 @@ class _DetalleListaPrecioState extends State<DetalleListaPrecio> {
   void _refrescarPreciosAutomaticosSiTasaCambio() {
     final lista = widget.lista;
     if (!lista.esEnBolivares) return;
+    // En modo costo la tasa y los precios en Bs los pone el servidor.
+    if (lista.esModoCosto) return;
     final tasaSistema = ConfigSistema.tasaCambio;
     if (tasaSistema <= 0) return;
     final tasaLista = lista.tasaDelDia;
@@ -35707,79 +36166,10 @@ class _DetalleListaPrecioState extends State<DetalleListaPrecio> {
   /// Se llama automáticamente al abrir una lista vacía y manualmente
   /// desde el botón "Repoblar" si el admin quiere forzar refresh.
   void _autoPoblar() {
-    final lista = widget.lista;
-    final tasa = lista.esEnBolivares
-        ? (ConfigSistema.tasaCambio > 0
-            ? ConfigSistema.tasaCambio
-            : lista.tasaDelDia)
-        : 1.0;
-    final factorAdicional = 1 + (lista.porcentajeAdicional / 100);
-
-    // Filtrar productos del catálogo según categoría y marca
-    final filtrados = catalogoGlobal.where((p) {
-      if (p.esSubproducto) return false; // solo productos padre
-      final catOk = lista.categoria == "Todos" ||
-          p.categoria == lista.categoria;
-      final marcaOk = lista.marcaFiltro == "Todas" ||
-          p.marca.toLowerCase() == lista.marcaFiltro.toLowerCase();
-      return catOk && marcaOk;
-    }).toList();
-
-    // Ordenar por marca → modelo
-    filtrados.sort((a, b) {
-      final m = a.marca.toLowerCase().compareTo(b.marca.toLowerCase());
-      return m != 0
-          ? m
-          : a.nombre.toLowerCase().compareTo(b.nombre.toLowerCase());
-    });
-
-    setState(() {
-      lista.items.clear();
-      bool _debugFirst = true;
-      // Una fila por tienda del mismo código en el catálogo: el
-      // producto entra una sola vez.
-      final vistos = <String>{};
-      for (final p in filtrados) {
-        if (!vistos.add(p.codigo)) continue;
-        // Stock global: todas las tiendas + variantes.
-        final stock = stockGlobalDeProducto(p);
-        // Las listas sólo ofrecen productos con existencia: los
-        // agotados no se agregan. Cuando vuelvan a tener stock entran
-        // con "Actualizar" desde la pantalla de listas.
-        if (stock <= 0) continue;
-        // ── CÁLCULO EXACTO DE PRECIO ──
-        // 1) Aplicar el % adicional al precio USD y redondear a 2 dec.
-        //    Esto fija el precio en USD ANTES de convertir, así no
-        //    arrastramos decimales fantasma al hacer la conversión.
-        // 2) Si es lista en Bs, multiplicar por la tasa y redondear
-        //    nuevamente a 2 decimales.
-        final precioUsdConMargen = redondearPrecio(p.precioVenta * factorAdicional);
-        final precioBase = lista.esEnBolivares
-            ? redondearPrecio(precioUsdConMargen * tasa)
-            : precioUsdConMargen;
-        // ── Debug del primer producto (para verificar conversión) ──
-        if (_debugFirst) {
-          debugPrint('[Lista ${lista.nombre}] Producto: ${p.nombre}');
-          debugPrint('  precioVenta (USD): ${p.precioVenta}');
-          debugPrint('  %adicional: ${lista.porcentajeAdicional}');
-          debugPrint('  factorAdicional: $factorAdicional');
-          debugPrint('  precioUsdConMargen: $precioUsdConMargen');
-          debugPrint('  esEnBolivares: ${lista.esEnBolivares}, tasa: $tasa');
-          debugPrint('  precioBase (final): $precioBase');
-          _debugFirst = false;
-        }
-        lista.items.add(ItemListaPrecio(
-          producto: p,
-          stockDisponible: stock,
-          preciosPorColumna: {
-            for (var col in lista.columnas) col.nombre: precioBase
-          },
-        ));
-      }
-      // Las columnas con funcion mandan sobre el precio automatico:
-      // se recalculan encima de lo que acabamos de poblar.
-      lista.aplicarFormulas();
-    });
+    // Una sola implementación del repoblado (poblarListaDesdeCatalogo):
+    // conserva precios, marcas y lo agregado a mano. Antes acá se
+    // vaciaba la lista (items.clear()) y se perdía todo eso.
+    setState(() => poblarListaDesdeCatalogo(widget.lista));
     // Persistir al backend después de poblar
     _persistirLista();
   }
@@ -35810,172 +36200,79 @@ class _DetalleListaPrecioState extends State<DetalleListaPrecio> {
     });
   }
 
-  /// Sincroniza la lista actual con el backend para que el usuario
-  /// vea cambios hechos por OTROS dispositivos en tiempo real.
-  ///
-  /// Reglas de seguridad para NO sobrescribir cambios del usuario:
-  ///   1. Si el usuario hizo un cambio en los últimos 8 segundos, NO
-  ///      sincroniza — sus ediciones podrían estar pendientes de envío.
-  ///   2. Si el debounce de persistencia está activo (cambio sin
-  ///      enviar), NO sincroniza.
-  ///   3. Si el servidor está guardando ahora mismo, NO sincroniza.
-  Future<void> _sincronizarConBackend() async {
-    if (!mounted) return;
-    if (_guardandoBackend) return;
+  /// ¿Puede correr ahora el refresco automático? (los tres candados)
+  bool get _refrescoPermitido {
+    if (_guardandoBackend) return false;
     // Con el selector de productos abierto no se trae nada del
     // servidor: pisaría los productos recién agregados.
-    if (_selectorAbierto) return;
-    if (_debouncePersistir?.isActive ?? false) return;
+    if (_selectorAbierto) return false;
+    if (_debouncePersistir?.isActive ?? false) return false;
+    if (_reenvioPendiente) return false;
     // Margen de 8s después de la última edición local
     if (DateTime.now().difference(_ultimaEdicionLocal).inSeconds < 8) {
-      return;
+      return false;
     }
-    if (widget.lista.id == null) return;
+    return widget.lista.id != null;
+  }
+
+  /// Sincroniza la lista con lo que guardaron OTROS dispositivos.
+  ///
+  /// Sondeo barato (Brizuela): pregunta solo `actualizado_en` y trae la
+  /// lista entera únicamente si esa marca cambió (cada 4 sondeos se trae
+  /// igual, por si hubo dos guardados en el mismo segundo). Sin la marca
+  /// en el servidor, refresco completo como antes.
+  Future<void> _sincronizarConBackend() async {
+    if (!mounted || !_refrescoPermitido) return;
     try {
-      final raw = await _Api.get('listas_precios');
-      if (raw is! List) return;
-      // Encontrar la versión del servidor de NUESTRA lista
-      final mServidor = raw.firstWhere(
-          (m) => m is Map && '${m['id']}' == '${widget.lista.id}',
-          orElse: () => null);
-      if (mServidor is! Map) return;
-      // Comparar precios/items para ver si hay diferencias
-      final hashServidor = _hashContenido(mServidor);
-      final hashLocal = _hashListaLocal();
-      if (hashServidor == hashLocal) return; // sin cambios
-      // ¡Hay cambios! Recargar la lista desde el servidor
-      final nueva = ListaPrecio.fromMap(
-          Map<String, dynamic>.from(mServidor));
-      if (!mounted) return;
-      // ── COLUMNAS: nunca se pierden las locales ──────────────
-      // Si el servidor devuelve MENOS columnas de las que hay aca (o
-      // sin su funcion), es porque todavia no habia guardado la
-      // columna recien creada. En ese caso conservamos las locales y
-      // volvemos a mandarlas; antes el polling las borraba a los 15
-      // segundos y parecia que el sistema "no dejaba" agregar columnas.
-      final nombresServidor =
-          nueva.columnas.map((c) => c.nombre.toLowerCase()).toSet();
-      final columnasSoloLocales = widget.lista.columnas
-          .where((c) => !nombresServidor.contains(c.nombre.toLowerCase()))
-          .toList();
-      // Funciones locales, para reponerlas si el servidor no las guardo
-      final formulasLocales = {
-        for (final c in widget.lista.columnas)
-          c.nombre.toLowerCase(): c.formula
-      };
-      for (final c in nueva.columnas) {
-        if (c.formula.esManual) {
-          final local = formulasLocales[c.nombre.toLowerCase()];
-          if (local != null && !local.esManual) c.formula = local;
-        }
+      String marca = '';
+      try {
+        marca = (await leerMarcasListas(id: widget.lista.id))[widget.lista.id] ?? '';
+      } catch (_) {/* backend viejo: refresco completo */}
+      if (marca.isNotEmpty) {
+        if (marca == _ultimaMarcaServidor && ++_sondeosSinRefresco < 4) return;
+        _sondeosSinRefresco = 0;
       }
-      if (!mounted) return;
-      setState(() {
-        // Actualizar TODOS los campos in-place (sin reasignar
-        // widget.lista que es final)
-        widget.lista.nombre = nueva.nombre;
-        widget.lista.porcentajeAdicional = nueva.porcentajeAdicional;
-        widget.lista.porcentajeInicial = nueva.porcentajeInicial;
-        widget.lista.porcentajeRecargoCuotas = nueva.porcentajeRecargoCuotas;
-        widget.lista.numeroCuotas = nueva.numeroCuotas;
-        widget.lista.tieneCuotas = nueva.tieneCuotas;
-        widget.lista.financiadora = nueva.financiadora;
-        widget.lista.tasaDelDia = nueva.tasaDelDia;
-        widget.lista.esEnBolivares = nueva.esEnBolivares;
-        widget.lista.esFinanciamiento = nueva.esFinanciamiento;
-        widget.lista.columnas
-          ..clear()
-          ..addAll(nueva.columnas)
-          ..addAll(columnasSoloLocales);
-        widget.lista.items
-          ..clear()
-          ..addAll(nueva.items);
-        // Las columnas que el servidor todavia no conoce necesitan su
-        // precio en cada item recien traido.
-        for (final col in columnasSoloLocales) {
-          for (final it in widget.lista.items) {
-            if (it.preciosPorColumna.containsKey(col.nombre)) continue;
-            final calculado = widget.lista.calcularColumna(col, it);
-            it.preciosPorColumna[col.nombre] = calculado ??
-                (it.preciosPorColumna.values.isNotEmpty
-                    ? it.preciosPorColumna.values.first
-                    : it.producto.precioVenta);
-          }
-        }
-        // Recalcular lo que tenga funcion automatica con los datos
-        // nuevos que acaban de llegar.
-        widget.lista.aplicarFormulas();
-      });
-      // Reponer en el servidor lo que le faltaba
-      if (columnasSoloLocales.isNotEmpty) _persistirLista();
-      // Notificación discreta al usuario
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-          content: Text('Lista actualizada (cambios de otro usuario)'),
-          backgroundColor: AppColors.primaryBlue,
-          duration: Duration(seconds: 2),
-        ));
-      }
+      await _refrescarDesdeServidor(marca);
     } catch (e) {
       debugPrint('[DetalleLista] Error sincronizando: $e');
     }
   }
 
-  /// Hash del contenido de un mapa de lista (para comparar versiones)
-  String _hashContenido(Map m) {
-    final sb = StringBuffer();
-    sb
-      ..write(m['porcentaje_adicional'])..write('|')
-      ..write(m['porcentaje_inicial'])..write('|')
-      ..write(m['porcentaje_recargo_cuotas'])..write('|')
-      ..write(m['numero_cuotas'])..write('|')
-      ..write(m['tiene_cuotas'])..write('|');
-    if (m['items'] is List) {
-      for (final it in (m['items'] as List)) {
-        if (it is! Map) continue;
-        sb..write(it['producto_codigo'])..write(':');
-        if (it['valores'] is List) {
-          for (final v in (it['valores'] as List)) {
-            if (v is! Map) continue;
-            sb..write(v['columna_nombre'])..write('=')..write(v['precio'])..write(',');
-          }
-        }
-        sb.write(';');
-      }
+  /// Trae la versión del servidor y la muestra fusionada con lo que este
+  /// equipo tenga sin confirmar (nada local se pierde). Una respuesta sin
+  /// productos para una lista que los tenía se descarta.
+  Future<void> _refrescarDesdeServidor(String marca) async {
+    if (!_refrescoPermitido) return;
+    final ListaPrecio nueva;
+    try {
+      nueva = await leerListaDelServidor(widget.lista.id!,
+          conocidaTeniaProductos: widget.lista.items.isNotEmpty);
+    } catch (e) {
+      debugPrint('[DetalleLista] refresco descartado: $e');
+      return;
     }
-    return sb.toString();
-  }
-
-  /// Hash del contenido LOCAL (para comparar con el servidor)
-  String _hashListaLocal() {
-    final l = widget.lista;
-    final sb = StringBuffer();
-    sb
-      ..write(l.porcentajeAdicional)..write('|')
-      ..write(l.porcentajeInicial)..write('|')
-      ..write(l.porcentajeRecargoCuotas)..write('|')
-      ..write(l.numeroCuotas)..write('|')
-      ..write(l.tieneCuotas ? 1 : 0)..write('|');
-    for (final it in l.items) {
-      sb..write(it.producto.codigo)..write(':');
-      it.preciosPorColumna.forEach((k, v) {
-        sb..write(k)..write('=')..write(v)..write(',');
-      });
-      if (it.inicialManual != null) {
-        sb..write('__inicial_manual__=')..write(it.inicialManual)..write(',');
-      }
-      if (it.pctInicialOverride != null) {
-        sb..write('__pct_inicial__=')..write(it.pctInicialOverride)..write(',');
-      }
-      if (it.cuotasOverride != null) {
-        sb..write('__n_cuotas__=')..write(it.cuotasOverride)..write(',');
-      }
-      if (it.cuotaManual != null) {
-        sb..write('__cuota_manual__=')..write(it.cuotaManual)..write(',');
-      }
-      sb.write(';');
+    // Los candados otra vez: en el viaje de red el usuario pudo editar.
+    if (!mounted || !_refrescoPermitido) return;
+    _ultimaMarcaServidor = marca;
+    final remota = InstantaneaLista.de(nueva);
+    final local = InstantaneaLista.de(widget.lista);
+    if (remota.mismoContenido(_base)) return; // nada nuevo en el servidor
+    final vista =
+        InstantaneaLista.fusionar(local: local, base: _base, remota: remota);
+    _base = remota;
+    setState(() {
+      widget.lista.adoptar(vista.aLista());
+      refrescarProductosDeLista(widget.lista);
+      // Lo que tenga función automática se recalcula con lo que llegó.
+      widget.lista.aplicarFormulas();
+    });
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+        content: Text('Lista actualizada (cambios de otro usuario)'),
+        backgroundColor: AppColors.primaryBlue,
+        duration: Duration(seconds: 2),
+      ));
     }
-    return sb.toString();
   }
 
   /// Persiste TODA la lista actual al backend para que los cambios
@@ -35991,61 +36288,241 @@ class _DetalleListaPrecioState extends State<DetalleListaPrecio> {
     // Marcar la última edición local para que el polling no
     // sobrescriba durante los próximos 8 segundos.
     _ultimaEdicionLocal = DateTime.now();
+    if (mounted) setState(() => _estadoGuardado = EstadoGuardado.pendiente);
     _debouncePersistir?.cancel();
-    _debouncePersistir = Timer(const Duration(milliseconds: 600), () async {
-      if (!mounted) return;
-      setState(() => _guardandoBackend = true);
-      try {
-        if (widget.lista.id == null) {
-          // La lista todavia no existe en el servidor: la creamos.
-          // Antes se salia sin guardar y el usuario perdia todo lo que
-          // habia hecho (columnas nuevas incluidas).
-          final resp = await _Api.post('listas_precios', widget.lista.toMap());
-          if (resp is Map && resp['id'] != null) {
-            widget.lista.id = resp['id'] is int
-                ? resp['id'] as int
-                : int.tryParse(resp['id'].toString());
-          }
-        } else {
-          await _Api.put(
-              'listas_precios',
-              widget.lista.id.toString(),
-              widget.lista.toMap());
+    _debouncePersistir =
+        Timer(const Duration(milliseconds: 600), () => _guardarAhora());
+  }
+
+  /// Manda YA lo pendiente (fusión sobre la versión actual del servidor).
+  ///
+  /// Ninguna edición se pierde: si hay otra escritura en vuelo, esta se
+  /// encola y sale al terminar; si falla, se reintenta sola a los 3 s y,
+  /// si vuelve a fallar, queda el aviso con REINTENTAR y el indicador en
+  /// «Sin guardar» (los cambios siguen en este equipo).
+  Future<void> _guardarAhora() async {
+    _debouncePersistir?.cancel();
+    if (!mounted) return;
+    if (_guardandoBackend) {
+      _reenvioPendiente = true;
+      return;
+    }
+    setState(() {
+      _guardandoBackend = true;
+      _estadoGuardado = EstadoGuardado.guardando;
+    });
+    try {
+      if (widget.lista.id == null) {
+        // La lista todavia no existe en el servidor: la creamos.
+        final resp = await _Api.post('listas_precios', widget.lista.toMap());
+        if (resp is Map && resp['id'] != null) {
+          widget.lista.id = resp['id'] is int
+              ? resp['id'] as int
+              : int.tryParse(resp['id'].toString());
         }
-        debugPrint('[ListaPrecio] ✓ Persistida en backend '
-            '(id=${widget.lista.id})');
-        // Reset de la marca de edición — la persistencia ya terminó
-        _ultimaEdicionLocal = DateTime.now();
-      } catch (e) {
-        debugPrint('[ListaPrecio] Error persistiendo: $e');
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        if (widget.lista.id == null) {
+          throw Exception('El servidor no devolvió el id de la lista');
+        }
+        _base = InstantaneaLista.de(widget.lista);
+      } else {
+        // Foto de lo que se manda, ANTES de salir a la red: el usuario
+        // puede seguir editando mientras tanto.
+        final enviado = InstantaneaLista.de(widget.lista);
+        final guardado = await guardarListaFusionando(
+            id: widget.lista.id!, local: enviado, base: _base);
+        _base = guardado;
+        // Lo guardado (con lo de otros equipos) + lo editado durante el
+        // guardado, que sigue pendiente y sale en el reenvío.
+        final vista = InstantaneaLista.fusionar(
+            local: InstantaneaLista.de(widget.lista),
+            base: enviado,
+            remota: guardado);
+        if (mounted) setState(() => widget.lista.adoptar(vista.aLista()));
+      }
+      debugPrint('[ListaPrecio] ✓ Persistida en backend '
+          '(id=${widget.lista.id})');
+      // Lista en divisas: las listas en Bs que toman sus precios de ella
+      // se ponen al día (sin esperar: no frena el guardado).
+      if (!widget.lista.esEnBolivares) {
+        unawaited(actualizarListasBsDeBase(widget.lista));
+      }
+      _intentosFallidos = 0;
+      _ultimaMarcaServidor = '';
+      _ultimaEdicionLocal = DateTime.now();
+      if (mounted) setState(() => _estadoGuardado = EstadoGuardado.guardado);
+    } catch (e) {
+      _intentosFallidos++;
+      debugPrint('[ListaPrecio] Error persistiendo '
+          '(intento $_intentosFallidos): $e');
+      if (mounted) setState(() => _estadoGuardado = EstadoGuardado.error);
+      if (_intentosFallidos < 2) {
+        Timer(const Duration(seconds: 3), () {
+          if (mounted) _guardarAhora();
+        });
+      } else if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
             content: Row(children: [
               const Icon(Icons.warning, color: Colors.white, size: 18),
               const SizedBox(width: 8),
               Expanded(child: Text(
-                  'No se pudo guardar en el servidor. '
-                  'Verifica tu conexión. Detalle: $e')),
+                  'No se pudo guardar en el servidor. Los cambios siguen '
+                  'en este equipo. Detalle: $e')),
             ]),
             backgroundColor: Colors.orange,
-            duration: const Duration(seconds: 4),
+            duration: const Duration(seconds: 8),
             action: SnackBarAction(
               label: 'REINTENTAR',
               textColor: Colors.white,
-              onPressed: _persistirLista,
+              onPressed: () {
+                _intentosFallidos = 0;
+                _guardarAhora();
+              },
             )));
-        }
-      } finally {
-        if (mounted) setState(() => _guardandoBackend = false);
       }
-    });
+    } finally {
+      if (mounted) setState(() => _guardandoBackend = false);
+      if (_reenvioPendiente && mounted) {
+        _reenvioPendiente = false;
+        _guardarAhora();
+      }
+    }
+  }
+
+  /// Chip de estado del guardado (Pendiente · Guardando… · Guardado ·
+  /// Sin guardar). Tocarlo fuerza el envío.
+  Widget _indicadorGuardado() {
+    IconData icono;
+    Color color;
+    String texto;
+    switch (_estadoGuardado) {
+      case EstadoGuardado.limpio:
+        return const SizedBox.shrink();
+      case EstadoGuardado.pendiente:
+        icono = Icons.schedule;
+        color = AppColors.statusYellow;
+        texto = 'Pendiente';
+        break;
+      case EstadoGuardado.guardando:
+        icono = Icons.cloud_upload_outlined;
+        color = Colors.white;
+        texto = 'Guardando…';
+        break;
+      case EstadoGuardado.guardado:
+        icono = Icons.cloud_done_outlined;
+        color = AppColors.statusGreen;
+        texto = 'Guardado';
+        break;
+      case EstadoGuardado.error:
+        icono = Icons.cloud_off_outlined;
+        color = AppColors.statusRed;
+        texto = 'Sin guardar';
+        break;
+    }
+    return Center(
+        child: Padding(
+            padding: const EdgeInsets.only(right: 4),
+            child: InkWell(
+                onTap: _estadoGuardado == EstadoGuardado.guardando
+                    ? null
+                    : _guardarAhora,
+                borderRadius: BorderRadius.circular(12),
+                child: Container(
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                    decoration: BoxDecoration(
+                        color: color.withValues(alpha: 0.18),
+                        borderRadius: BorderRadius.circular(12)),
+                    child: Row(mainAxisSize: MainAxisSize.min, children: [
+                      Icon(icono, size: 14, color: color),
+                      const SizedBox(width: 4),
+                      Text(texto,
+                          style: TextStyle(
+                              fontSize: 10,
+                              fontWeight: FontWeight.bold,
+                              color: color)),
+                    ])))));
+  }
+
+  /// No se sale con cambios sin confirmar: se espera al guardado y, si
+  /// falla, se pregunta antes de perderlos.
+  Future<bool> _confirmarSalida() async {
+    if (!_hayCambiosSinGuardar) return true;
+    // Esperar a que termine un guardado en vuelo.
+    for (var i = 0; i < 60 && _guardandoBackend; i++) {
+      await Future.delayed(const Duration(milliseconds: 250));
+    }
+    if (_hayCambiosSinGuardar) await _guardarAhora();
+    for (var i = 0; i < 60 && _guardandoBackend; i++) {
+      await Future.delayed(const Duration(milliseconds: 250));
+    }
+    if (_estadoGuardado != EstadoGuardado.error || !mounted) return true;
+    final salir = await showDialog<bool>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+                title: const Text('Cambios sin guardar'),
+                content: const Text(
+                    'No se pudieron guardar los últimos cambios en el '
+                    'servidor. Si sales ahora, se pierden.\n\n'
+                    '¿Reintentar el guardado?'),
+                actions: [
+                  TextButton(
+                      onPressed: () => Navigator.pop(ctx, true),
+                      child: const Text('SALIR IGUAL')),
+                  ElevatedButton(
+                      onPressed: () => Navigator.pop(ctx, false),
+                      child: const Text('REINTENTAR')),
+                ]));
+    if (salir == true) return true;
+    _intentosFallidos = 0;
+    await _guardarAhora();
+    return _estadoGuardado != EstadoGuardado.error;
+  }
+
+  /// La lista está en modo costo: sus precios no se escriben a mano.
+  bool _bloqueadaPorCosto() {
+    if (!widget.lista.esModoCosto) return false;
+    ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+        content: Text('Esta lista calcula sus precios desde el costo: '
+            'no se editan a mano. Toca un precio para ver de dónde sale.'),
+        backgroundColor: AppColors.primaryBlue));
+    return true;
+  }
+
+  /// Recalcular precios (respetando o no las celdas fijadas a mano).
+  Future<void> _recalcularPreciosLista() async {
+    if (_bloqueadaPorCosto()) return;
+    final opcion = await preguntarRecalcularPrecios(context, widget.lista);
+    if (opcion == null || !mounted) return;
+    var n = 0;
+    setState(() => n =
+        widget.lista.recalcularPrecios(respetarManuales: opcion == 'respetar'));
+    _persistirLista();
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: Text('$n precio${n == 1 ? "" : "s"} recalculado'
+            '${n == 1 ? "" : "s"}'),
+        backgroundColor: AppColors.statusGreen));
   }
 
   @override
   void dispose() {
+    final pendiente = _debouncePersistir?.isActive ?? false;
     _searchCtrl.dispose();
     _debouncePersistir?.cancel();
     _timerSyncDetalle?.cancel();
+    // Última red de seguridad (la salida normal pasa por _confirmarSalida):
+    // directo contra la API, sin setState.
+    if ((pendiente || _estadoGuardado == EstadoGuardado.error ||
+            _reenvioPendiente) &&
+        widget.lista.id != null) {
+      guardarListaFusionando(
+        id: widget.lista.id!,
+        local: InstantaneaLista.de(widget.lista),
+        base: _base,
+      ).catchError((e) {
+        debugPrint('[DetalleListaPrecio] guardado final fallido: $e');
+        return _base;
+      });
+    }
     super.dispose();
   }
 
@@ -36058,6 +36535,7 @@ class _DetalleListaPrecioState extends State<DetalleListaPrecio> {
       {bool incluirAgotados = false}) {
     final mapa = <String, List<ItemListaPrecio>>{};
     final filtrados = widget.lista.items.where((it) =>
+      !it.fueraDeCatalogo &&
       (incluirAgotados || stockVivoDeItem(it) > 0) &&
       (_busqueda.isEmpty ||
       it.producto.nombre.toLowerCase().contains(_busqueda.toLowerCase()) ||
@@ -36903,6 +37381,10 @@ class _DetalleListaPrecioState extends State<DetalleListaPrecio> {
         if (it.preciosPorColumna.containsKey(viejo)) {
           it.preciosPorColumna[nuevo] = it.preciosPorColumna.remove(viejo)!;
         }
+        if (it.esManual(viejo)) {
+          it.marcarManual(viejo, manual: false);
+          it.marcarManual(nuevo);
+        }
       }
       for (final c in widget.lista.columnas) {
         if (c.formula.columnaOrigen == viejo) c.formula.columnaOrigen = nuevo;
@@ -36950,12 +37432,9 @@ class _DetalleListaPrecioState extends State<DetalleListaPrecio> {
       ),
     );
     if (ok != true || !mounted) return;
-    setState(() {
-      widget.lista.columnas.removeWhere((c) => c.nombre == col.nombre);
-      for (final it in widget.lista.items) {
-        it.preciosPorColumna.remove(col.nombre);
-      }
-    });
+    // Precios, marcas de manual y fórmulas que la usaban quedan
+    // coherentes (esas fórmulas pasan a manual y conservan sus precios).
+    setState(() => eliminarColumnaDeLista(widget.lista, col.nombre));
     _persistirLista();
     _guardarFormulasEnCache();
   }
@@ -37025,16 +37504,12 @@ class _DetalleListaPrecioState extends State<DetalleListaPrecio> {
         ]),
         duration: Duration(seconds: 10)));
     try {
-      if (widget.lista.id != null) {
-        await _Api.put('listas_precios', widget.lista.id.toString(),
-            widget.lista.toMap());
-      } else {
-        final resp = await _Api.post('listas_precios', widget.lista.toMap());
-        if (resp is Map && resp['id'] != null) {
-          widget.lista.id = resp['id'] is int
-              ? resp['id']
-              : int.tryParse(resp['id'].toString());
-        }
+      // Mismo camino que el guardado automático (fusión, sin pisar a los
+      // demás equipos).
+      _intentosFallidos = 1; // sin reintento automático: el aviso es acá
+      await _guardarAhora();
+      if (_estadoGuardado == EstadoGuardado.error) {
+        throw Exception('revisa la conexión');
       }
       if (!mounted) return;
       ScaffoldMessenger.of(context).hideCurrentSnackBar();
@@ -37059,8 +37534,14 @@ class _DetalleListaPrecioState extends State<DetalleListaPrecio> {
   }
 
   void _editarPrecioItem(ItemListaPrecio item, String nombreColumna) {
+    if (widget.lista.esModoCosto) {
+      explicarPrecioLista(context, widget.lista, item);
+      return;
+    }
     final priceCtrl = TextEditingController(
-      text: (item.preciosPorColumna[nombreColumna] ?? 0.0).toStringAsFixed(2));
+      text: widget.lista
+          .aVista(item.preciosPorColumna[nombreColumna] ?? 0.0)
+          .toStringAsFixed(2));
     showDialog(context: context, builder: (c) => AlertDialog(
       title: Text("Precio: ${item.producto.nombre}"),
       content: Column(mainAxisSize: MainAxisSize.min, children: [
@@ -37071,15 +37552,20 @@ class _DetalleListaPrecioState extends State<DetalleListaPrecio> {
           autofocus: true,
           keyboardType: TextInputType.numberWithOptions(decimal: true),
           decoration: InputDecoration(
-            labelText: widget.lista.esEnBolivares ? "Precio (Bs)" : "Precio (\$)",
+            labelText: widget.lista.muestraBcv
+                ? "Precio BCV (\$)"
+                : widget.lista.esEnBolivares ? "Precio (Bs)" : "Precio (\$)",
             prefixIcon: const Icon(Icons.attach_money))),
       ]),
       actions: [
         TextButton(onPressed: () => Navigator.pop(context), child: const Text("Cancelar")),
         ElevatedButton(
           onPressed: () {
-            setState(() => item.preciosPorColumna[nombreColumna] =
-                double.tryParse(priceCtrl.text) ?? 0.0);
+            setState(() {
+              item.preciosPorColumna[nombreColumna] = widget.lista
+                  .desdeVista(double.tryParse(priceCtrl.text) ?? 0.0);
+              item.marcarManual(nombreColumna);
+            });
             _persistirLista(); // sincronizar con backend
             Navigator.pop(context);
           },
@@ -37089,6 +37575,7 @@ class _DetalleListaPrecioState extends State<DetalleListaPrecio> {
 
   // Editar precio de TODA una columna de una vez (ajuste por porcentaje o valor fijo)
   void _editarColumnaCompleta(ColumnaPrecio col) {
+    if (_bloqueadaPorCosto()) return;
     final porcentajeCtrl = TextEditingController();
     bool esPorcentaje = true;
     showDialog(context: context, builder: (ctx) => StatefulBuilder(
@@ -37164,6 +37651,7 @@ class _DetalleListaPrecioState extends State<DetalleListaPrecio> {
   ///   7. Persiste automáticamente al backend
   Future<void> _abrirEditorMasivo() async {
     if (!mounted) return;
+    if (_bloqueadaPorCosto()) return;
     final lista = widget.lista;
     final esFinanc = lista.esFinanciamiento;
 
@@ -37219,29 +37707,29 @@ class _DetalleListaPrecioState extends State<DetalleListaPrecio> {
               Container(
                 padding: const EdgeInsets.all(16),
                 decoration: const BoxDecoration(
-                  color: AppColors.royalBlue,
+                  color: AppColors.lilaTenue,
                   borderRadius: BorderRadius.vertical(
                       top: Radius.circular(16)),
                 ),
                 child: Row(children: [
-                  const Icon(Icons.edit_attributes, color: Colors.white),
+                  const Icon(Icons.edit_attributes, color: AppColors.azulVivo),
                   const SizedBox(width: 10),
                   Expanded(child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
                         const Text('Editor Masivo de Precios',
                             style: TextStyle(
-                                color: Colors.white,
+                                color: AppColors.textPrimary,
                                 fontSize: 17,
                                 fontWeight: FontWeight.bold)),
                         Text(
                             '${seleccionados.length} de '
                             '${lista.items.length} seleccionados',
                             style: const TextStyle(
-                                color: Colors.white70, fontSize: 12)),
+                                color: AppColors.textSecondary, fontSize: 12)),
                       ])),
                   IconButton(
-                    icon: const Icon(Icons.close, color: Colors.white),
+                    icon: const Icon(Icons.close, color: AppColors.textSecondary),
                     onPressed: () => Navigator.pop(ctx),
                   ),
                 ]),
@@ -37398,8 +37886,8 @@ class _DetalleListaPrecioState extends State<DetalleListaPrecio> {
                           '${esFinanc && item.cuotaManual != null ? " · ✏️ cuota manual" : ""}',
                           style: const TextStyle(fontSize: 11)),
                       secondary: Text(
-                          '${lista.esEnBolivares ? "Bs " : "\$"}'
-                          '${precio.toStringAsFixed(0)}',
+                          '${lista.monedaVista == 'Bs' ? "Bs " : "\$"}'
+                          '${lista.aVista(precio).toStringAsFixed(0)}',
                           style: const TextStyle(
                               fontWeight: FontWeight.bold,
                               fontSize: 13)),
@@ -37666,6 +38154,9 @@ class _DetalleListaPrecioState extends State<DetalleListaPrecio> {
           : indices;
       int modificados = 0;
 
+      // «Nuevo valor» se escribe en lo que la lista muestra: en una lista
+      // en Bs con vista BCV es $ BCV y se guarda en Bs (23/10/2026).
+      final valorFijo = lista.desdeVista(valor);
       for (final idx in itemsAModificar) {
         if (idx < 0 || idx >= lista.items.length) continue;
         final item = lista.items[idx];
@@ -37683,7 +38174,7 @@ class _DetalleListaPrecioState extends State<DetalleListaPrecio> {
           } else if (tipoOp == 'restar_pct') {
             nuevo = actualInicial * (1 - valor / 100);
           } else {
-            nuevo = valor;
+            nuevo = valorFijo;
           }
           item.inicialManual = redondearPrecio(nuevo);
           modificados++;
@@ -37696,7 +38187,7 @@ class _DetalleListaPrecioState extends State<DetalleListaPrecio> {
           } else if (tipoOp == 'restar_pct') {
             nuevo = actualCuota * (1 - valor / 100);
           } else {
-            nuevo = valor;
+            nuevo = valorFijo;
           }
           item.cuotaManual = redondearPrecio(nuevo);
           modificados++;
@@ -37711,7 +38202,7 @@ class _DetalleListaPrecioState extends State<DetalleListaPrecio> {
             } else if (tipoOp == 'restar_pct') {
               nuevo = actual * (1 - valor / 100);
             } else {
-              nuevo = valor;
+              nuevo = valorFijo;
             }
             item.preciosPorColumna[col.nombre] = redondearPrecio(nuevo);
           }
@@ -37885,11 +38376,17 @@ class _DetalleListaPrecioState extends State<DetalleListaPrecio> {
   ({List<String> headers, Map<String, List<List<String>>> filas, int total})
       _tablaExport(int modo, bool incluirColumnas) {
     final lista = widget.lista;
-    final moneda = lista.esEnBolivares ? 'Bs' : '\$';
+    final moneda = lista.monedaVista;
     final esFinanc = lista.esFinanciamiento;
     final decimales = modo == 0 ? 2 : 0;
-    String monto(double v) =>
-        '$moneda ${_redondearExport(v, modo).toStringAsFixed(decimales)}';
+    // Lista en Bs con vista BCV (orden del dueño 23/10/2026): el precio
+    // BCV en $ y, si se pidió, su equivalente en Bs debajo.
+    String monto(double v) {
+      final m = '$moneda ${_redondearExport(lista.aVista(v), modo).toStringAsFixed(decimales)}';
+      return lista.muestraBsAlLado
+          ? '$m\nBs ${_redondearExport(v, modo).toStringAsFixed(decimales)}'
+          : m;
+    }
 
     final mostrarColumnas = !esFinanc || incluirColumnas;
     // Orden de las columnas del documento: el MISMO de la pantalla y
@@ -37985,7 +38482,7 @@ class _DetalleListaPrecioState extends State<DetalleListaPrecio> {
     bool conLogo = true,
   }) async {
     final lista = widget.lista;
-    final moneda = lista.esEnBolivares ? 'Bs' : '\$';
+    final moneda = lista.etiquetaVista;
     final esFinanc = lista.esFinanciamiento;
     final tabla = _tablaExport(modo, incluirColumnas);
     final nCols = tabla.headers.length;
@@ -38438,12 +38935,11 @@ class _DetalleListaPrecioState extends State<DetalleListaPrecio> {
 
   @override
   Widget build(BuildContext context) {
-    final moneda = widget.lista.esEnBolivares ? "Bs" : "\$";
-    // Administrador, Dueño y Maestro pueden crear/editar listas de precios.
-    // Otros roles las ven en modo lectura.
-    final esAdmin = (usuarioSesion?.rol == "Administrador" ||
-                     usuarioSesion?.rol == "Dueño" ||
-                     usuarioSesion?.rol == "Maestro");
+    // Lista en Bs con vista BCV (orden del dueño 23/10/2026): se ve en $.
+    final moneda = widget.lista.monedaVista;
+    // Dueño, Administrador, Gerente y Maestro gestionan listas de precios
+    // (puedeGestionarListasPrecios). Otros roles las ven en modo lectura.
+    final esAdmin = puedeGestionarListasPrecios();
     // Los agotados sólo los puede ver el admin (para editar precios).
     final agrupados =
         _agrupadosPorMarca(incluirAgotados: esAdmin && _mostrarAgotados);
@@ -38453,33 +38949,46 @@ class _DetalleListaPrecioState extends State<DetalleListaPrecio> {
     final puedeEditarPorcentajes = esAdmin ||
         usuarioSesion?.rol == "Gerente";
 
-    return Scaffold(
+    // No se sale con cambios sin confirmar en el servidor.
+    return PopScope(
+      canPop: !_hayCambiosSinGuardar,
+      onPopInvokedWithResult: (didPop, _) async {
+        if (didPop) return;
+        final navegador = Navigator.of(context);
+        if (await _confirmarSalida() && mounted) {
+          _estadoGuardado = EstadoGuardado.limpio;
+          _reenvioPendiente = false;
+          _debouncePersistir?.cancel();
+          navegador.pop();
+        }
+      },
+      child: Scaffold(
       appBar: AppBar(
         title: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
           Text(widget.lista.nombre, style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
           Row(children: [
             Expanded(child: Text(
-              "${widget.lista.categoria} · ${widget.lista.marcaFiltro == 'Todas' ? 'Todas las marcas' : widget.lista.marcaFiltro} · $moneda"
+              "${widget.lista.categoria} · ${widget.lista.marcaFiltro == 'Todas' ? 'Todas las marcas' : widget.lista.marcaFiltro} · ${widget.lista.etiquetaVista}"
               "${widget.lista.esFinanciamiento ? ' · ${widget.lista.financiadora ?? 'Financiamiento'}${widget.lista.tieneCuotas ? ' · ${widget.lista.numeroCuotas} cuotas' : ' · sin cuotas'}' : ''}",
-              style: const TextStyle(fontSize: 11, color: Colors.white70))),
+              style: const TextStyle(fontSize: 11, color: AppColors.textSecondary))),
             if (_guardandoBackend) ...[
               const SizedBox(width: 6),
               const SizedBox(
                 width: 10, height: 10,
                 child: CircularProgressIndicator(
                   strokeWidth: 1.5,
-                  valueColor: AlwaysStoppedAnimation<Color>(Colors.white70),
+                  valueColor: AlwaysStoppedAnimation<Color>(AppColors.textSecondary),
                 ),
               ),
               const SizedBox(width: 4),
               const Text('Guardando…',
-                  style: TextStyle(fontSize: 10, color: Colors.white70,
+                  style: TextStyle(fontSize: 10, color: AppColors.textSecondary,
                     fontStyle: FontStyle.italic)),
             ],
           ]),
         ]),
-        backgroundColor: AppColors.royalBlue,
         actions: [
+          _indicadorGuardado(),
           if (esAdmin) ...[
             // ── Guardar cambios en el servidor ────────────────
             // Botón prominente para persistir los precios editados
@@ -38511,9 +39020,38 @@ class _DetalleListaPrecioState extends State<DetalleListaPrecio> {
                   _anadirColumna();
                 } else if (v == 'aplicar') {
                   _aplicarTodasLasFormulas();
+                } else if (v == 'recalcular') {
+                  _recalcularPreciosLista();
+                } else if (v == 'precios') {
+                  mostrarPreciosDeLista(context, widget.lista).then((c) {
+                    if (c && mounted) {
+                      _base = InstantaneaLista.de(widget.lista);
+                      setState(() {});
+                    }
+                  });
                 }
               },
               itemBuilder: (_) => const [
+                PopupMenuItem(
+                  value: 'precios',
+                  child: ListTile(
+                    dense: true,
+                    contentPadding: EdgeInsets.zero,
+                    leading: Icon(Icons.calculate),
+                    title: Text('Cómo se calculan los precios'),
+                    subtitle: Text('A mano o desde el costo, redondeo, % especial'),
+                  ),
+                ),
+                PopupMenuItem(
+                  value: 'recalcular',
+                  child: ListTile(
+                    dense: true,
+                    contentPadding: EdgeInsets.zero,
+                    leading: Icon(Icons.refresh),
+                    title: Text('Recalcular precios'),
+                    subtitle: Text('Volver al precio de partida'),
+                  ),
+                ),
                 PopupMenuItem(
                   value: 'nueva',
                   child: ListTile(
@@ -38545,7 +39083,7 @@ class _DetalleListaPrecioState extends State<DetalleListaPrecio> {
               tooltip: "Re-poblar automáticamente",
               onPressed: () => showDialog(context: context, builder: (ctx) => AlertDialog(
                 title: const Text("Re-poblar lista"),
-                content: const Text("¿Actualizar todos los productos automáticamente desde el catálogo?\n\nLos precios editados manualmente se resetearán."),
+                content: const Text("¿Actualizar los productos desde el catálogo?\n\nEntran los nuevos con stock y salen los que ya no están en el catálogo. Los precios que ya tienen se conservan (para volver al precio de partida: Columnas → Recalcular precios)."),
                 actions: [
                   TextButton(onPressed: () => Navigator.pop(ctx), child: const Text("Cancelar")),
                   ElevatedButton.icon(
@@ -38773,7 +39311,7 @@ class _DetalleListaPrecioState extends State<DetalleListaPrecio> {
                 ),
               ),
             ]),
-    );
+    ));
   }
 
   /// Encabezados de las columnas de precio. Al tocarlos (si es admin)
@@ -38837,17 +39375,22 @@ class _DetalleListaPrecioState extends State<DetalleListaPrecio> {
         child: SizedBox(
           width: 90,
           child: _CeldaConEtiqueta(
-            etiqueta: calculada ? 'ƒ ${col.nombre}' : col.nombre,
+            etiqueta: calculada
+                ? 'ƒ ${col.nombre}'
+                : '${col.nombre}${item.esManual(col.nombre) ? ' ✎' : ''}',
             colorEtiqueta:
                 calculada ? AppColors.statusGreen : AppColors.primaryBlue,
-            child: esAdmin && !calculada
+            child: esAdmin && !calculada && !widget.lista.esModoCosto
                 ? _CeldaPrecioInline(
                     key: ValueKey('${item.producto.codigo}-${col.nombre}'),
-                    valor: valor,
+                    valor: widget.lista.aVista(valor),
                     moneda: moneda,
+                    equivalente: _equivalenteBs(valor),
                     onCambio: (v) {
                       setState(() {
-                        item.preciosPorColumna[col.nombre] = v;
+                        item.preciosPorColumna[col.nombre] =
+                            widget.lista.desdeVista(v);
+                        item.marcarManual(col.nombre);
                         // Si otras columnas se calculan a partir de
                         // esta, se actualizan al instante.
                         widget.lista.aplicarFormulas();
@@ -38856,11 +39399,13 @@ class _DetalleListaPrecioState extends State<DetalleListaPrecio> {
                     },
                   )
                 : GestureDetector(
-                    onTap: esAdmin && calculada
+                    onTap: esAdmin && widget.lista.esModoCosto
+                        ? () => explicarPrecioLista(context, widget.lista, item)
+                        : esAdmin && calculada
                         ? () => _menuColumna(col)
                         : null,
                     child: Text(
-                      "$moneda ${valor.toStringAsFixed(2)}",
+                      _textoPrecioVista(valor),
                       textAlign: TextAlign.right,
                       style: TextStyle(
                           fontSize: 13,
@@ -38875,6 +39420,19 @@ class _DetalleListaPrecioState extends State<DetalleListaPrecio> {
       );
     }).toList();
   }
+
+  /// Precio guardado según la vista de la lista (en Bs, $ BCV o $ BCV
+  /// con su equivalente en Bs debajo). Orden del dueño 23/10/2026.
+  String _textoPrecioVista(double guardado) {
+    final l = widget.lista;
+    final v = '${l.monedaVista} ${l.aVista(guardado).toStringAsFixed(2)}';
+    return l.muestraBsAlLado ? '$v\nBs ${guardado.toStringAsFixed(2)}' : v;
+  }
+
+  /// «Bs …» debajo de una celda editable en la vista «BCV y Bs».
+  String? _equivalenteBs(double guardado) => widget.lista.muestraBsAlLado
+      ? 'Bs ${guardado.toStringAsFixed(2)}'
+      : null;
 
   Widget _buildItemRow(ItemListaPrecio item, bool esAdmin, String moneda) {
     final stockOk = stockVivoDeItem(item) > 0;
@@ -38941,15 +39499,18 @@ class _DetalleListaPrecioState extends State<DetalleListaPrecio> {
           Expanded(flex: 2, child: _CeldaConEtiqueta(
             etiqueta: 'Precio',
             colorEtiqueta: AppColors.primaryBlue,
-            child: esAdmin
+            child: esAdmin && !widget.lista.esModoCosto
                 ? _CeldaPrecioInline(
                     key: ValueKey('financ-base-${item.producto.codigo}'),
-                    valor: precioBase,
+                    valor: widget.lista.aVista(precioBase),
                     moneda: moneda,
+                    equivalente: _equivalenteBs(precioBase),
                     onCambio: (v) {
                       setState(() {
                         item.preciosPorColumna[
-                            widget.lista.columnas.first.nombre] = v;
+                            widget.lista.columnas.first.nombre] =
+                            widget.lista.desdeVista(v);
+                        item.marcarManual(widget.lista.columnas.first.nombre);
                         // Las columnas que dependen del precio base se
                         // recalculan al momento.
                         widget.lista.aplicarFormulas();
@@ -38957,11 +39518,15 @@ class _DetalleListaPrecioState extends State<DetalleListaPrecio> {
                       _persistirLista(); // sincronizar con backend
                     },
                   )
-                : Text("$moneda ${precioBase.toStringAsFixed(2)}",
+                : GestureDetector(
+                    onTap: esAdmin
+                        ? () => explicarPrecioLista(context, widget.lista, item)
+                        : null,
+                    child: Text(_textoPrecioVista(precioBase),
                     textAlign: TextAlign.right,
                     style: const TextStyle(
                         fontSize: 13, fontWeight: FontWeight.bold,
-                        color: AppColors.primaryBlue)),
+                        color: AppColors.primaryBlue))),
           )),
           const SizedBox(width: 4),
           // ── Inicial — EDITABLE (override manual) ──
@@ -38975,20 +39540,21 @@ class _DetalleListaPrecioState extends State<DetalleListaPrecio> {
             colorEtiqueta: inicialEsManual
                 ? AppColors.statusOrange
                 : Colors.orange.shade700,
-            child: esAdmin
+            child: esAdmin && !widget.lista.esModoCosto
                 ? Row(children: [
                     Expanded(child: _CeldaPrecioInline(
                       key: ValueKey('financ-inicial-${item.producto.codigo}'),
-                      valor: inicial,
+                      valor: widget.lista.aVista(inicial),
                       moneda: moneda,
+                      equivalente: _equivalenteBs(inicial),
                       onCambio: (v) {
                         setState(() {
                           // Si el valor coincide con el calculado, quitamos el
                           // override (vuelve a ser automático).
-                          if ((v - inicialCalculada).abs() < 0.01) {
+                          if ((v - widget.lista.aVista(inicialCalculada)).abs() < 0.01) {
                             item.inicialManual = null;
                           } else {
-                            item.inicialManual = v;
+                            item.inicialManual = widget.lista.desdeVista(v);
                           }
                         });
                         _persistirLista(); // sincronizar con backend
@@ -39006,7 +39572,7 @@ class _DetalleListaPrecioState extends State<DetalleListaPrecio> {
                         ),
                       ),
                   ])
-                : Text("$moneda ${inicial.toStringAsFixed(2)}",
+                : Text(_textoPrecioVista(inicial),
                     textAlign: TextAlign.right,
                     style: TextStyle(
                         fontSize: 13, fontWeight: FontWeight.bold,
@@ -39028,18 +39594,19 @@ class _DetalleListaPrecioState extends State<DetalleListaPrecio> {
             colorEtiqueta: cuotaEsManual
                 ? AppColors.statusOrange
                 : AppColors.royalBlue,
-            child: esAdmin
+            child: esAdmin && !widget.lista.esModoCosto
                 ? Row(children: [
                     Expanded(child: _CeldaPrecioInline(
                       key: ValueKey('financ-cuota-${item.producto.codigo}'),
-                      valor: cuota,
+                      valor: widget.lista.aVista(cuota),
                       moneda: moneda,
+                      equivalente: _equivalenteBs(cuota),
                       onCambio: (v) {
                         setState(() {
-                          if ((v - cuotaCalculada).abs() < 0.01) {
+                          if ((v - widget.lista.aVista(cuotaCalculada)).abs() < 0.01) {
                             item.cuotaManual = null;
                           } else {
-                            item.cuotaManual = v;
+                            item.cuotaManual = widget.lista.desdeVista(v);
                           }
                         });
                         _persistirLista(); // sincronizar con backend
@@ -39073,7 +39640,7 @@ class _DetalleListaPrecioState extends State<DetalleListaPrecio> {
                         ),
                       ),
                   ])
-                : Text("$moneda ${cuota.toStringAsFixed(2)}",
+                : Text(_textoPrecioVista(cuota),
                     textAlign: TextAlign.right,
                     style: TextStyle(
                         fontSize: 13, fontWeight: FontWeight.bold,
@@ -39324,8 +39891,10 @@ class _SelectorProductosListaState extends State<SelectorProductosLista> {
                 // Mismo precio por defecto que al poblar la lista
                 // (venta + % adicional, × tasa en Bs). Antes ignoraba
                 // el % adicional.
-                final precioBase =
-                    precioPorDefectoEnLista(widget.lista, p.precioVenta);
+                // Con lista base (en Bs) parte del precio en la base.
+                final precioBase = listaBaseDe(widget.lista) != null
+                    ? widget.lista.precioPorDefecto(p)
+                    : precioPorDefectoEnLista(widget.lista, p.precioVenta);
                 setState(() {
                   widget.lista.items.add(ItemListaPrecio(
                     producto: p,
@@ -40200,7 +40769,7 @@ class _VentanaComisionesState extends State<VentanaComisiones> {
         const Text("Historial", style: TextStyle(fontWeight: FontWeight.bold)),
         Expanded(child: ListView.builder(
           itemCount: _historial.length,
-          itemBuilder: (c, i) {
+          itemBuilder: conAparecer((c, i) {
             final h = _historial[i];
             return ListTile(
               title: Text("${formatearFecha(h.fechaInicio)} — ${formatearFecha(h.fechaFin)}"),
@@ -40209,7 +40778,7 @@ class _VentanaComisionesState extends State<VentanaComisiones> {
               onTap: () => _mostrarTablaComisiones(
                 h.data, h.tasa,
                 "${formatearFecha(h.fechaInicio)} — ${formatearFecha(h.fechaFin)}"));
-          })),
+          }))),
       ])),
     );
   }
@@ -40411,7 +40980,7 @@ class _VentanaHistorialClientesState extends State<VentanaHistorialClientes> {
               style: TextStyle(color: AppColors.textSecondary)))
           : ListView.builder(
               itemCount: clientes.length,
-              itemBuilder: (ctx, i) {
+              itemBuilder: conAparecer((ctx, i) {
                 final c = clientes[i];
                 return ListTile(
                   leading: const CircleAvatar(child: Icon(Icons.person)),
@@ -40426,7 +40995,7 @@ class _VentanaHistorialClientesState extends State<VentanaHistorialClientes> {
                   trailing: const Icon(Icons.chevron_right),
                   onTap: () => setState(() => _clienteSel = c.clave),
                 );
-              })),
+              }))),
     ]);
   }
 
@@ -40616,6 +41185,28 @@ class HistorialReporteEntry {
     this.resumen = const {},
   });
 
+  /// El mismo reporte sin columnas ni datos de costo o ganancia, para los
+  /// roles que no pueden verlos (ver lib/reportes_costos.dart).
+  HistorialReporteEntry sinCostos() {
+    final t = quitarColumnasDeCosto(encabezados, filas);
+    return HistorialReporteEntry(
+      nombreArchivo: nombreArchivo,
+      tipoReporte: tipoReporte,
+      categoria: categoria,
+      fecha: fecha,
+      generadoPor: generadoPor,
+      desdeIso: desdeIso,
+      hastaIso: hastaIso,
+      encabezados: t.encabezados,
+      filas: t.filas,
+      detalles: [
+        for (final d in detalles)
+          Map<String, dynamic>.from(quitarClavesDeCosto(d) as Map)
+      ],
+      resumen: Map<String, dynamic>.from(quitarClavesDeCosto(resumen) as Map),
+    );
+  }
+
   /// Tamaño aproximado del payload (para mostrarlo en el historial).
   int get tamanoBytes {
     try {
@@ -40682,7 +41273,13 @@ class HistorialReporteEntry {
 
 class HistorialReportes {
   static const _kKey = 'historial_reportes';
-  static List<HistorialReporteEntry> entradas = [];
+  static List<HistorialReporteEntry> _todas = [];
+
+  /// Los reportes guardados en este equipo. A quien no puede ver costos se
+  /// le dan sin columnas ni datos de costo o ganancia: un reporte que generó
+  /// el dueño en esta PC no se le abre entero al encargado que la usa después.
+  static List<HistorialReporteEntry> get entradas =>
+      puedeVerCostos() ? _todas : [for (final e in _todas) e.sinCostos()];
 
   /// Carga el historial desde SharedPreferences. Llamar al inicio de
   /// VentanaReportes.
@@ -40692,7 +41289,7 @@ class HistorialReportes {
       final raw = prefs.getString(_kKey);
       if (raw == null || raw.isEmpty) return;
       final list = jsonDecode(raw) as List;
-      entradas = list
+      _todas = list
           .map((m) => HistorialReporteEntry.fromMap(m as Map<String, dynamic>))
           .toList();
     } catch (e) {
@@ -40705,7 +41302,7 @@ class HistorialReportes {
     try {
       final prefs = await SharedPreferences.getInstance();
       await prefs.setString(_kKey,
-          jsonEncode(entradas.map((e) => e.toMap()).toList()));
+          jsonEncode(_todas.map((e) => e.toMap()).toList()));
     } catch (e) {
       debugPrint('[HistorialReportes] persistir: $e');
     }
@@ -40713,23 +41310,24 @@ class HistorialReportes {
 
   /// Agrega una entrada al historial.
   static Future<void> agregar(HistorialReporteEntry e) async {
-    entradas.insert(0, e); // más recientes primero
+    // Quien no puede ver costos no los guarda: así no quedan en su equipo.
+    _todas.insert(0, puedeVerCostos() ? e : e.sinCostos()); // más recientes primero
     // Limitar a 100 últimas para no crecer indefinido
-    if (entradas.length > 100) {
-      entradas = entradas.sublist(0, 100);
+    if (_todas.length > 100) {
+      _todas = _todas.sublist(0, 100);
     }
     await _persistir();
   }
 
   /// Elimina del historial (NO borra el archivo físico).
   static Future<void> eliminar(int indice) async {
-    if (indice < 0 || indice >= entradas.length) return;
-    entradas.removeAt(indice);
+    if (indice < 0 || indice >= _todas.length) return;
+    _todas.removeAt(indice);
     await _persistir();
   }
 
   static Future<void> limpiarTodo() async {
-    entradas.clear();
+    _todas.clear();
     await _persistir();
   }
 
@@ -41437,15 +42035,17 @@ Future<void> generarReporteLineas({DateTime? desde, DateTime? hasta}) async {
 // ════════════════════════════════════════════════════════════
 //  IMEI
 // ════════════════════════════════════════════════════════════
-Future<void> generarReporteIMEI({DateTime? desde, DateTime? hasta}) async {
+/// [filtro]: tienda, marca y modelo elegidos (pedido del dueño 19/10/2026;
+/// ver reporte_imei.dart). El resumen trae los totales por tienda, marca
+/// y modelo de los equipos que entran.
+Future<void> generarReporteIMEI({DateTime? desde, DateTime? hasta,
+    FiltroReporteImei filtro = const FiltroReporteImei()}) async {
   final filas = <List<dynamic>>[];
   final detalles = <Map<String, dynamic>>[];
   int vendidos = 0, disponibles = 0;
   int ingresadosPeriodo = 0, vendidosPeriodo = 0;
-  // Conteos por marca, modelo y ubicación para el resumen
-  final Map<String, int> porMarca = {};
-  final Map<String, int> porModelo = {};
-  final Map<String, int> disponiblesPorUbicacion = {};
+  // Totales por tienda, marca y modelo para el resumen
+  final grupos = ResumenImei();
   final hayRango = desde != null || hasta != null;
 
   // Sin el listado de IMEIs no hay reporte: antes el error se tragaba
@@ -41481,16 +42081,6 @@ Future<void> generarReporteIMEI({DateTime? desde, DateTime? hasta}) async {
       final ingresoEnRango = hayRango && _enRango(i['fecha_ingreso'], desde, hasta);
       final ventaEnRango = hayRango && v && _enRango(i['fecha_venta'], desde, hasta);
       if (hayRango && v && !ingresoEnRango && !ventaEnRango) continue;
-      if (ingresoEnRango) ingresadosPeriodo++;
-      if (ventaEnRango) vendidosPeriodo++;
-      if (v) vendidos++; else disponibles++;
-      final movimiento = !hayRango
-          ? (v ? 'Vendido' : 'En stock')
-          : ventaEnRango
-              ? 'Vendido en el período'
-              : ingresoEnRango
-                  ? 'Ingresó en el período'
-                  : 'En stock';
 
       // Resolver marca/modelo/nombre cruzando con productos.
       final codigoProd = (i['producto_codigo'] ?? i['codigo'] ?? '').toString();
@@ -41513,15 +42103,28 @@ Future<void> generarReporteIMEI({DateTime? desde, DateTime? hasta}) async {
       // que en el reporte sea evidente que falta el dato en la BD.
       if (marca.isEmpty)  marca  = 'N/D';
       if (modelo.isEmpty) modelo = 'N/D';
+      final ubicacion = (i['ubicacion'] ?? '').toString().trim();
+      final tienda = tiendaDeImei(ubicacion);
+      final grupoModelo = modeloDeImei(modelo, nombreEquipo);
+      // Tienda, marca y modelo elegidos antes de generar.
+      if (!filtro.acepta(tienda: tienda, marca: marca, modelo: grupoModelo)) {
+        continue;
+      }
+
+      if (ingresoEnRango) ingresadosPeriodo++;
+      if (ventaEnRango) vendidosPeriodo++;
+      if (v) vendidos++; else disponibles++;
+      final movimiento = !hayRango
+          ? (v ? 'Vendido' : 'En stock')
+          : ventaEnRango
+              ? 'Vendido en el período'
+              : ingresoEnRango
+                  ? 'Ingresó en el período'
+                  : 'En stock';
 
       // Conteos
-      porMarca[marca]   = (porMarca[marca]   ?? 0) + 1;
-      porModelo[modelo] = (porModelo[modelo] ?? 0) + 1;
-      final ubicacion = (i['ubicacion'] ?? '').toString().trim();
-      if (!v) {
-        final u = ubicacion.isEmpty ? 'Sin asignar' : ubicacion;
-        disponiblesPorUbicacion[u] = (disponiblesPorUbicacion[u] ?? 0) + 1;
-      }
+      grupos.sumar(
+          tienda: tienda, marca: marca, modelo: grupoModelo, vendido: v);
 
       filas.add([
         (i['imei'] ?? '').toString(),
@@ -41548,6 +42151,7 @@ Future<void> generarReporteIMEI({DateTime? desde, DateTime? hasta}) async {
         'color': (i['color'] ?? '').toString(),
         'porcentaje_bateria': (i['porcentaje_bateria'] ?? '').toString(),
         'ubicacion': ubicacion,
+        'grupo_modelo': grupoModelo,
         'vendido': v,
         'fecha_ingreso': (i['fecha_ingreso'] ?? '').toString(),
         'fecha_venta': (i['fecha_venta'] ?? '').toString(),
@@ -41559,15 +42163,9 @@ Future<void> generarReporteIMEI({DateTime? desde, DateTime? hasta}) async {
     }
   }
 
-  // Función helper para obtener el top N de un mapa por valor descendente.
-  Map<String, int> topN(Map<String, int> m, int n) {
-    final entries = m.entries.toList()
-      ..sort((a, b) => b.value.compareTo(a.value));
-    return Map.fromEntries(entries.take(n));
-  }
-
   await _registrarReporte(HistorialReporteEntry(
-    nombreArchivo: _nombreReporte('Gestión de IMEIs', desde, hasta),
+    nombreArchivo:
+        _nombreReporte('Gestión de IMEIs${filtro.sufijo}', desde, hasta),
     tipoReporte: 'imei',
     categoria: 'Inventario',
     fecha: DateTime.now(),
@@ -41581,14 +42179,17 @@ Future<void> generarReporteIMEI({DateTime? desde, DateTime? hasta}) async {
     filas: filas,
     detalles: detalles,
     resumen: {
+      'tienda': filtro.tienda,
+      'marca': filtro.marca,
+      'modelo': filtro.modelo,
       'total_imeis': filas.length,
       'vendidos': vendidos,
       'disponibles': disponibles,
       if (hayRango) 'ingresados_en_periodo': ingresadosPeriodo,
       if (hayRango) 'vendidos_en_periodo': vendidosPeriodo,
-      'disponibles_por_ubicacion': disponiblesPorUbicacion,
-      'por_marca':  topN(porMarca, 10),
-      'por_modelo': topN(porModelo, 10),
+      'por_tienda': ResumenImei.comoTexto(grupos.porTienda),
+      'por_marca': ResumenImei.comoTexto(grupos.porMarca),
+      'por_modelo': ResumenImei.comoTexto(grupos.porModelo),
     },
   ));
 }
@@ -41891,8 +42492,10 @@ Future<Uint8List> exportarHistorialAExcel(HistorialReporteEntry e) async {
       'Financiadora',         // 13 (Cashea / Weppa / Krece)
       'Lista Aplicada',       // 14 (nombre exacto: normal o promoción)
       'Precio Equipo USD',    // 15
-      'Costo USD',            // 16
-      'Ganancia USD',         // 17
+      // Costo y ganancia solo para Dueño, Administrador, Gerente y Maestro.
+      // Sin el costo, la «ganancia» saldría igual al precio de venta.
+      if (puedeVerCostos()) 'Costo USD',    // 16
+      if (puedeVerCostos()) 'Ganancia USD', // 17
       'Inicial Lista USD',    // 18 (calculada por la financiadora)
       'Inicial Pagada USD',   // 19 (lo que el cliente entregó)
       'N° Cuotas',            // 20
@@ -42162,8 +42765,8 @@ Future<Uint8List> exportarHistorialAExcel(HistorialReporteEntry e) async {
           financiadora,
           nombreLista,
           precioVenta,
-          precioCosto,
-          ganancia,
+          if (puedeVerCostos()) precioCosto,
+          if (puedeVerCostos()) ganancia,
           inicialLista == 0 ? '' : inicialLista,
           // Inicial pagada: sólo en el renglón financiado y sólo la
           // parte que le corresponde (sin el precio de los accesorios).
@@ -42267,6 +42870,25 @@ Future<Uint8List> exportarHistorialAExcel(HistorialReporteEntry e) async {
           m['monto'],
         ]));
       }
+    }
+  }
+
+  if (e.tipoReporte == 'imei') {
+    // Totales por tienda, marca y modelo (pedido del dueño 19/10/2026).
+    final r = ResumenImei.deDetalles(e.detalles);
+    final sG = excel['Por tienda, marca y modelo'];
+    for (final bloque in [
+      ('TIENDA', r.porTienda),
+      ('MARCA', r.porMarca),
+      ('MODELO', r.porModelo),
+    ]) {
+      sG.appendRow(
+          _filaCeldas([bloque.$1, 'Disponibles', 'Vendidos', 'Total']));
+      for (final g in ResumenImei.ordenado(bloque.$2)) {
+        sG.appendRow(_filaCeldas(
+            [g.key, g.value.disponibles, g.value.vendidos, g.value.total]));
+      }
+      sG.appendRow(<CellValue?>[]);
     }
   }
 
@@ -42395,10 +43017,17 @@ class _VentanaReportesState extends State<VentanaReportes>
   /// cierre de caja).
   String _tiendaVentas = 'Todas';
 
+  /// Filtros del reporte de IMEIs (pedido del dueño 19/10/2026).
+  String _imeiTienda = kImeiTodas;
+  String _imeiMarca = kImeiTodas;
+  String _imeiModelo = kImeiTodos;
+  OpcionesFiltroImei? _opcionesImei;
+
   @override
   void initState() {
     super.initState();
     _tabController = TabController(length: 2, vsync: this);
+    _cargarOpcionesImei();
     if (!puedeVerTodasLasTiendas() && tiendaUsuarioActual().isNotEmpty) {
       _tiendaVentas = tiendaUsuarioActual();
     }
@@ -42410,6 +43039,82 @@ class _VentanaReportesState extends State<VentanaReportes>
     _tabController.dispose();
     _busquedaHistorial.dispose();
     super.dispose();
+  }
+
+  /// Tiendas de la configuración y marcas/modelos de los productos con
+  /// IMEI, para los filtros del reporte. Si falla, los filtros quedan en
+  /// «Todas» (el reporte sale como siempre).
+  Future<void> _cargarOpcionesImei() async {
+    try {
+      final raw = (await _Api.get('productos') as List?) ?? [];
+      if (!mounted) return;
+      setState(() => _opcionesImei = OpcionesFiltroImei.desde(
+            tiendasConfig: [
+              ...ConfigSistema.tiendas,
+              ...ConfigSistema.ubicacionesAlmacen,
+            ],
+            productos: raw.whereType<Map>().toList(),
+            usaImei: CategoriasProductos.usaIMEI,
+          ));
+    } catch (e) {
+      debugPrint('[Reportes] opciones de IMEI: $e');
+    }
+  }
+
+  Widget _filtrosImei() {
+    final o = _opcionesImei;
+    if (o == null) {
+      return const Padding(
+        padding: EdgeInsets.only(left: 4, bottom: 8),
+        child: Text('Cargando tiendas, marcas y modelos…',
+            style: TextStyle(fontSize: 11, color: AppColors.textSecondary)),
+      );
+    }
+    final modelos = o.modelosDe(_imeiMarca);
+    if (!o.tiendas.contains(_imeiTienda)) _imeiTienda = kImeiTodas;
+    if (!o.marcas.contains(_imeiMarca)) _imeiMarca = kImeiTodas;
+    if (!modelos.contains(_imeiModelo)) _imeiModelo = kImeiTodos;
+    Widget combo(String etiqueta, IconData icono, String valor,
+            List<String> opciones, ValueChanged<String> alElegir) =>
+        DropdownButtonFormField<String>(
+          // La clave cambia con las opciones: al cambiar de marca el
+          // modelo vuelve a «Todos» también en pantalla.
+          key: ValueKey('$etiqueta|$valor|${opciones.length}'),
+          value: valor,
+          isExpanded: true,
+          decoration: InputDecoration(
+            labelText: etiqueta,
+            prefixIcon: Icon(icono, size: 18),
+            border: const OutlineInputBorder(),
+            isDense: true,
+          ),
+          items: [
+            for (final x in opciones)
+              DropdownMenuItem(
+                  value: x,
+                  child: Text(x,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(fontSize: 13))),
+          ],
+          onChanged: (v) {
+            if (v != null) setState(() => alElegir(v));
+          },
+        );
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 8),
+      child: Column(children: [
+        combo('Tienda', Icons.store_outlined, _imeiTienda, o.tiendas,
+            (v) => _imeiTienda = v),
+        const SizedBox(height: 8),
+        combo('Marca', Icons.sell_outlined, _imeiMarca, o.marcas, (v) {
+          _imeiMarca = v;
+          _imeiModelo = kImeiTodos;
+        }),
+        const SizedBox(height: 8),
+        combo('Modelo', Icons.smartphone, _imeiModelo, modelos,
+            (v) => _imeiModelo = v),
+      ]),
+    );
   }
 
   Future<void> _cargarHistorial() async {
@@ -42477,7 +43182,6 @@ class _VentanaReportesState extends State<VentanaReportes>
         title: const Text("Reportes"),
         bottom: TabBar(
           controller: _tabController,
-          indicatorColor: Colors.white,
           tabs: const [
             Tab(icon: Icon(Icons.add_chart), text: "GENERAR"),
             Tab(icon: Icon(Icons.history), text: "HISTORIAL"),
@@ -42557,12 +43261,20 @@ class _VentanaReportesState extends State<VentanaReportes>
         _seccion("INVENTARIO"),
         _cardReporte(id: "inv", titulo: "Inventario General",
           icono: Icons.inventory_2_outlined, color: const Color(0xFF0563C1),
-          subtitulo: "Productos, stock real, costos y precios de venta",
+          subtitulo: puedeVerCostos()
+              ? "Productos, stock real, costos y precios de venta"
+              : "Productos, stock real y precios de venta",
           fn: (d,h) => generarReporteInventario(desde: d, hasta: h)),
+        _filtrosImei(),
         _cardReporte(id: "imei", titulo: "Gestión de IMEIs",
           icono: Icons.pin_outlined, color: const Color(0xFF00695C),
-          subtitulo: "Todos los equipos registrados con IMEI, modelo y estado",
-          fn: (d,h) => generarReporteIMEI(desde: d, hasta: h)),
+          subtitulo: FiltroReporteImei(tienda: _imeiTienda,
+                      marca: _imeiMarca, modelo: _imeiModelo).esTodo
+              ? "Todos los equipos con IMEI, con totales por tienda, marca y modelo"
+              : "Filtrado:${FiltroReporteImei(tienda: _imeiTienda, marca: _imeiMarca, modelo: _imeiModelo).sufijo.replaceFirst(' —', '')}",
+          fn: (d,h) => generarReporteIMEI(desde: d, hasta: h,
+              filtro: FiltroReporteImei(tienda: _imeiTienda,
+                  marca: _imeiMarca, modelo: _imeiModelo))),
 
         _seccion("CUENTAS"),
         _cardReporte(id: "cxc", titulo: "Cuentas por Cobrar",
@@ -43260,8 +43972,6 @@ class _VisorReporteScreenState extends State<VisorReporteScreen> {
     return Scaffold(
       backgroundColor: AppColors.surfaceTintBlue,
       appBar: AppBar(
-        backgroundColor: AppColors.primaryBlue,
-        foregroundColor: Colors.white,
         title: Text(e.nombreReporteLegible(),
           style: const TextStyle(fontWeight: FontWeight.bold)),
         actions: [
@@ -43272,7 +43982,7 @@ class _VisorReporteScreenState extends State<VisorReporteScreen> {
                 child: SizedBox(
                   width: 20, height: 20,
                   child: CircularProgressIndicator(
-                    strokeWidth: 2, color: Colors.white))),
+                    strokeWidth: 2, color: AppColors.royalBlue))),
             )
           else
             IconButton(
@@ -43395,7 +44105,15 @@ class _VisorReporteScreenState extends State<VisorReporteScreen> {
               fontSize: 11, fontWeight: FontWeight.bold,
               color: AppColors.textSecondary, letterSpacing: 1.2)),
           const SizedBox(height: 6),
-          Wrap(spacing: 8, runSpacing: 6, children: items),
+          // Con muchos grupos (p. ej. modelos del reporte de IMEIs) el
+          // resumen se desplaza en vez de tapar la tabla.
+          ConstrainedBox(
+            constraints: BoxConstraints(
+                maxHeight: MediaQuery.of(context).size.height * 0.35),
+            child: SingleChildScrollView(
+              child: Wrap(spacing: 8, runSpacing: 6, children: items),
+            ),
+          ),
         ],
       ),
     );
@@ -44454,14 +45172,14 @@ class _VentanaNotificacionesState extends State<VentanaNotificaciones> {
           const Text("Notificaciones"),
           if (noLeidas > 0)
             Text("$noLeidas sin leer",
-              style: const TextStyle(fontSize: 12, color: Colors.white70)),
+              style: const TextStyle(fontSize: 12, color: AppColors.textSecondary)),
         ]),
         actions: [
           if (noLeidas > 0)
             TextButton.icon(
-              icon: const Icon(Icons.done_all, color: Colors.white, size: 18),
+              icon: const Icon(Icons.done_all, color: AppColors.royalBlue, size: 18),
               label: const Text("Leer todas",
-                style: TextStyle(color: Colors.white, fontSize: 12)),
+                style: TextStyle(color: AppColors.royalBlue, fontSize: 12)),
               onPressed: () async {
                 await NotificacionesService.marcarTodasLeidas();
                 if (mounted) setState(() {});
@@ -45655,8 +46373,6 @@ class _VentanaPanelAdminState extends State<VentanaPanelAdmin>
       backgroundColor: AppColors.surfaceTintBlue,
       appBar: AppBar(
         title: const Text("Panel Administrativo"),
-        backgroundColor: AppColors.royalBlue,
-        foregroundColor: Colors.white,
         actions: [
           const TasaBCVBadge(),
           const SizedBox(width: 4),
@@ -45664,9 +46380,6 @@ class _VentanaPanelAdminState extends State<VentanaPanelAdmin>
         ],
         bottom: TabBar(
           controller: _tabs,
-          labelColor: Colors.white,
-          unselectedLabelColor: Colors.white60,
-          indicatorColor: AppColors.primaryBlue,
           isScrollable: true,
           tabs: const [
             Tab(icon: Icon(Icons.dashboard), text: "Resumen"),
@@ -45718,40 +46431,44 @@ class _VentanaPanelAdminState extends State<VentanaPanelAdmin>
         Text("Actualizado: ${obtenerFechaActual()}", style: const TextStyle(color: Colors.grey, fontSize: 12)),
         const SizedBox(height: 16),
 
-        // ── Tasa BCV destacada ──
-        GestureDetector(
-          onTap: () => TasaBCVScheduler.actualizarAhora(),
-          child: Container(
-            width: double.infinity,
+        // ── Tasa BCV destacada (tarjeta del Panel, estilo Brizuela) ──
+        Padding(
+          padding: const EdgeInsets.only(bottom: 16),
+          child: TarjetaViva(
+            onTap: () => TasaBCVScheduler.actualizarAhora(),
             padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-            margin: const EdgeInsets.only(bottom: 16),
-            decoration: BoxDecoration(
-              gradient: const LinearGradient(colors: [AppColors.royalBlue, AppColors.primaryBlue], begin: Alignment.centerLeft, end: Alignment.centerRight),
-              borderRadius: BorderRadius.circular(12),
-            ),
             child: Row(children: [
-              const Icon(Icons.account_balance, color: Colors.white, size: 28),
+              Container(
+                padding: const EdgeInsets.all(8),
+                decoration: BoxDecoration(
+                  gradient: const LinearGradient(colors: [AppColors.lila, AppColors.azulVivo]),
+                  borderRadius: BorderRadius.circular(12)),
+                child: const Icon(Icons.account_balance, color: Colors.white, size: 24)),
               const SizedBox(width: 12),
               Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                const Text("TASA BCV OFICIAL HOY", style: TextStyle(color: Colors.white70, fontSize: 10, letterSpacing: 1)),
-                Text(
+                const Text("TASA BCV OFICIAL HOY", style: TextStyle(color: AppColors.textSecondary,
+                    fontSize: 10, fontWeight: FontWeight.w700, letterSpacing: 1)),
+                TextoQueCuenta(
                   TasaBCVScheduler.actualizando ? "Actualizando..." : "Bs ${ConfigSistema.tasaCambio.toStringAsFixed(2)} / \$",
-                  style: const TextStyle(color: Colors.white, fontSize: 22, fontWeight: FontWeight.bold)),
+                  style: const TextStyle(color: AppColors.textPrimary, fontSize: 22, fontWeight: FontWeight.w800)),
                 if (TasaBCVScheduler.ultimaTasa != null)
-                  Text(TasaBCVScheduler.ultimaTasa!.fuente, style: const TextStyle(color: Colors.white60, fontSize: 10)),
+                  Text(TasaBCVScheduler.ultimaTasa!.fuente, style: const TextStyle(color: AppColors.textSecondary, fontSize: 10)),
               ]),
               const Spacer(),
               Column(crossAxisAlignment: CrossAxisAlignment.end, children: [
-                Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-                  decoration: BoxDecoration(
-                    color: (TasaBCVScheduler.ultimaTasa?.esDeHoy == true) ? Colors.greenAccent.withValues(alpha: 0.3) : Colors.orange.withValues(alpha: 0.3),
-                    borderRadius: BorderRadius.circular(8)),
-                  child: Text(
-                    (TasaBCVScheduler.ultimaTasa?.esDeHoy == true) ? "✅ Al día" : "⚠️ Toque para actualizar",
-                    style: const TextStyle(color: Colors.white, fontSize: 10))),
+                Builder(builder: (_) {
+                  final alDia = TasaBCVScheduler.ultimaTasa?.esDeHoy == true;
+                  final c = alDia ? AppColors.statusGreen : AppColors.statusOrange;
+                  return Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                    decoration: BoxDecoration(
+                      color: c.withValues(alpha: 0.12),
+                      borderRadius: BorderRadius.circular(8)),
+                    child: Text(alDia ? "✅ Al día" : "⚠️ Toque para actualizar",
+                      style: TextStyle(color: c, fontSize: 10, fontWeight: FontWeight.w700)));
+                }),
                 const SizedBox(height: 4),
-                Text("Próx: ${TasaBCVScheduler.proximaActualizacion}", style: const TextStyle(color: Colors.white60, fontSize: 9)),
+                Text("Próx: ${TasaBCVScheduler.proximaActualizacion}", style: const TextStyle(color: AppColors.textSecondary, fontSize: 9)),
               ]),
             ]),
           ),
@@ -45761,20 +46478,20 @@ class _VentanaPanelAdminState extends State<VentanaPanelAdmin>
           Expanded(child: _kpiCard("Ventas del Mes", "≈ ${formatCurrency(_totalVentasMes)}", Icons.point_of_sale, AppColors.primaryBlue,
               sub: "Divisas: ${formatCurrency(_ventasMesUsd)}\nBolívares: ${formatBolivares(_ventasMesBs)}\n(≈ \$: Bs a la tasa de cada pago)")),
           const SizedBox(width: 12),
-          Expanded(child: _kpiCard("Por Cobrar", formatCurrency(_totalCxCobrar), Icons.account_balance_wallet, Colors.orange)),
+          Expanded(child: _kpiCard("Por Cobrar", formatCurrency(_totalCxCobrar), Icons.account_balance_wallet, AppColors.statusOrange)),
         ]),
         const SizedBox(height: 12),
         Row(children: [
-          Expanded(child: _kpiCard("Por Pagar", formatCurrency(_totalCxPagar), Icons.payments_outlined, Colors.red)),
+          Expanded(child: _kpiCard("Por Pagar", formatCurrency(_totalCxPagar), Icons.payments_outlined, AppColors.statusRed)),
           const SizedBox(width: 12),
-          Expanded(child: _kpiCard("Ganancia Proyectada", formatCurrency(gananciaProyectada), Icons.trending_up, Colors.green,
+          Expanded(child: _kpiCard("Ganancia Proyectada", formatCurrency(gananciaProyectada), Icons.trending_up, AppColors.statusGreen,
               sub: "Inventario actual: precio de venta − costo (en \$)")),
         ]),
         const SizedBox(height: 12),
         Row(children: [
           Expanded(child: _kpiCard("Costo Inventario", formatCurrency(_totalCostoInventario), Icons.inventory, Colors.purple)),
           const SizedBox(width: 12),
-          Expanded(child: _kpiCard("Valor Venta Inv.", formatCurrency(_totalVentaInventario), Icons.storefront, Colors.teal)),
+          Expanded(child: _kpiCard("Valor Venta Inv.", formatCurrency(_totalVentaInventario), Icons.storefront, AppColors.azulVivo)),
         ]),
         const SizedBox(height: 12),
         // KPI fila extra: líneas, servicios, comisiones
@@ -45834,24 +46551,34 @@ class _VentanaPanelAdminState extends State<VentanaPanelAdmin>
     );
   }
 
+  // Tarjeta del Panel (TarjetaIndicador, theme/movimiento.dart). Con `sub`
+  // de varias líneas se arma la misma tarjeta a mano para mostrarlo
+  // completo (el detalle de TarjetaIndicador es de una sola línea).
   Widget _kpiCard(String titulo, String valor, IconData icon, Color color, {String? sub}) {
+    if (sub == null) return TarjetaIndicador(titulo, valor, icono: icon, color: color);
     return Card(
       elevation: 3,
-      child: Padding(padding: const EdgeInsets.all(16), child: Column(
+      child: Padding(padding: const EdgeInsets.all(14), child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Row(children: [
-            Icon(icon, color: color, size: 20),
-            const SizedBox(width: 6),
-            Expanded(child: Text(titulo, style: const TextStyle(fontSize: 11, color: Colors.grey))),
+            Container(
+              padding: const EdgeInsets.all(6),
+              decoration: BoxDecoration(
+                color: color.withValues(alpha: 0.12),
+                borderRadius: BorderRadius.circular(9)),
+              child: Icon(icon, color: color, size: 17)),
+            const SizedBox(width: 8),
+            Expanded(child: Text(titulo, style: const TextStyle(fontSize: 12,
+                fontWeight: FontWeight.w600, color: AppColors.textSecondary))),
           ]),
-          const SizedBox(height: 8),
+          const SizedBox(height: 10),
           FittedBox(fit: BoxFit.scaleDown, alignment: Alignment.centerLeft,
-            child: Text(valor, style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: color))),
-          if (sub != null) ...[
-            const SizedBox(height: 4),
-            Text(sub, style: const TextStyle(fontSize: 10, color: Colors.grey)),
-          ],
+            child: TextoQueCuenta(valor, style: TextStyle(fontSize: 20, fontWeight: FontWeight.w800,
+                letterSpacing: -0.3,
+                color: color == AppColors.azulVivo ? AppColors.textPrimary : color))),
+          const SizedBox(height: 4),
+          Text(sub, style: const TextStyle(fontSize: 10, color: AppColors.textSecondary)),
         ],
       )),
     );
@@ -45935,18 +46662,17 @@ class _VentanaPanelAdminState extends State<VentanaPanelAdmin>
         const Text("Total Ventas del Mes", style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
         const SizedBox(height: 8),
         Card(
-          color: AppColors.royalBlue,
           child: Padding(padding: const EdgeInsets.all(20), child: Row(
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
               Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                const Text("VENTAS MES ACTUAL", style: TextStyle(color: Colors.white70, fontSize: 12)),
-                Text("Divisas: ${formatCurrency(_ventasMesUsd)}", style: const TextStyle(color: Colors.white, fontSize: 13)),
-                Text("Bolívares: ${formatBolivares(_ventasMesBs)}", style: const TextStyle(color: Colors.white, fontSize: 13)),
-                const Text("Total ≈ en \$ (Bs a la tasa de cada pago)", style: TextStyle(color: Colors.white60, fontSize: 11)),
+                const Text("VENTAS MES ACTUAL", style: TextStyle(color: AppColors.textSecondary, fontSize: 12, fontWeight: FontWeight.w700)),
+                Text("Divisas: ${formatCurrency(_ventasMesUsd)}", style: const TextStyle(color: AppColors.textPrimary, fontSize: 13)),
+                Text("Bolívares: ${formatBolivares(_ventasMesBs)}", style: const TextStyle(color: AppColors.textPrimary, fontSize: 13)),
+                const Text("Total ≈ en \$ (Bs a la tasa de cada pago)", style: TextStyle(color: AppColors.textSecondary, fontSize: 11)),
               ])),
-              FittedBox(child: Text("≈ ${formatCurrency(_totalVentasMes)}",
-                style: const TextStyle(color: Colors.white, fontSize: 26, fontWeight: FontWeight.bold))),
+              FittedBox(child: TextoQueCuenta("≈ ${formatCurrency(_totalVentasMes)}",
+                style: const TextStyle(color: AppColors.royalBlue, fontSize: 26, fontWeight: FontWeight.w800))),
             ],
           )),
         ),
@@ -45966,13 +46692,13 @@ class _VentanaPanelAdminState extends State<VentanaPanelAdmin>
         Row(children: [
           Expanded(child: _kpiCard("Total Productos", "$_totalProductos SKUs", Icons.category, AppColors.brandBlue)),
           const SizedBox(width: 12),
-          Expanded(child: _kpiCard("IMEIs Registrados", "$_totalImeis equipos", Icons.smartphone, Colors.teal)),
+          Expanded(child: _kpiCard("IMEIs Registrados", "$_totalImeis equipos", Icons.smartphone, AppColors.azulVivo)),
         ]),
         const SizedBox(height: 12),
         Row(children: [
-          Expanded(child: _kpiCard("Disponibles", "$disponibles en stock", Icons.check_circle_outline, Colors.green)),
+          Expanded(child: _kpiCard("Disponibles", "$disponibles en stock", Icons.check_circle_outline, AppColors.statusGreen)),
           const SizedBox(width: 12),
-          Expanded(child: _kpiCard("Vendidos", "$_totalImeisVendidos equipos", Icons.sell, Colors.orange)),
+          Expanded(child: _kpiCard("Vendidos", "$_totalImeisVendidos equipos", Icons.sell, AppColors.statusOrange)),
         ]),
         const SizedBox(height: 16),
         Card(child: Padding(padding: const EdgeInsets.all(16), child: Column(
@@ -46184,20 +46910,9 @@ class _VentanaPanelAdminState extends State<VentanaPanelAdmin>
     );
   }
 
+  // Tarjeta del Panel (TarjetaIndicador, theme/movimiento.dart).
   Widget _kpiFinanc(String label, String value, Color color) => Expanded(
-    child: Container(
-      padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 10),
-      decoration: BoxDecoration(
-        color: color.withValues(alpha: 0.07),
-        borderRadius: BorderRadius.circular(8),
-        border: Border.all(color: color.withValues(alpha: 0.2))),
-      child: Column(children: [
-        Text(value, style: TextStyle(
-          fontWeight: FontWeight.bold, fontSize: 16, color: color)),
-        Text(label, style: const TextStyle(
-          fontSize: 10, color: AppColors.textSecondary)),
-      ]),
-    ));
+    child: TarjetaIndicador(label, value, color: color, compacta: true));
 }
 
 // ============================================================
@@ -46381,8 +47096,6 @@ class _VentanaConectarImpresoraState extends State<VentanaConectarImpresora> {
       backgroundColor: AppColors.surfaceTintBlue,
       appBar: AppBar(
         title: const Text("Conectar Impresora"),
-        backgroundColor: AppColors.royalBlue,
-        foregroundColor: Colors.white,
       ),
       body: SingleChildScrollView(
         padding: const EdgeInsets.all(20),
@@ -46925,6 +47638,22 @@ class _VentanaConfiguracionState extends State<VentanaConfiguracion>
 
     for (final lista in listasPreciosGlobal) {
       if (!lista.esEnBolivares) continue;
+      if (lista.esModoCosto) continue;
+      // Foto antes de tocarla: al guardar solo viaja lo que cambió acá.
+      final base = InstantaneaLista.de(lista);
+      // Lista con lista base en divisas: base × % × tasa nueva (✎ aparte).
+      if (listaBaseDe(lista) != null) {
+        final n = seguirListaBase(lista);
+        if (n == 0) continue;
+        listasActualizadas++;
+        preciosRecalculados += n;
+        try {
+          if (lista.id != null) await guardarCambiosDeLista(lista, base);
+        } catch (e) {
+          debugPrint('[Tasa] Error persistiendo ${lista.nombre}: $e');
+        }
+        continue;
+      }
       // Solo recalcular si esta lista realmente usaba la tasa anterior
       // (algunas listas pueden tener su propia tasaDelDia distinta)
       final usaTasaSistema = (lista.tasaDelDia - tasaAnterior).abs() < 0.01;
@@ -47024,8 +47753,9 @@ class _VentanaConfiguracionState extends State<VentanaConfiguracion>
         listasActualizadas++;
         try {
           if (lista.id != null) {
-            await _Api.put('listas_precios',
-                lista.id.toString(), lista.toMap());
+            // Fusión: no pisa lo que otro equipo guardó desde que se
+            // leyó `listasPreciosGlobal`.
+            await guardarCambiosDeLista(lista, base);
           }
         } catch (e) {
           debugPrint('[Tasa] Error persistiendo ${lista.nombre}: $e');
@@ -47100,15 +47830,13 @@ class _VentanaConfiguracionState extends State<VentanaConfiguracion>
       backgroundColor: AppColors.surfaceTintBlue,
       appBar: AppBar(
         title: const Text("Configuración del Sistema"),
-        backgroundColor: AppColors.royalBlue,
-        foregroundColor: Colors.white,
         actions: [
           if (_cambiosPendientes)
             Padding(
               padding: const EdgeInsets.only(right: 8),
               child: TextButton.icon(
-                icon: const Icon(Icons.save, color: Colors.white),
-                label: const Text("Guardar", style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
+                icon: const Icon(Icons.save, color: AppColors.royalBlue),
+                label: const Text("Guardar", style: TextStyle(color: AppColors.royalBlue, fontWeight: FontWeight.bold)),
                 onPressed: _guardarTodo,
               ),
             ),
@@ -47116,9 +47844,6 @@ class _VentanaConfiguracionState extends State<VentanaConfiguracion>
         ],
         bottom: TabBar(
           controller: _tabs,
-          labelColor: Colors.white,
-          unselectedLabelColor: Colors.white60,
-          indicatorColor: AppColors.primaryBlue,
           isScrollable: true,
           tabs: const [
             Tab(icon: Icon(Icons.business), text: "Empresa"),
@@ -47187,33 +47912,41 @@ class _VentanaConfiguracionState extends State<VentanaConfiguracion>
           Container(
             padding: const EdgeInsets.all(14),
             decoration: BoxDecoration(
-              gradient: const LinearGradient(
-                colors: [AppColors.royalBlue, AppColors.primaryBlue],
-                begin: Alignment.topLeft, end: Alignment.bottomRight),
-              borderRadius: BorderRadius.circular(10)),
+              color: AppNeu.superficie,
+              border: Border.all(color: AppColors.bordeSuave),
+              boxShadow: AppElevation.tarjeta,
+              borderRadius: BorderRadius.circular(16)),
             child: Row(children: [
-              const Icon(Icons.currency_exchange, color: Colors.white, size: 36),
+              Container(
+                padding: const EdgeInsets.all(8),
+                decoration: BoxDecoration(
+                  gradient: const LinearGradient(colors: [AppColors.lila, AppColors.azulVivo]),
+                  borderRadius: BorderRadius.circular(12)),
+                child: const Icon(Icons.currency_exchange, color: Colors.white, size: 26)),
               const SizedBox(width: 14),
               Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                const Text("TASA OFICIAL BCV", style: TextStyle(color: Colors.white70, fontSize: 11, letterSpacing: 1)),
-                Text(
+                const Text("TASA OFICIAL BCV", style: TextStyle(color: AppColors.textSecondary, fontSize: 11, fontWeight: FontWeight.w700, letterSpacing: 1)),
+                TextoQueCuenta(
                   "Bs ${ConfigSistema.tasaCambio.toStringAsFixed(2)}",
-                  style: const TextStyle(color: Colors.white, fontSize: 28, fontWeight: FontWeight.bold)),
+                  style: const TextStyle(color: AppColors.textPrimary, fontSize: 28, fontWeight: FontWeight.w800)),
                 if (tasa != null) ...[
-                  Text("Fuente: ${tasa.fuente}", style: const TextStyle(color: Colors.white70, fontSize: 11)),
-                  Text("Actualizado: ${tasa.fechaFormateada}", style: const TextStyle(color: Colors.white60, fontSize: 10)),
+                  Text("Fuente: ${tasa.fuente}", style: const TextStyle(color: AppColors.textSecondary, fontSize: 11)),
+                  Text("Actualizado: ${tasa.fechaFormateada}", style: const TextStyle(color: AppColors.textSecondary, fontSize: 10)),
                 ] else
-                  const Text("Sin datos del BCV aún", style: TextStyle(color: Colors.white60, fontSize: 11)),
+                  const Text("Sin datos del BCV aún", style: TextStyle(color: AppColors.textSecondary, fontSize: 11)),
               ])),
               Column(children: [
                 Container(
                   padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
                   decoration: BoxDecoration(
-                    color: (tasa?.esDeHoy == true) ? Colors.green : Colors.orange,
+                    color: ((tasa?.esDeHoy == true) ? AppColors.statusGreen : AppColors.statusOrange)
+                        .withValues(alpha: 0.12),
                     borderRadius: BorderRadius.circular(12)),
                   child: Text(
                     (tasa?.esDeHoy == true) ? "✅ Al día" : "⚠️ Antigua",
-                    style: const TextStyle(color: Colors.white, fontSize: 10, fontWeight: FontWeight.bold))),
+                    style: TextStyle(
+                        color: (tasa?.esDeHoy == true) ? AppColors.statusGreen : AppColors.statusOrange,
+                        fontSize: 10, fontWeight: FontWeight.bold))),
               ]),
             ]),
           ),
@@ -47907,10 +48640,12 @@ class _VentanaConfiguracionState extends State<VentanaConfiguracion>
                 const Divider(height: 20),
                 // KPIs de financiamiento
                 Row(children: [
+                  if (puedeVerPorcentajesDeListas()) ...[
                   _cfKpi("% Adicional",
                     "${l.porcentajeAdicional.toStringAsFixed(1)}%",
                     AppColors.primaryBlue),
                   const SizedBox(width: 8),
+                  ],
                   _cfKpi("% Inicial",
                     "${l.porcentajeInicial.toStringAsFixed(1)}%",
                     AppColors.statusOrange),
@@ -47935,6 +48670,7 @@ class _VentanaConfiguracionState extends State<VentanaConfiguracion>
                       style: TextStyle(fontWeight: FontWeight.w600, fontSize: 12)),
                     const SizedBox(height: 10),
                     Row(children: [
+                      if (puedeVerPorcentajesDeListas())
                       Expanded(child: _cfTextField("% Adicional",
                         l.porcentajeAdicional.toString(),
                         (v) {
@@ -49993,7 +50729,7 @@ class _VentanaCostosFinanzasState extends State<VentanaCostosFinanzas>
   Widget build(BuildContext context) {
     if (!_tieneAcceso) {
       return const Scaffold(
-        backgroundColor: Color(0xFFF5F5F5),
+        backgroundColor: AppNeu.base,
         body: Center(
           child: Column(mainAxisAlignment: MainAxisAlignment.center, children: [
             Icon(Icons.lock_outline, size: 72, color: Colors.grey),
@@ -50013,9 +50749,13 @@ class _VentanaCostosFinanzasState extends State<VentanaCostosFinanzas>
         // Altura: barra de mes (44) + TabBar con texto+ícono (~58)
         // + margen pequeño. Antes era 110, faltaban 8px de overflow.
         preferredSize: const Size.fromHeight(120),
+        // Barra blanca como la del tema (estilo Brizuela).
         child: Material(
-          color: const Color(0xFF1E3A5F),
-          elevation: 4,
+          color: AppNeu.superficie,
+          elevation: 3,
+          shadowColor: const Color(0x331A1D5C),
+          shape: const RoundedRectangleBorder(
+            borderRadius: BorderRadius.vertical(bottom: Radius.circular(AppRadius.lg + 4))),
           child: SafeArea(
             bottom: false,
             child: Column(mainAxisSize: MainAxisSize.min, children: [
@@ -50033,21 +50773,21 @@ class _VentanaCostosFinanzasState extends State<VentanaCostosFinanzas>
                         padding: const EdgeInsets.symmetric(
                             horizontal: 10, vertical: 6),
                         decoration: BoxDecoration(
-                          color: Colors.white.withValues(alpha: 0.12),
+                          color: AppColors.lilaTenue,
                           borderRadius: BorderRadius.circular(8),
                         ),
                         child: Row(children: [
                           const Icon(Icons.calendar_month,
-                              color: Colors.white, size: 18),
+                              color: AppColors.azulVivo, size: 18),
                           const SizedBox(width: 6),
                           Expanded(child: Text(
                             'Mes: ${_nombresMes[_mesSel-1]} $_anioSel',
                             style: const TextStyle(
-                                color: Colors.white,
+                                color: AppColors.royalBlue,
                                 fontWeight: FontWeight.w600,
                                 fontSize: 13))),
                           const Icon(Icons.arrow_drop_down,
-                              color: Colors.white, size: 18),
+                              color: AppColors.royalBlue, size: 18),
                         ]),
                       ),
                     )),
@@ -50058,8 +50798,8 @@ class _VentanaCostosFinanzasState extends State<VentanaCostosFinanzas>
                       icon: _cargandoAuto
                           ? const SizedBox(width: 18, height: 18,
                               child: CircularProgressIndicator(
-                                  color: Colors.white, strokeWidth: 2))
-                          : const Icon(Icons.refresh, color: Colors.white),
+                                  color: AppColors.royalBlue, strokeWidth: 2))
+                          : const Icon(Icons.refresh, color: AppColors.royalBlue),
                       tooltip: 'Recargar datos',
                       onPressed: _cargandoAuto
                           ? null : _cargarDatosDelSistema,
@@ -50068,7 +50808,7 @@ class _VentanaCostosFinanzasState extends State<VentanaCostosFinanzas>
                     IconButton(
                       visualDensity: VisualDensity.compact,
                       icon: const Icon(Icons.summarize_outlined,
-                          color: Colors.amber),
+                          color: AppColors.statusYellow),
                       tooltip: 'Generar reporte del mes (Excel)',
                       onPressed: _generarReporteFinDeMes,
                     ),
@@ -50080,9 +50820,6 @@ class _VentanaCostosFinanzasState extends State<VentanaCostosFinanzas>
               // dueño; se agregó "Ganancia real".)
               TabBar(
                 controller: _tabs,
-                labelColor: Colors.white,
-                unselectedLabelColor: Colors.white54,
-                indicatorColor: Colors.amber,
                 isScrollable: true,
                 tabs: const [
                   Tab(icon: Icon(Icons.inventory_2_outlined, size: 18), text: "Inventario"),
@@ -50121,9 +50858,8 @@ class _VentanaCostosFinanzasState extends State<VentanaCostosFinanzas>
       // "Agregar fila" solo tiene sentido en Inventario, Compras y
       // Ventas; los demás apartados tienen sus propios botones.
       floatingActionButton: _tabs.index > 2 ? null : FloatingActionButton.extended(
-        backgroundColor: const Color(0xFF1E3A5F),
-        icon: const Icon(Icons.add, color: Colors.white),
-        label: const Text("Agregar fila", style: TextStyle(color: Colors.white)),
+        icon: const Icon(Icons.add),
+        label: const Text("Agregar fila"),
         onPressed: _agregarFilaSegunTab,
       ),
     );
@@ -50248,9 +50984,9 @@ class _VentanaCostosFinanzasState extends State<VentanaCostosFinanzas>
           // la tarjeta de arriba): es inicial del mes + compras anotadas −
           // ventas del mes, sin la mercancía que entró sin pasar por Compras.
           Row(children: [
-            Expanded(child: _kpiMini("Inv. final del mes (cálculo)", "\$${totalInvFinal.toStringAsFixed(2)}", Colors.green)),
+            Expanded(child: _kpiMini("Inv. final del mes (cálculo)", "\$${totalInvFinal.toStringAsFixed(2)}", AppColors.statusGreen)),
             const SizedBox(width: 8),
-            Expanded(child: _kpiMini("Costo de lo vendido en el mes", "\$${totalCostoSalida.toStringAsFixed(2)}", Colors.orange)),
+            Expanded(child: _kpiMini("Costo de lo vendido en el mes", "\$${totalCostoSalida.toStringAsFixed(2)}", AppColors.statusOrange)),
           ]),
           const SizedBox(height: 12),
           // Tabla scrollable horizontal
@@ -50341,10 +51077,10 @@ class _VentanaCostosFinanzasState extends State<VentanaCostosFinanzas>
             crossAxisAlignment: CrossAxisAlignment.stretch, children: [
       Row(children: [
         Expanded(child: _kpiMini("A costo (hoy)",
-            formatCurrency(v.total.costo), Colors.teal)),
+            formatCurrency(v.total.costo), AppColors.azulVivo)),
         const SizedBox(width: 8),
         Expanded(child: _kpiMini("A precio de venta (hoy)",
-            formatCurrency(v.total.venta), Colors.green)),
+            formatCurrency(v.total.venta), AppColors.statusGreen)),
       ]),
       const SizedBox(height: 6),
       const Text(
@@ -50387,7 +51123,7 @@ class _VentanaCostosFinanzasState extends State<VentanaCostosFinanzas>
         ])),
         _cardTitulo("Compras", Icons.shopping_cart, Colors.teal, Column(children: [
           Row(children: [
-            Expanded(child: _kpiMini("Total Compras \$", "\$${totalUsd.toStringAsFixed(2)}", Colors.teal)),
+            Expanded(child: _kpiMini("Total Compras \$", "\$${totalUsd.toStringAsFixed(2)}", AppColors.azulVivo)),
             const SizedBox(width: 8),
             Expanded(child: _kpiMini("Total Compras Bs", "Bs ${totalBs.toStringAsFixed(2)}", Colors.blueGrey)),
           ]),
@@ -50495,7 +51231,7 @@ class _VentanaCostosFinanzasState extends State<VentanaCostosFinanzas>
         ])),
         _cardTitulo("Ventas", Icons.point_of_sale, Colors.green, Column(children: [
           Row(children: [
-            Expanded(child: _kpiMini("Total Ventas \$", "\$${totalUsd.toStringAsFixed(2)}", Colors.green)),
+            Expanded(child: _kpiMini("Total Ventas \$", "\$${totalUsd.toStringAsFixed(2)}", AppColors.statusGreen)),
             const SizedBox(width: 8),
             Expanded(child: _kpiMini("Total Ventas Bs", "Bs ${totalBs.toStringAsFixed(2)}", Colors.blueGrey)),
           ]),
@@ -50712,17 +51448,9 @@ class _VentanaCostosFinanzasState extends State<VentanaCostosFinanzas>
     return _CeldaNumerica(value: value, onChanged: onChanged);
   }
 
-  Widget _kpiMini(String label, String value, Color color) {
-    return Container(
-      padding: const EdgeInsets.all(10),
-      decoration: BoxDecoration(color: color.withOpacity(0.1), borderRadius: BorderRadius.circular(8)),
-      child: Column(children: [
-        Text(label, style: TextStyle(fontSize: 11, color: color), textAlign: TextAlign.center),
-        const SizedBox(height: 4),
-        Text(value, style: TextStyle(fontSize: 14, fontWeight: FontWeight.bold, color: color), textAlign: TextAlign.center),
-      ]),
-    );
-  }
+  // Tarjeta del Panel (TarjetaIndicador, theme/movimiento.dart).
+  Widget _kpiMini(String label, String value, Color color) =>
+      TarjetaIndicador(label, value, color: color, compacta: true);
 
   String _formatFecha(DateTime? d) {
     if (d == null) return '';
@@ -51198,25 +51926,27 @@ class _VentanaPrestacionesSocialesState
         // ═══════════════════════════════════════════════════════
         //  BANNER INFORMATIVO
         // ═══════════════════════════════════════════════════════
+        // Tarjeta blanca del Panel (estilo Brizuela); antes azul.
         Container(
           padding: const EdgeInsets.all(14),
-          decoration: BoxDecoration(
-            gradient: LinearGradient(
-              colors: [AppColors.primaryBlue.withValues(alpha: 0.8),
-                       AppColors.royalBlue.withValues(alpha: 0.9)]),
-            borderRadius: BorderRadius.circular(12)),
+          decoration: AppNeu.relieve(borde: BorderRadius.circular(16)),
           child: Row(children: [
-            const Icon(Icons.work_history, color: Colors.white, size: 32),
+            Container(
+              padding: const EdgeInsets.all(8),
+              decoration: BoxDecoration(
+                gradient: const LinearGradient(colors: [AppColors.lila, AppColors.azulVivo]),
+                borderRadius: BorderRadius.circular(12)),
+              child: const Icon(Icons.work_history, color: Colors.white, size: 26)),
             const SizedBox(width: 12),
             const Expanded(child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Text("Cálculo de Prestaciones Sociales",
-                  style: TextStyle(color: Colors.white,
-                    fontSize: 18, fontWeight: FontWeight.bold)),
+                  style: TextStyle(color: AppColors.textPrimary,
+                    fontSize: 18, fontWeight: FontWeight.w800)),
                 SizedBox(height: 4),
                 Text("Según LOTTT - Literales (a), (b) y (c) + Art. 71 RLOT",
-                  style: TextStyle(color: Colors.white70, fontSize: 12)),
+                  style: TextStyle(color: AppColors.textSecondary, fontSize: 12)),
               ])),
           ]),
         ),
@@ -51661,6 +52391,40 @@ class _VentanaPrestacionesSocialesState
 //                                                                  
 //  Exportable a Excel y PDF.                                       
 // ════════════════════════════════════════════════════════════════════
+/// Precio al que se VENDIÓ realmente [producto] en [factura]: el de la lista
+/// de la financiadora con que se pagó o, de contado, el precio de venta.
+/// Lo usan el Reporte por Vendedor y el Panel Corporativo, para que la
+/// ganancia sea la misma en las dos pantallas.
+double precioRealVentaEnFactura(FacturaModel factura, Producto producto) {
+  // ¿Tiene la factura un pago con financiadora?
+  String? finUsada;
+  for (final p in factura.pagos) {
+    final f = (p.financiadora ?? '').trim();
+    if (f.isNotEmpty) { finUsada = f; break; }
+  }
+  if (finUsada != null) {
+    // Buscar en las listas globales el precio para esa financiadora
+    final normFin = finUsada.toLowerCase().trim();
+    final codNorm = producto.codigo.toLowerCase().trim();
+    for (final lp in listasPreciosGlobal) {
+      final lpFin = (lp.financiadora ?? '').toLowerCase().trim();
+      if (lpFin.isEmpty) continue;
+      if (!lpFin.contains(normFin) && !normFin.contains(lpFin)) continue;
+      for (final item in lp.items) {
+        if (item.producto.codigo.toLowerCase().trim() != codNorm) continue;
+        if (item.preciosPorColumna.isEmpty) continue;
+        // Tomamos el primer precio que no sea un override interno
+        for (final entry in item.preciosPorColumna.entries) {
+          if (entry.key.startsWith('__')) continue;
+          return entry.value;
+        }
+      }
+    }
+  }
+  // Sin financiadora → precio de venta estándar del producto
+  return producto.precioVenta;
+}
+
 class VentanaReporteVendedor extends StatefulWidget {
   const VentanaReporteVendedor({super.key});
   @override
@@ -51832,35 +52596,8 @@ class _VentanaReporteVendedorState extends State<VentanaReporteVendedor>
   /// Esto hace que la ganancia del vendedor refleje el dinero real que
   /// entró a la tienda — un teléfono vendido por Cashea tiene un precio
   /// distinto al mismo teléfono vendido en divisas.
-  double _precioRealVenta(FacturaModel factura, Producto producto) {
-    // ¿Tiene la factura un pago con financiadora?
-    String? finUsada;
-    for (final p in factura.pagos) {
-      final f = (p.financiadora ?? '').trim();
-      if (f.isNotEmpty) { finUsada = f; break; }
-    }
-    if (finUsada != null) {
-      // Buscar en las listas globales el precio para esa financiadora
-      final normFin = finUsada.toLowerCase().trim();
-      final codNorm = producto.codigo.toLowerCase().trim();
-      for (final lp in listasPreciosGlobal) {
-        final lpFin = (lp.financiadora ?? '').toLowerCase().trim();
-        if (lpFin.isEmpty) continue;
-        if (!lpFin.contains(normFin) && !normFin.contains(lpFin)) continue;
-        for (final item in lp.items) {
-          if (item.producto.codigo.toLowerCase().trim() != codNorm) continue;
-          if (item.preciosPorColumna.isEmpty) continue;
-          // Tomamos el primer precio que no sea un override interno
-          for (final entry in item.preciosPorColumna.entries) {
-            if (entry.key.startsWith('__')) continue;
-            return entry.value;
-          }
-        }
-      }
-    }
-    // Sin financiadora → precio de venta estándar del producto
-    return producto.precioVenta;
-  }
+  double _precioRealVenta(FacturaModel factura, Producto producto) =>
+      precioRealVentaEnFactura(factura, producto);
 
   /// Resumen por vendedor con desglose completo de cobros.
   ///
@@ -52972,7 +53709,7 @@ class _VentanaReporteVendedorState extends State<VentanaReporteVendedor>
                   color: AppColors.brandBlue,
                   fontWeight: FontWeight.w600, fontSize: 12)),
             const Spacer(),
-            Text(formatCurrency(_totalGeneral),
+            TextoQueCuenta(formatCurrency(_totalGeneral),
                 style: const TextStyle(
                   color: AppColors.brandBlueDeeper,
                   fontWeight: FontWeight.w800, fontSize: 14)),
@@ -53121,8 +53858,8 @@ class _VentanaReporteVendedorState extends State<VentanaReporteVendedor>
         }
         // ── Card del total general ───────────────────────────────
         if (i == sorted.length + 1) {
+          // Tarjeta blanca del Panel (estilo Brizuela); antes azul oscuro.
           return Card(
-            color: AppColors.brandBlueDark,
             elevation: 4,
             shape: RoundedRectangleBorder(
                 borderRadius: BorderRadius.circular(14)),
@@ -53131,13 +53868,18 @@ class _VentanaReporteVendedorState extends State<VentanaReporteVendedor>
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Row(children: const [
-                    Icon(Icons.workspace_premium,
-                        color: AppColors.brandYellow, size: 28),
-                    SizedBox(width: 10),
-                    Text('TOTAL GENERAL',
+                  Row(children: [
+                    Container(
+                      padding: const EdgeInsets.all(6),
+                      decoration: BoxDecoration(
+                        color: AppColors.brandYellow,
+                        borderRadius: BorderRadius.circular(10)),
+                      child: const Icon(Icons.workspace_premium,
+                          color: AppColors.brandBlueDeeper, size: 22)),
+                    const SizedBox(width: 10),
+                    const Text('TOTAL GENERAL',
                         style: TextStyle(
-                            color: Colors.white,
+                            color: AppColors.textPrimary,
                             fontWeight: FontWeight.w900,
                             fontSize: 15, letterSpacing: 1)),
                   ]),
@@ -53146,7 +53888,8 @@ class _VentanaReporteVendedorState extends State<VentanaReporteVendedor>
                   Container(
                     padding: const EdgeInsets.all(12),
                     decoration: BoxDecoration(
-                      color: Colors.white.withValues(alpha: 0.10),
+                      color: AppNeu.hueco,
+                      border: Border.all(color: AppColors.bordeSuave),
                       borderRadius: BorderRadius.circular(10),
                     ),
                     child: Column(
@@ -53154,14 +53897,14 @@ class _VentanaReporteVendedorState extends State<VentanaReporteVendedor>
                       children: [
                         const Text('Ingreso REAL en divisas',
                             style: TextStyle(
-                                color: Colors.white70,
+                                color: AppColors.textSecondary,
                                 fontSize: 11,
                                 letterSpacing: 0.5,
                                 fontWeight: FontWeight.w600)),
                         const SizedBox(height: 4),
-                        Text('\$${ingresoRealUsd.toStringAsFixed(2)}',
+                        TextoQueCuenta('\$${ingresoRealUsd.toStringAsFixed(2)}',
                             style: const TextStyle(
-                                color: AppColors.brandYellow,
+                                color: AppColors.statusGreen,
                                 fontSize: 26,
                                 fontWeight: FontWeight.w900)),
                         const SizedBox(height: 6),
@@ -53170,7 +53913,7 @@ class _VentanaReporteVendedorState extends State<VentanaReporteVendedor>
                           'Bs ${totalBs.toStringAsFixed(2)} '
                           '(≈ \$${totalBsEnUsd.toStringAsFixed(2)})',
                           style: const TextStyle(
-                              color: Colors.white70, fontSize: 11),
+                              color: AppColors.textSecondary, fontSize: 11),
                         ),
                       ],
                     ),
@@ -53182,7 +53925,7 @@ class _VentanaReporteVendedorState extends State<VentanaReporteVendedor>
                       child: _totalChip(
                         'Total facturado',
                         formatCurrency(_totalGeneral),
-                        Colors.white,
+                        AppColors.azulVivo,
                       ),
                     ),
                     const SizedBox(width: 8),
@@ -53411,31 +54154,9 @@ class _VentanaReporteVendedorState extends State<VentanaReporteVendedor>
   }
 
   /// Bloque pequeño para el card del total general.
-  Widget _totalChip(String label, String valor, Color color) {
-    return Container(
-      padding: const EdgeInsets.all(10),
-      decoration: BoxDecoration(
-        color: Colors.white.withValues(alpha: 0.08),
-        borderRadius: BorderRadius.circular(8),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text(label,
-              style: const TextStyle(
-                  color: Colors.white70,
-                  fontSize: 10,
-                  fontWeight: FontWeight.w600)),
-          const SizedBox(height: 4),
-          Text(valor,
-              style: TextStyle(
-                  color: color,
-                  fontSize: 16,
-                  fontWeight: FontWeight.w900)),
-        ],
-      ),
-    );
-  }
+  // Tarjeta de indicador del Panel (TarjetaIndicador, theme/movimiento.dart).
+  Widget _totalChip(String label, String valor, Color color) =>
+      TarjetaIndicador(label, valor, icono: Icons.insights_rounded, color: color, compacta: true);
 
   /// Diálogo para editar la tasa Binance usada en la conversión Bs→$.
   Future<void> _editarTasaBinance() async {
@@ -53547,28 +54268,27 @@ class _VentanaReporteVendedorState extends State<VentanaReporteVendedor>
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              // Encabezado del grupo (vendedor)
+              // Encabezado del grupo (vendedor), claro como el Panel.
               Container(
                 padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-                decoration: BoxDecoration(
-                  gradient: const LinearGradient(colors: [
-                    AppColors.brandBlue, AppColors.brandBlueDark]),
-                  borderRadius: const BorderRadius.only(
+                decoration: const BoxDecoration(
+                  color: AppColors.lilaTenue,
+                  borderRadius: BorderRadius.only(
                     topLeft: Radius.circular(10),
                     topRight: Radius.circular(10),
                   ),
                 ),
                 child: Row(children: [
-                  const Icon(Icons.person, color: Colors.white, size: 18),
+                  const Icon(Icons.person, color: AppColors.azulVivo, size: 18),
                   const SizedBox(width: 8),
                   Expanded(child: Text(e.key,
                     style: const TextStyle(
-                      color: Colors.white,
+                      color: AppColors.textPrimary,
                       fontWeight: FontWeight.w800,
                       letterSpacing: 0.5))),
                   Text('${e.value.length} productos',
                     style: const TextStyle(
-                      color: AppColors.brandYellow,
+                      color: AppColors.royalBlue,
                       fontWeight: FontWeight.w700, fontSize: 12)),
                 ]),
               ),
@@ -53765,6 +54485,7 @@ class _VentanaReporteFinanciadoraState extends State<VentanaReporteFinanciadora>
           cliente     : mp['cliente']?.toString() ?? '',
           cedula      : mp['cedula']?.toString() ?? '',
           telefono    : mp['telefono']?.toString() ?? '',
+          direccion   : mp['direccion']?.toString() ?? '',
           nroFactura  : mp['nro_factura']?.toString() ?? '',
           vendedor    : mp['vendedor']?.toString() ?? '',
           tienda      : mp['tienda']?.toString() ?? '',
@@ -54489,27 +55210,9 @@ class _VentanaReporteFinanciadoraState extends State<VentanaReporteFinanciadora>
           }
 
           return ListView(controller: scroll, children: [
-            Container(
-              padding: const EdgeInsets.all(20),
-              decoration: const BoxDecoration(
-                gradient: LinearGradient(
-                  colors: [AppColors.brandBlue, AppColors.brandBlueDark])),
-              child: Row(children: [
-                const Icon(Icons.inventory_2, color: Colors.white, size: 28),
-                const SizedBox(width: 12),
-                Expanded(child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text('Equipos vendidos — $financiadora',
-                      style: const TextStyle(
-                        color: Colors.white,
-                        fontWeight: FontWeight.w800,
-                        fontSize: 16)),
-                    Text('${equipos.length} unidad(es) · ${agrupado.length} modelo(s)',
-                      style: const TextStyle(color: Colors.white70, fontSize: 12)),
-                  ])),
-              ]),
-            ),
+            // Título de sección del Panel (estilo Brizuela).
+            TituloSeccion('Equipos vendidos — $financiadora',
+              subtitulo: '${equipos.length} unidad(es) · ${agrupado.length} modelo(s)'),
             const SizedBox(height: 8),
             ...agrupado.entries.map((g) {
               final unidades = g.value;
@@ -54941,29 +55644,18 @@ class _VentanaReporteFinanciadoraState extends State<VentanaReporteFinanciadora>
           .compareTo(a.value['pendiente'] as double));
 
     return Column(children: [
-      // ── Header con totales globales ───────────────────────────
-      Container(
-        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 16),
-        decoration: const BoxDecoration(
-          gradient: LinearGradient(colors: [
-            AppColors.brandBlue, AppColors.brandBlueDark]),
-        ),
-        child: Row(children: [
-          Expanded(child: _kpiHeader('Deuda total',
-              totalDeuda, AppColors.brandYellow, Icons.account_balance)),
-          Container(width: 1, height: 40, color: Colors.white24),
-          Expanded(child: _kpiHeader('Recibido',
-              totalPagos, AppColors.statusGreen, Icons.check_circle_outline)),
-          Container(width: 1, height: 40, color: Colors.white24),
-          Expanded(child: _kpiHeader('Pendiente',
-              totalPend, AppColors.statusOrange, Icons.pending_actions)),
-          if (haySobrepago) ...[
-            Container(width: 1, height: 40, color: Colors.white24),
-            Expanded(child: _kpiHeader('Sobrepago',
-                totalSobrepago, AppColors.statusRed, Icons.warning_amber)),
-          ],
-        ]),
-      ),
+      // ── Totales globales (indicadores del Panel, estilo Brizuela) ──
+      FilaIndicadores([
+        Indicador('Deuda total', formatCurrency(totalDeuda),
+            icono: Icons.account_balance_rounded),
+        Indicador('Recibido', formatCurrency(totalPagos),
+            icono: Icons.check_circle_rounded, color: AppColors.statusGreen),
+        Indicador('Pendiente', formatCurrency(totalPend),
+            icono: Icons.pending_actions_rounded, color: AppColors.statusOrange),
+        if (haySobrepago)
+          Indicador('Sobrepago', formatCurrency(totalSobrepago),
+              icono: Icons.warning_amber_rounded, color: AppColors.statusRed),
+      ]),
       // ── Tarjetas por financiadora ─────────────────────────────
       Expanded(child: ListView.builder(
         padding: const EdgeInsets.all(12),
@@ -55179,20 +55871,6 @@ class _VentanaReporteFinanciadoraState extends State<VentanaReporteFinanciadora>
     );
   }
 
-  Widget _kpiHeader(String label, double valor, Color color, IconData icon) {
-    return Column(children: [
-      Icon(icon, color: color, size: 22),
-      const SizedBox(height: 6),
-      Text(formatCurrency(valor),
-        style: TextStyle(
-          color: color,
-          fontWeight: FontWeight.w900,
-          fontSize: 14)),
-      Text(label,
-        style: const TextStyle(
-          color: Colors.white70, fontSize: 11, letterSpacing: 0.5)),
-    ]);
-  }
 
   Widget _kpiCelda(String label, String valor, Color color) {
     return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
@@ -55297,31 +55975,19 @@ class _VentanaReporteRentabilidadServiciosState
       body: Column(children: [
         // ── Filtro de fechas ──
         _buildFiltroFechas(),
-        // ── Banner global ──
-        Container(
-          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
-          decoration: const BoxDecoration(
-            gradient: LinearGradient(colors: [
-              AppColors.brandBlue, AppColors.brandBlueDark]),
-          ),
-          child: Row(children: [
-            Expanded(child: _kpiBanner('Cobrado',
-                formatCurrency(_totalCobrado), Colors.white, Icons.attach_money)),
-            Container(width: 1, height: 36, color: Colors.white24),
-            Expanded(child: _kpiBanner('Costo Rep.',
-                formatCurrency(_totalCostos), Colors.orangeAccent, Icons.build_outlined)),
-            Container(width: 1, height: 36, color: Colors.white24),
-            Expanded(child: _kpiBanner('Ganancia',
-                formatCurrency(_totalGanancia),
-                _totalGanancia >= 0 ? AppColors.brandYellow : Colors.redAccent,
-                Icons.trending_up)),
-            Container(width: 1, height: 36, color: Colors.white24),
-            Expanded(child: _kpiBanner('Margen',
-                '${_margenGlobal.toStringAsFixed(1)}%',
-                _totalGanancia >= 0 ? Colors.greenAccent : Colors.redAccent,
-                Icons.percent)),
-          ]),
-        ),
+        // ── Indicadores globales (estilo Brizuela / Panel) ──
+        FilaIndicadores([
+          Indicador('Cobrado', formatCurrency(_totalCobrado),
+              icono: Icons.attach_money_rounded),
+          Indicador('Costo Rep.', formatCurrency(_totalCostos),
+              icono: Icons.build_rounded, color: AppColors.statusOrange),
+          Indicador('Ganancia', formatCurrency(_totalGanancia),
+              icono: Icons.trending_up_rounded,
+              color: _totalGanancia >= 0 ? AppColors.statusGreen : AppColors.statusRed),
+          Indicador('Margen', '${_margenGlobal.toStringAsFixed(1)}%',
+              icono: Icons.percent_rounded,
+              color: _totalGanancia >= 0 ? AppColors.statusGreen : AppColors.statusRed),
+        ]),
         // ── Panel de distribución 60% Tienda / 40% Técnico ──
         Container(
           margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
@@ -55514,18 +56180,6 @@ class _VentanaReporteRentabilidadServiciosState
     );
   }
 
-  Widget _kpiBanner(String label, String valor, Color color, IconData icon) {
-    return Column(children: [
-      Icon(icon, color: color, size: 18),
-      const SizedBox(height: 4),
-      Text(valor,
-        style: TextStyle(
-          color: color, fontWeight: FontWeight.w900, fontSize: 13)),
-      Text(label,
-        style: const TextStyle(
-          color: Colors.white70, fontSize: 10, letterSpacing: 0.4)),
-    ]);
-  }
 
   // ── Vista 1: por servicio ──────────────────────────────────────
   Widget _vistaPorServicio() {
@@ -56002,13 +56656,8 @@ class _VentanaEstadisticasProductosState
     return Scaffold(
       appBar: AppBar(
         title: const Text('Estadísticas de Productos'),
-        backgroundColor: AppColors.brandBlue,
-        foregroundColor: Colors.white,
         bottom: TabBar(
           controller: _tabs,
-          labelColor: Colors.white,
-          unselectedLabelColor: Colors.white60,
-          indicatorColor: AppColors.brandYellow,
           tabs: const [
             Tab(icon: Icon(Icons.inventory_2), text: 'Productos'),
             Tab(icon: Icon(Icons.phone_android), text: 'Modelos'),
@@ -56138,32 +56787,13 @@ class _VentanaEstadisticasProductosState
     );
   }
 
+  // Indicadores del Panel (estilo Brizuela); antes un bloque azul.
   Widget _buildKPIs(int unidades, double total) {
-    return Container(
-      color: AppColors.brandBlue,
-      padding: const EdgeInsets.all(14),
-      child: Row(children: [
-        Expanded(child: _kpi(
-          'Unidades vendidas', '$unidades', Icons.shopping_bag,
-          AppColors.brandYellow)),
-        Container(width: 1, height: 30, color: Colors.white24),
-        Expanded(child: _kpi(
-          'Ingreso total',
-          '\$${total.toStringAsFixed(2)}',
-          Icons.attach_money,
-          AppColors.statusGreen)),
-      ]),
-    );
-  }
-
-  Widget _kpi(String label, String value, IconData icon, Color color) {
-    return Column(children: [
-      Icon(icon, color: color, size: 22),
-      const SizedBox(height: 4),
-      Text(value, style: TextStyle(
-          color: color, fontWeight: FontWeight.w900, fontSize: 18)),
-      Text(label, style: const TextStyle(
-          color: Colors.white70, fontSize: 11)),
+    return FilaIndicadores([
+      Indicador('Unidades vendidas', '$unidades',
+          icono: Icons.shopping_bag_rounded, color: AppColors.lila),
+      Indicador('Ingreso total', '\$${total.toStringAsFixed(2)}',
+          icono: Icons.attach_money_rounded, color: AppColors.statusGreen),
     ]);
   }
 
@@ -56180,7 +56810,7 @@ class _VentanaEstadisticasProductosState
     return ListView.builder(
       padding: const EdgeInsets.all(12),
       itemCount: items.length,
-      itemBuilder: (_, i) {
+      itemBuilder: conAparecer((_, i) {
         final e = items[i];
         final pct = maxU > 0 ? e.unidades / maxU : 0.0;
         return Container(
@@ -56251,7 +56881,7 @@ class _VentanaEstadisticasProductosState
             ],
           ]),
         );
-      },
+      }),
     );
   }
 
@@ -57041,7 +57671,6 @@ class _VentanaTrasladosState extends State<VentanaTraslados> {
         onPressed: _abrirDialogoNuevo,
         icon: const Icon(Icons.local_shipping_outlined),
         label: const Text('Nuevo traslado'),
-        backgroundColor: AppColors.primaryBlue,
       ),
       body: _cargando
           ? const Center(child: CircularProgressIndicator())
@@ -57801,11 +58430,14 @@ class _CeldaPrecioInline extends StatefulWidget {
   final double valor;
   final String moneda;
   final ValueChanged<double> onCambio;
+  /// Texto chico debajo (lista en Bs con vista «BCV y Bs»: «Bs 4015.00»).
+  final String? equivalente;
   const _CeldaPrecioInline({
     super.key,
     required this.valor,
     required this.moneda,
     required this.onCambio,
+    this.equivalente,
   });
   @override
   State<_CeldaPrecioInline> createState() => _CeldaPrecioInlineState();
@@ -57844,6 +58476,23 @@ class _CeldaPrecioInlineState extends State<_CeldaPrecioInline> {
 
   @override
   Widget build(BuildContext context) {
+    final fila = _fila();
+    final eq = widget.equivalente;
+    if (eq == null || eq.isEmpty) return fila;
+    return Column(
+        crossAxisAlignment: CrossAxisAlignment.end,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          fila,
+          Padding(
+            padding: const EdgeInsets.only(right: 4),
+            child: Text(eq,
+                style: const TextStyle(fontSize: 10, color: Colors.grey)),
+          ),
+        ]);
+  }
+
+  Widget _fila() {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 4),
       child: Row(mainAxisAlignment: MainAxisAlignment.end, children: [
@@ -59434,8 +60083,6 @@ class _VentanaCotizacionState extends State<VentanaCotizacion> {
     return Scaffold(
       appBar: AppBar(
         title: const Text('Nueva Cotización'),
-        backgroundColor: _CotizColors.primario,
-        foregroundColor: Colors.white,
         actions: [
           IconButton(
             icon: const Icon(Icons.history),
@@ -60257,8 +60904,6 @@ class _VentanaHistorialCotizacionesState
     return Scaffold(
       appBar: AppBar(
         title: const Text('Historial de Cotizaciones'),
-        backgroundColor: _CotizColors.primario,
-        foregroundColor: Colors.white,
         actions: [
           IconButton(icon: const Icon(Icons.refresh),
               onPressed: _cargar, tooltip: 'Recargar'),
@@ -60313,7 +60958,7 @@ class _VentanaHistorialCotizacionesState
                     : ListView.separated(
                         itemCount: _filtradas.length,
                         separatorBuilder: (_, __) => const Divider(height: 1),
-                        itemBuilder: (_, i) {
+                        itemBuilder: conAparecer((_, i) {
                           final c = _filtradas[i];
                           final sim = c.moneda == 'USD' ? '\$' : 'Bs.';
                           final totalMoneda = c.moneda == 'USD'
@@ -60359,7 +61004,7 @@ class _VentanaHistorialCotizacionesState
                             ),
                             onTap: () => _verDetalle(c),
                           );
-                        },
+                        }),
                       )),
       ]),
     );

@@ -38,6 +38,13 @@ $columnasCabecera = [
     'saldo_favor',
     'factura_id', 'financiadora', 'notas'
 ];
+// Número y tienda de la factura de una deuda FPB (lib/factura_cuadre.php
+// agrega las columnas). Solo los manda la app nueva; si las columnas no
+// existen todavía, no se aceptan.
+require_once __DIR__ . '/../lib/factura_cuadre.php';
+foreach (['nro_factura', 'tienda'] as $colFc) {
+    if (fc_tiene(db(), 'cuentas_cobrar', $colFc)) $columnasCabecera[] = $colFc;
+}
 
 if ($metodo === 'GET') {
     if ($id !== null) {

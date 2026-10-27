@@ -123,17 +123,24 @@ PreciosReferencia preciosReferenciaDe({
   }
 
   // ── BCV ──
+  // Una lista en Bs con vista BCV (23/10/2026) guarda Bs y muestra $ BCV:
+  // el precio BCV es el que muestra (`aVista`). En las demás, el guardado.
   double? bcv;
   for (final l in listas) {
     if (_normNombreLista(l.nombre) != 'bcv') continue;
     final it = itemDe(l);
-    if (it != null) { bcv = primera(it); if (bcv != null) break; }
+    if (it != null) {
+      final v = primera(it);
+      bcv = v == null ? null : l.aVista(v);
+      if (bcv != null) break;
+    }
   }
   if (bcv == null) {
     for (final l in listas) {
       final it = itemDe(l);
       if (it == null) continue;
-      bcv = columna(it, (c) => _normNombreLista(c) == 'bcv');
+      final v = columna(it, (c) => _normNombreLista(c) == 'bcv');
+      bcv = v == null ? null : l.aVista(v);
       if (bcv != null) break;
     }
   }

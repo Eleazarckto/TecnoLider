@@ -1,0 +1,18 @@
+{
+  "android": {
+    "version": "1.0.18",
+    "url": "https://sistemasceccato.com/tecnolider/updates/tecnolider-1.0.18.apk",
+    "obligatoria": false,
+    "notas": "Estilo nuevo con los colores de Tecno Lider y Panel Corporativo para Dueno, Gerente y Administracion. Listas de precios: precios desde el costo (apagado hasta activarlo por lista), % especial por tipo de producto, precios sin decimales y % visible solo para la administracion; guardar ya no pisa lo de otros equipos. Listas en Bs que toman el precio de una lista en divisas y le suman su %, con opcion de mostrar solo el precio BCV en $ o el BCV con su equivalente en Bs. Facturacion: direccion del cliente (se recuerda por cedula), cuadre obligatorio, moneda y tasa en cada pago, vuelto en la factura, deuda FPB creada por el servidor y busqueda en todo el historial. Reporte de IMEIs por tienda, marca y modelo. Costos y ganancia en Reportes solo para Dueno, Administrador y Gerente. Fichas tecnicas en el inventario. Actualizador nuevo (incluye Xiaomi).",
+    "sha256": "6154b59a75df578101d5ed922e08c3a93b627ea2aa776397dd62886cbf27b3d1",
+    "tamano": 91886445
+  },
+  "windows": {
+    "version": "1.0.18",
+    "url": "https://sistemasceccato.com/tecnolider/updates/tecnolider-windows-1.0.18.zip",
+    "obligatoria": false,
+    "notas": "Estilo nuevo con los colores de Tecno Lider y Panel Corporativo para Dueno, Gerente y Administracion. Listas de precios: precios desde el costo (apagado hasta activarlo por lista), % especial por tipo de producto, precios sin decimales y % visible solo para la administracion; guardar ya no pisa lo de otros equipos. Listas en Bs que toman el precio de una lista en divisas y le suman su %, con opcion de mostrar solo el precio BCV en $ o el BCV con su equivalente en Bs. Facturacion: direccion del cliente (se recuerda por cedula), cuadre obligatorio, moneda y tasa en cada pago, vuelto en la factura, deuda FPB creada por el servidor y busqueda en todo el historial. Reporte de IMEIs por tienda, marca y modelo. Costos y ganancia en Reportes solo para Dueno, Administrador y Gerente. Fichas tecnicas en el inventario. Actualizador nuevo (incluye Xiaomi).",
+    "sha256": "e29299f1dca457f7b7fcd7a34d51d98db6c380ab0e36bf1c1ecd6da0781e7465",
+    "tamano": 18482276
+  }
+}

@@ -19,11 +19,24 @@
 #  archivo que todavía no está):
 #     1. APK y zip  →  2. chmod 644 (scp los deja en 640 y la web no los
 #     sirve)  →  3. respaldo del version.json viejo  →  4. version.json nuevo
+#
+#  El version.json publicado lleva además "sha256" y "tamano" de cada
+#  paquete (los escribe este script en backend/version.json): el
+#  actualizador nuevo (lib/actualizador.dart) comprueba con eso que la
+#  descarga llegó entera. La 1.0.17 y anteriores ignoran esos campos.
 # ════════════════════════════════════════════════════════════════════
 set -euo pipefail
 
 RAIZ="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$RAIZ"
+
+# Orden del dueño: mientras exista PUBLICACION_BLOQUEADA la versión espera la
+# confirmación del cliente y no se anuncia. Solo el dueño borra ese archivo.
+if [[ -f "$RAIZ/PUBLICACION_BLOQUEADA" ]]; then
+  printf '\033[31mNO se publica: existe PUBLICACION_BLOQUEADA\033[0m\n'
+  sed 's/^/  | /' "$RAIZ/PUBLICACION_BLOQUEADA"
+  exit 1
+fi
 
 ENV_FILE="$RAIZ/tool/.deploy.env"
 [[ -f "$ENV_FILE" ]] && { set -a; source "$ENV_FILE"; set +a; }
@@ -41,6 +54,10 @@ FLUTTER="${FLUTTER:-/c/Users/eleaz/Downloads/src/flutter/bin/flutter}"
 JAVA="${JAVA:-/c/Program Files/Android/Android Studio/jbr/bin/java.exe}"
 O=(-o ConnectTimeout=20 -o BatchMode=yes -o IdentitiesOnly=yes -i "$DEPLOY_LLAVE")
 DEST="$DEPLOY_USUARIO@$DEPLOY_HOST"
+
+PY=""
+for c in python3 python py; do "$c" -c 'import sys' >/dev/null 2>&1 && { PY="$c"; break; }; done
+[[ -n "$PY" ]] || { printf 'Hace falta Python para escribir la huella en version.json.\n'; exit 1; }
 
 rojo()  { printf '\033[31m%s\033[0m\n' "$*"; }
 verde() { printf '\033[32m%s\033[0m\n' "$*"; }
@@ -76,8 +93,29 @@ if [[ "${1:-}" != "--sin-compilar" ]]; then
 else
   paso "2/6  Sin compilar: se usa lo que hay en $DIR"
 fi
-cp backend/version.json "$DIR/version.json"
 [[ -f "$APK" && -f "$ZIP" ]] || { rojo "Faltan $APK o $ZIP"; exit 1; }
+
+# Huella SHA-256 y tamaño de cada paquete en version.json. Se escribe con
+# indent=2 y ensure_ascii=False: queda "version": "X" (con espacio), que es
+# lo que buscan los grep de arriba y de la verificación final.
+"$PY" - backend/version.json "$(cygpath -w "$APK" 2>/dev/null || echo "$APK")" \
+       "$(cygpath -w "$ZIP" 2>/dev/null || echo "$ZIP")" <<'PY' \
+  || { rojo "No se pudo escribir la huella en backend/version.json"; exit 1; }
+import hashlib, json, os, sys
+ruta, apk, zip_ = sys.argv[1:4]
+d = json.load(open(ruta, encoding='utf-8'))
+for so, f in (('android', apk), ('windows', zip_)):
+    h = hashlib.sha256()
+    with open(f, 'rb') as a:
+        for trozo in iter(lambda: a.read(1 << 20), b''):
+            h.update(trozo)
+    d[so]['sha256'] = h.hexdigest()
+    d[so]['tamano'] = os.path.getsize(f)
+with open(ruta, 'w', encoding='utf-8', newline='\n') as s:
+    json.dump(d, s, ensure_ascii=False, indent=2)
+    s.write('\n')
+PY
+cp backend/version.json "$DIR/version.json"
 
 # ── 3. Firma del APK ────────────────────────────────────────────────
 paso "3/6  Verificando la firma del APK"
@@ -107,7 +145,17 @@ scp "${O[@]}" backend/version.json "$DEST:$DEPLOY_RUTA/version.json"
 
 # ── 6. Verificación pública ─────────────────────────────────────────
 paso "6/6  Verificando desde internet"
-publicado=$(curl -s "$BASE_URL/version.json?nc=$RANDOM" | grep -c "\"version\": \"$VERSION\"" || true)
-[[ "$publicado" -eq 2 ]] || { rojo "El version.json publicado no anuncia $VERSION"; exit 1; }
+# Se lee como UTF-8: en Windows la entrada estándar de Python no lo es y
+# una nota con tildes o «…» llegaba distinta de la local (falso error).
+curl -s -H 'Cache-Control: no-cache' "$BASE_URL/version.json?nc=$RANDOM" | "$PY" -c "
+import json, sys
+d = json.loads(sys.stdin.buffer.read().decode('utf-8'))
+local = json.load(open(sys.argv[1], encoding='utf-8'))
+for so in ('android', 'windows'):
+    assert d[so]['version'] == sys.argv[2], so + ' no anuncia ' + sys.argv[2]
+    assert d[so].get('sha256') == local[so]['sha256'], so + ': falta la huella'
+assert d == local, 'el version.json publicado no es igual al local'
+" backend/version.json "$VERSION" \
+  || { rojo "El version.json publicado no anuncia $VERSION (o no es igual al local)"; exit 1; }
 verde "Tecno Líder $VERSION publicada en Android y Windows."
 echo "Recuerda: git add release/$VERSION && git commit && git push"

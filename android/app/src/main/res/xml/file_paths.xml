@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Rutas de archivos compartibles para FileProvider.
+  Usado por ProveedorApk (Actualizador.kt): el instalador clásico abre
+  el APK descargado en la carpeta de soporte de la app (files/).
+  Ubicación: android/app/src/main/res/xml/file_paths.xml
+-->
+<paths>
+    <external-files-path name="external_files" path="."/>
+    <cache-path name="cache" path="."/>
+    <external-cache-path name="external_cache" path="."/>
+    <files-path name="files" path="."/>
+</paths>

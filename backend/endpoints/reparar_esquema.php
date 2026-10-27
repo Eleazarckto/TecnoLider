@@ -186,7 +186,120 @@ $reparar(
     }
 );
 
-// ── 5. Recursos del router que apuntan a un archivo inexistente ────
+// ── 4b. Fichas técnicas de productos ───────────────────────────────
+//  Las usa endpoints/ficha_tecnica.php (traído de Brizuela, sin IA). La
+//  misma sentencia está en fichaEsquema() de ese archivo, que también la
+//  crea sola la primera vez que se pide una ficha.
+$reparar(
+    "tabla fichas_tecnicas",
+    static fn(): bool => tabla_existe('fichas_tecnicas'),
+    static function (): void {
+        db()->exec(
+            "CREATE TABLE IF NOT EXISTS fichas_tecnicas (
+                producto_codigo VARCHAR(100) NOT NULL PRIMARY KEY,
+                plantilla   VARCHAR(30)  NOT NULL DEFAULT '',
+                campos      TEXT,
+                origen      VARCHAR(10)  NOT NULL DEFAULT '',
+                nota        VARCHAR(500) NOT NULL DEFAULT '',
+                actualizado DATETIME NULL,
+                por         VARCHAR(150) NOT NULL DEFAULT ''
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"
+        );
+        esquema_refrescar();
+    }
+);
+
+// ── 5. Listas de precios: campos nuevos (16/10/2026) ───────────────
+//  Todos con un valor por defecto que deja cada lista EXACTAMENTE como
+//  hoy: modo 'manual', sin % sobre costo, sin redondeo, sin reglas. Son
+//  ADD COLUMN sueltos (cada ALTER cierra la transacción en MySQL, así que
+//  no van dentro de una). `porcentaje_adicional` NO se reutiliza: para la
+//  app 1.0.17 es el % sobre el precio de VENTA.
+//    tiene_cuotas            la app la mandaba y se perdía (no estaba en
+//                            la lista blanca). 1 = como se leía hasta hoy.
+//    actualizado_en          marca del sondeo barato; la pone el servidor.
+//    monto_adicional_dolares monto fijo en $ que se suma antes del %.
+//    modo_precios            'manual' (hoy) o 'costo'.
+//    pct_sobre_costo         % sobre el costo en modo costo (en una
+//                            financiadora, sobre el precio de venta).
+//    tasa_fija / tasa_bs     tasa propia de una lista Bs / tasa manual de
+//                            una lista Divisas para sus listas en Bs.
+//    redondear_arriba        precios sin decimales, hacia arriba.
+//    reglas_pct              % especial por tipo de producto (JSON).
+//    lista_base_id           (19/10/2026) lista en divisas de la que una
+//                            lista en Bs toma sus precios; 0 = ninguna.
+//    vista_bs                (23/10/2026) cómo muestra sus precios una
+//                            lista en Bs: 'bs' (como siempre), 'bcv' (solo
+//                            el precio BCV en $) o 'bcv_bs' (BCV y Bs).
+//                            Lo guardado sigue en Bs: es solo la vista.
+$columnasListas = [
+    'tiene_cuotas'            => 'TINYINT(1) NOT NULL DEFAULT 1',
+    'actualizado_en'          => 'TIMESTAMP NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP',
+    'monto_adicional_dolares' => 'DECIMAL(12,2) NOT NULL DEFAULT 0',
+    'modo_precios'            => "VARCHAR(10) NOT NULL DEFAULT 'manual'",
+    'pct_sobre_costo'         => 'DECIMAL(7,2) NOT NULL DEFAULT 0',
+    'tasa_fija'               => 'TINYINT(1) NOT NULL DEFAULT 0',
+    'tasa_bs'                 => 'DECIMAL(12,4) NOT NULL DEFAULT 0',
+    'redondear_arriba'        => 'TINYINT(1) NOT NULL DEFAULT 0',
+    'reglas_pct'              => 'TEXT NULL',
+    'lista_base_id'           => 'INT NOT NULL DEFAULT 0',
+    'vista_bs'                => "VARCHAR(10) NOT NULL DEFAULT 'bs'",
+];
+foreach ($columnasListas as $col => $def) {
+    $reparar(
+        "listas_precios.$col",
+        static fn(): bool => !tabla_existe('listas_precios')
+                             || tabla_tiene('listas_precios', $col),
+        static function () use ($col, $def): void {
+            db()->exec("ALTER TABLE listas_precios ADD COLUMN `$col` $def");
+            esquema_refrescar('listas_precios');
+        }
+    );
+}
+
+// Respaldos de las activaciones de «precios desde el costo»: la fila
+// entera de la lista antes de activarla (para --revertir).
+$reparar(
+    "tabla listas_precios_respaldos",
+    static fn(): bool => tabla_existe('listas_precios_respaldos'),
+    static function (): void {
+        db()->exec(
+            "CREATE TABLE IF NOT EXISTS listas_precios_respaldos (
+                id        INT AUTO_INCREMENT PRIMARY KEY,
+                lista_id  INT          NOT NULL,
+                motivo    VARCHAR(60)  NOT NULL DEFAULT '',
+                usuario   VARCHAR(160) NOT NULL DEFAULT '',
+                datos     LONGTEXT     NOT NULL,
+                creado_en TIMESTAMP    NULL DEFAULT CURRENT_TIMESTAMP,
+                INDEX idx_lista (lista_id, id)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"
+        );
+        esquema_refrescar();
+    }
+);
+
+// ── 6. Facturación: cuadre, moneda por pago, vuelto, FPB y reintento
+//  Bloque propio (lib/factura_cuadre.php, oct-2026). Solo ADD COLUMN
+//  (todas NULL o con DEFAULT) y el índice único de la clave de
+//  idempotencia. No recalcula ninguna factura existente.
+//    facturas:        inicial, monto_financiado, tasa_bcv, clave_idempotencia,
+//                     direccion (23/10/2026)
+//    factura_items /
+//    factura_equipos: precio_unitario
+//    factura_pagos:   moneda, monto_usd, es_vuelto
+//    cuentas_cobrar:  factura_id, nro_factura, tienda
+try {
+    require_once __DIR__ . '/../lib/factura_cuadre.php';
+    [$fcAplicado, $fcYaEstaba, $fcErrores] = fc_asegurar_esquema(db(), true);
+    foreach ($fcAplicado as $t) $aplicado[] = "facturación: $t";
+    foreach ($fcYaEstaba as $t) $ya_estaba[] = "facturación: $t";
+    foreach ($fcErrores as $t) $errores[] = "facturación: $t";
+    esquema_refrescar();
+} catch (Throwable $e) {
+    $errores[] = 'facturación: ' . $e->getMessage();
+}
+
+// ── 7. Recursos del router que apuntan a un archivo inexistente ────
 $handlersFaltantes = [];
 $handlersOk        = 0;
 foreach (get_endpoints() as $recurso => $archivo) {
