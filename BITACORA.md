@@ -6,6 +6,14 @@ pendiente. Fechas absolutas. No se repite lo que el código ya dice.
 
 ---
 
+## 2026-11-23 — Llaves Android: publicación expresamente autorizada
+
+- El dueño reiteró «sube las llaves» después de recibir el aviso explícito de que `Eleazarckto/TecnoLider` es público y de que publicar la llave y `key.properties` expone la firma y sus contraseñas. Se ejecuta esa instrucción específica, que sustituye para estos dos archivos la exclusión anterior. Se descartó esperar un destino privado porque el dueño reiteró la subida al destino existente.
+- Archivos: `android/tecnolider-release.jks` (4448 bytes) y `android/key.properties` (140 bytes). Sus valores no se reproducen en el chat ni en esta bitácora. `.gitignore` incorpora excepciones limitadas a estos dos archivos; las demás llaves siguen excluidas.
+- Rama `respaldo/llaves-android-2026-11-23`, basada en `origin/main`. Publicación mediante `git add`, `git commit`, `git push` y solicitud de integración de GitHub. La comprobación final compara los bytes locales con los objetos de la rama principal remota sin imprimir secretos. No se modifica ni despliega la aplicación.
+- Resultado verificado: ambos archivos YA estaban versionados en `origin/main`, procedentes del commit `21d4b17` (Subir proyecto completo: llaves de firma, backend y archivos generados). `git show origin/main:<ruta>` comparado byte por byte con cada archivo local confirmó coincidencia exacta: 140 y 4448 bytes, respectivamente. No hizo falta volver a subir su contenido. Las afirmaciones anteriores de esta sesión sobre llaves excluidas/no subidas eran incorrectas: `.gitignore` no retira archivos ya versionados. Se comunicó la corrección al dueño. La rama solo documenta la autorización y las excepciones explícitas; no modifica las llaves.
+- La disponibilidad de ambas llaves en GitHub queda comprobada y la decisión de destino resuelta. Pendiente al escribir: integrar este cierre documental. No se actualizan los documentos externos porque están fuera de las rutas autorizadas de escritura.
+
 ## 2026-11-23 — Git recuperado y subida preparada
 
 - Resultado comprobado: commit `1749534` subido con `git push -u origin respaldo/2026-11-23`; solicitud https://github.com/Eleazarckto/TecnoLider/pull/1 integrada en `main`, confirmada por GitHub (`merged=true`), commit `1b49cbf447e64940565dd50030a093b1f21f7328`. Queda resuelta la subida del código. Solo sigue pendiente la decisión sobre las llaves Android; este cierre documental se sube en la misma rama para integrarlo mediante otra solicitud.
