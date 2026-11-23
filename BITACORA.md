@@ -8,6 +8,7 @@ pendiente. Fechas absolutas. No se repite lo que el código ya dice.
 
 ## 2026-11-23 — Git recuperado y subida preparada
 
+- Resultado comprobado: commit `1749534` subido con `git push -u origin respaldo/2026-11-23`; solicitud https://github.com/Eleazarckto/TecnoLider/pull/1 integrada en `main`, confirmada por GitHub (`merged=true`), commit `1b49cbf447e64940565dd50030a093b1f21f7328`. Queda resuelta la subida del código. Solo sigue pendiente la decisión sobre las llaves Android; este cierre documental se sube en la misma rama para integrarlo mediante otra solicitud.
 - Resuelto el bloqueo anterior: los comandos de escritura ahora funcionan. Se recuperó el historial con `git -c safe.directory="C:/Users/eleaz/Downloads/Proyectos Sistemas Ceccato/TecnoLider-main" fetch origin` y `reset --mixed origin/main`, sin sobrescribir archivos locales. La excepción de confianza se limita a este repositorio creado por la sesión anterior.
 - Solo difieren `backend/endpoints/facturas.php` (correcciones de inventario de noviembre) y `BITACORA.md`. Diff revisado sin credenciales nuevas. Rama de respaldo: `respaldo/2026-11-23`; se conserva el historial y se prepara solicitud de integración.
 - Validación: `C:/Users/eleaz/php84/php.exe -l backend/endpoints/facturas.php` correcto. Las suites fallaron inicialmente por falta de SQLite; con `-d extension_dir=C:/Users/eleaz/php84/ext -d extension=pdo_sqlite`, `backend/tests/factura_cuadre_test.php` pasó 82 comprobaciones y `backend/tests/precios_listas_test.php` pasó 142. No se desplegó ni probó producción.
