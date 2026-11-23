@@ -6,6 +6,76 @@ pendiente. Fechas absolutas. No se repite lo que el código ya dice.
 
 ---
 
+## 2026-11-23 — Git recuperado y subida preparada
+
+- Resuelto el bloqueo anterior: los comandos de escritura ahora funcionan. Se recuperó el historial con `git -c safe.directory="C:/Users/eleaz/Downloads/Proyectos Sistemas Ceccato/TecnoLider-main" fetch origin` y `reset --mixed origin/main`, sin sobrescribir archivos locales. La excepción de confianza se limita a este repositorio creado por la sesión anterior.
+- Solo difieren `backend/endpoints/facturas.php` (correcciones de inventario de noviembre) y `BITACORA.md`. Diff revisado sin credenciales nuevas. Rama de respaldo: `respaldo/2026-11-23`; se conserva el historial y se prepara solicitud de integración.
+- Validación: `C:/Users/eleaz/php84/php.exe -l backend/endpoints/facturas.php` correcto. Las suites fallaron inicialmente por falta de SQLite; con `-d extension_dir=C:/Users/eleaz/php84/ext -d extension=pdo_sqlite`, `backend/tests/factura_cuadre_test.php` pasó 82 comprobaciones y `backend/tests/precios_listas_test.php` pasó 142. No se desplegó ni probó producción.
+- La API autenticada confirmó que GitHub es público (`private=false`). El dueño pidió subir las llaves Android; se solicitó destino privado tras comprobar la visibilidad. `android/tecnolider-release.jks` y `android/key.properties` siguen excluidos mientras llega la respuesta; no se copiaron sus valores.
+- El primer commit falló por identidad Git ausente; se reutiliza la identidad del último commit del repositorio solo para esta operación. Pendiente: verificar subida e integración y recibir decisión sobre el respaldo de llaves. No se modificó documentación externa, fuera del área de escritura autorizada.
+
+## 2026-11-23 — Subida a GitHub bloqueada por permisos del entorno
+
+- Pedido: subir todo el proyecto a GitHub. Esta copia no contenía `.git` ni `CLAUDE.md` local; se leyeron las instrucciones generales y la bitácora.
+- Destino identificado y consultado con `git ls-remote https://github.com/Eleazarckto/TecnoLider.git HEAD refs/heads/main`: HEAD y main apuntan a `ec4ccfe7f88999d6afff5193a0ca6d96e52d320e`.
+- `git init` creó los metadatos vacíos. `git remote add origin https://github.com/Eleazarckto/TecnoLider.git` falló con `could not lock config file .git/config: Permission denied`; `git fetch origin` falló con `cannot open .git/FETCH_HEAD: Permission denied`. El entorno declara `.git` como solo lectura y no permite solicitar elevación; no se intentó eludir el control.
+- No se creó ningún commit ni se subió contenido. No se modificó código ni producción. La revisión de secretos y comparación con el remoto quedan pendientes.
+- Siguiente paso: habilitar escritura de los metadatos Git en este entorno; después recuperar el historial remoto sin sobrescribir archivos locales, revisar secretos, preparar los cambios y subirlos conservando el historial. La documentación externa y Word no se modificaron: están fuera de las rutas de escritura autorizadas.
+## 2026-11-10 — Re-auditoría manual: regresión de stock CORREGIDA + CRÍTICA de auth detectada
+
+Revisión white-box a mano (sin Strix). Las 2 fallas de stock del lote Strix (IMEI revendible,
+sobreventa) siguen corregidas. Aparecieron 2 cosas nuevas:
+
+- 🟡 **MEDIA (regresión del fix vuln-0002) — CORREGIDA.** El `DELETE` de factura
+  (`backend/endpoints/facturas.php`, bloque `if ($metodo === 'DELETE')`) restauraba el stock con
+  `UPDATE productos SET stock_manual = stock_manual + ? WHERE codigo = ?` **sin filtrar por
+  tienda**. Como el alta descuenta por `(codigo, tienda)`, borrar una factura sumaba el stock del
+  mismo código en TODAS las tiendas → inventario inflado.
+  - **Hecho:** el DELETE ahora lee `facturas.tienda` y restaura con
+    `... WHERE codigo = ? AND tienda = ?`, simétrico con el alta (si no existe fila de stock para
+    esa (codigo, tienda), no toca nada = item no inventariado). `php -l` OK.
+
+- 🔴 **CRÍTICA (preexistente, NO introducida por el fix de Strix) — PENDIENTE, requiere rediseño.**
+  La API (`backend/api.php` + `backend/lib/response.php`) **no verifica ningún token/JWT**:
+  cualquiera que alcance `api.php` ejecuta todos los endpoints. El login
+  (`backend/endpoints/usuarios.php:23-32`) compara `clave` en **texto plano** (sin
+  `password_hash`/`password_verify`), por **query-string**, y devuelve la fila con la clave. Los
+  "chequeos de rol" solo leen un correo del request → suplantables. `Access-Control-Allow-Origin: *`.
+  - **No se tocó en esta tanda a propósito:** introducir autenticación real (token por request),
+    hashear contraseñas y migrar el login fuera de la query-string es un cambio de contrato que
+    afecta a la app Flutter y a todos los endpoints; debe planearse y probarse aparte, no como un
+    parche en caliente. **Siguiente paso concreto:** diseñar auth por Bearer/JWT con verificación
+    en `response.php`/router, migrar `usuarios.clave` a `password_hash` con verificación progresiva,
+    y actualizar el cliente Flutter. Es el riesgo dominante del sistema.
+  - **BAJA (no explotable hoy):** `diagnostico_bd.php:95,111` interpola `$tabla` (de lista interna
+    fija, no entrada de usuario) en SQL — patrón frágil, castear/validar idealmente.
+
+Pendiente del dueño (sin código, ya anotado): **rotar la clave de BD COMPARTIDA con Yjdelivery**
+(está fuera del repo en `backend/lib/db.php`), y la clave del super-admin.
+
+## 2026-11-09 · Auditoría Strix: 2 fallas de integridad de stock corregidas
+
+Auditoría autónoma con Strix (lote de seguridad; ver `BITACORA_GENERAL.md` de la carpeta de
+proyectos). 2 vulnerabilidades ALTAS de integridad de inventario (no son huecos de acceso).
+Reportes en `strix-main/strix_runs/tecnolider-main_a3e8/vulnerabilities/`. Corregidas en
+`backend/endpoints/facturas.php` (POST crear factura):
+
+- **0001 IMEI revendido:** el `UPDATE stock_imei ... WHERE imei=? AND vendido=0` no miraba
+  cuántas filas afectó → el mismo teléfono se podía facturar dos veces. **Fix:** se exige
+  `rowCount()===1`; si no, `rollBack()` + `json_error(...,409)`.
+- **0002 descuento sin tienda + sobreventa:** `UPDATE productos SET stock_manual=GREATEST(0,
+  stock_manual-1) WHERE codigo=?` restaba el stock en TODAS las tiendas y absorbía la
+  sobreventa. **Fix:** `SELECT ... FOR UPDATE` de `(codigo,tienda)`, descuenta solo en la
+  tienda de la factura, rechaza con 409 si stock<1; item no inventariado (sin fila) no se
+  descuenta ni se bloquea. Igual patrón que `traslado_aplicar.php`.
+- **⚠️ Cambio de comportamiento:** ahora se rechaza (409) vender un producto inventariado sin
+  stock en esa tienda. Si se permiten encargos/backorder a propósito, avisar y se quita el
+  rechazo (se deja solo el filtro por tienda).
+- `php -l` OK. **Pendiente: probar en staging y desplegar.** Defensa extra: índice único en
+  `factura_equipos.imei`.
+
+---
+
 ## 2026-10-27 · Backend desplegado y 1.0.18 publicada (orden del dueño)
 
 **Orden del dueño:** «sube todas las actualizaciones pendientes»: solo

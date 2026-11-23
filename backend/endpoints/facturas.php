@@ -299,6 +299,13 @@ if ($metodo === 'POST') {
             $stmtEq->execute([$idF, $imei, $vend]);
             fc_linea_insertada(db(), 'factura_equipos', (int)db()->lastInsertId(), $entrada, $imei, $sinPrevios);
             $stmtSt->execute([$idF, $imei]);
+            // [seguridad 2026-11-09 vuln-0001] el UPDATE lleva "AND vendido = 0": si no
+            // afecto exactamente 1 fila, el IMEI ya estaba vendido (o no existe) y se
+            // estaria facturando dos veces el mismo telefono. Se aborta todo con 409.
+            if ($stmtSt->rowCount() !== 1) {
+                db()->rollBack();
+                json_error("El equipo con IMEI $imei ya fue vendido o no esta disponible en stock.", 409);
+            }
         }
 
         // ── items ──
@@ -307,15 +314,33 @@ if ($metodo === 'POST') {
             "INSERT INTO factura_items (factura_id, producto_codigo, cantidad, vendedor)
              VALUES (?, ?, 1, ?)"
         );
+        // [seguridad 2026-11-09 vuln-0002] el stock se descuenta SOLO en la tienda de
+        // la factura (antes, sin filtro de tienda, una venta restaba el stock en TODAS
+        // las tiendas) y se bloquea la sobreventa (antes GREATEST(0,...) la absorbia en
+        // silencio). Se bloquea la fila con FOR UPDATE, como en traslado_aplicar.php.
+        $tiendaFactura = trim((string) ($body['tienda'] ?? ''));
+        $stmtPrLock = db()->prepare(
+            "SELECT stock_manual FROM productos WHERE codigo = ? AND tienda = ? FOR UPDATE"
+        );
         $stmtPr = db()->prepare(
-            "UPDATE productos SET stock_manual = GREATEST(0, stock_manual - 1) WHERE codigo = ?"
+            "UPDATE productos SET stock_manual = stock_manual - 1 WHERE codigo = ? AND tienda = ?"
         );
         foreach (($body['items'] ?? []) as $entrada) {
             [$cod, $vend] = _parse_item($entrada);
             if ($cod === '') continue;
             $stmtIt->execute([$idF, $cod, $vend]);
             fc_linea_insertada(db(), 'factura_items', (int)db()->lastInsertId(), $entrada, $cod, $sinPrevios);
-            $stmtPr->execute([$cod]);
+            $stmtPrLock->execute([$cod, $tiendaFactura]);
+            $stockActual = $stmtPrLock->fetchColumn(); // false si ese codigo no es un producto con stock en la tienda
+            if ($stockActual !== false) {
+                if ((int) $stockActual < 1) {
+                    db()->rollBack();
+                    json_error("Sin stock de '$cod' en la tienda '$tiendaFactura'.", 409);
+                }
+                $stmtPr->execute([$cod, $tiendaFactura]);
+            }
+            // Si no hay fila de stock para (codigo, tienda) es un item no inventariado:
+            // no se descuenta nada (igual que antes), no se bloquea la venta.
         }
 
         // ── pagos ──
@@ -424,6 +449,14 @@ if ($metodo === 'DELETE') {
              WHERE factura_id = ?"
         )->execute([$id]);
 
+        // [seguridad 2026-11-10] la restauracion de stock al borrar la factura se hace SOLO
+        // en la tienda de la factura, igual que el descuento del alta (vuln-0002). Antes el
+        // UPDATE no filtraba por tienda: borrar una factura sumaba el stock del mismo codigo
+        // en TODAS las tiendas, inflando el inventario de las demas.
+        $stmtTienda = db()->prepare("SELECT tienda FROM facturas WHERE id = ?");
+        $stmtTienda->execute([$id]);
+        $tiendaFactura = (string) ($stmtTienda->fetchColumn() ?: '');
+
         $stmt = db()->prepare(
             "SELECT producto_codigo, SUM(cantidad) AS qty
              FROM factura_items
@@ -432,11 +465,13 @@ if ($metodo === 'DELETE') {
         );
         $stmt->execute([$id]);
         $items = $stmt->fetchAll();
+        // Solo restaura donde existe fila de stock (codigo, tienda): si no existe, el item no
+        // era inventariado en esa tienda y no se toca (simetrico con el alta).
         $stmtUp = db()->prepare(
-            "UPDATE productos SET stock_manual = stock_manual + ? WHERE codigo = ?"
+            "UPDATE productos SET stock_manual = stock_manual + ? WHERE codigo = ? AND tienda = ?"
         );
         foreach ($items as $it) {
-            $stmtUp->execute([(int)$it['qty'], $it['producto_codigo']]);
+            $stmtUp->execute([(int)$it['qty'], $it['producto_codigo'], $tiendaFactura]);
         }
 
         $rows = eliminar_logico('facturas', $id);
