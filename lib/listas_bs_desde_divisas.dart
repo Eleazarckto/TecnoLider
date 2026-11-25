@@ -14,8 +14,8 @@ part of 'main.dart';
 //    · Producto que no está en la lista base (o sin precio ahí): precio de
 //      venta del inventario × (1 + %) × tasa, como antes.
 //    · Al elegir la base la lista se recalcula entera ya, y desde ahí
-//      sigue sola a su base: al abrirla, al guardar la lista en divisas,
-//      al cambiar la tasa y al cambiar el precio de un producto. Los
+//      sigue sola a su base: al abrirla, al cambiar la tasa y al cambiar
+//      el precio de un producto en el catálogo. Los
 //      precios marcados ✎ (escritos a mano) no se tocan.
 //    · El servidor hace la misma cuenta en las listas en modo costo
 //      (plValores en backend/lib/precios_listas.php).
@@ -121,35 +121,6 @@ int seguirListaBase(ListaPrecio lista, [List<ListaPrecio>? listas]) {
   }
   if (cambios > 0) cambios += lista.aplicarFormulas();
   return cambios;
-}
-
-/// Después de guardar la lista en divisas [base]: sus listas en Bs se
-/// ponen al día y se guardan (fusión, sin pisar a otros equipos).
-/// Devuelve cuántas listas cambiaron.
-Future<int> actualizarListasBsDeBase(ListaPrecio base) async {
-  if (base.id == null || base.esEnBolivares) return 0;
-  var n = 0;
-  // La base recién guardada manda sobre la copia que haya en memoria.
-  final listas = [
-    base,
-    for (final l in listasPreciosGlobal)
-      if (l.id != base.id) l
-  ];
-  for (final lb in listas) {
-    if (lb.listaBaseId != base.id || lb.id == null) continue;
-    final foto = InstantaneaLista.de(lb);
-    if (seguirListaBase(lb, listas) == 0) continue;
-    try {
-      await guardarCambiosDeLista(lb, foto);
-      n++;
-    } catch (e) {
-      debugPrint('[ListasBs] No se pudo guardar "${lb.nombre}": $e');
-    }
-  }
-  if (n > 0) {
-    debugPrint('[ListasBs] «${base.nombre}»: $n lista(s) en Bs al día');
-  }
-  return n;
 }
 
 /// Selector «Tomar precios de» de una lista en Bs. [molde] es la lista

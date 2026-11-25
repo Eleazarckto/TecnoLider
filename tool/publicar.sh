@@ -6,6 +6,8 @@
 #     bash tool/publicar.sh            → compila APK + Windows y publica
 #     bash tool/publicar.sh --sin-compilar
 #                                      → publica lo que ya está en release/<versión>/
+#     --con-correccion-precios          → instala los dos PHP de listas antes del anuncio
+#     --verificar                      → comprueba una entrega existente sin conectarse
 #
 #  Antes de correrlo hay que subir la versión en TRES lugares del repo:
 #     · kAppVersion en lib/main.dart
@@ -38,12 +40,26 @@ if [[ -f "$RAIZ/PUBLICACION_BLOQUEADA" ]]; then
   exit 1
 fi
 
+SIN_COMPILAR=0
+CORRECCION_PRECIOS=0
+SOLO_VERIFICAR=0
+for argumento in "$@"; do
+  case "$argumento" in
+    --sin-compilar) SIN_COMPILAR=1 ;;
+    --con-correccion-precios) CORRECCION_PRECIOS=1 ;;
+    --verificar) SOLO_VERIFICAR=1; SIN_COMPILAR=1 ;;
+    *) printf 'Opción desconocida: %s\n' "$argumento" >&2; exit 1 ;;
+  esac
+done
+
 ENV_FILE="$RAIZ/tool/.deploy.env"
 [[ -f "$ENV_FILE" ]] && { set -a; source "$ENV_FILE"; set +a; }
 : "${DEPLOY_HOST:=204.48.24.185}"
 : "${DEPLOY_USUARIO:=sistemasceccato}"
 : "${DEPLOY_LLAVE:=$HOME/.ssh/id_ed25519}"
 : "${DEPLOY_RUTA:=/home/sistemasceccato/htdocs/sistemasceccato.com/tecnolider/updates}"
+RUTA_ACTUALIZACIONES="${DEPLOY_RUTA%/}"
+: "${DEPLOY_BACKEND_RUTA:=${RUTA_ACTUALIZACIONES%/*}}"
 BASE_URL="https://sistemasceccato.com/tecnolider/updates"
 
 # Huella de la firma de los APK ya instalados en los teléfonos. Si un APK
@@ -82,7 +98,7 @@ ZIP="$DIR/tecnolider-windows-$VERSION.zip"
 mkdir -p "$DIR"
 
 # ── 2. Compilar ─────────────────────────────────────────────────────
-if [[ "${1:-}" != "--sin-compilar" ]]; then
+if (( ! SIN_COMPILAR )); then
   paso "2/6  Compilando (APK y Windows, uno después del otro)"
   # Con poca RAM, dos compilaciones a la vez hacen fallar a Gradle.
   "$FLUTTER" build apk --release
@@ -125,6 +141,18 @@ firma="$("$JAVA" -jar "$SIGNER" verify --print-certs "$APK" | grep -m1 'SHA-256'
   || { rojo "Firma $firma distinta a la de los teléfonos. No se publica."; exit 1; }
 verde "  firmado con la llave de la flota"
 
+if (( CORRECCION_PRECIOS )); then
+  ENDPOINT_PRECIOS="backend/endpoints/listas_precios.php"
+  MOTOR_PRECIOS="backend/lib/precios_listas.php"
+  [[ -s "$ENDPOINT_PRECIOS" && -s "$MOTOR_PRECIOS" ]] \
+    || { rojo "Faltan los archivos PHP de la corrección de precios"; exit 1; }
+fi
+
+if (( SOLO_VERIFICAR )); then
+  verde "Entrega $VERSION verificada localmente."
+  exit 0
+fi
+
 # ── 4. Subir instaladores ───────────────────────────────────────────
 paso "4/6  Subiendo APK y zip"
 scp "${O[@]}" "$APK" "$ZIP" "$DEST:$DEPLOY_RUTA/"
@@ -137,6 +165,45 @@ for f in "$APK" "$ZIP"; do
   [[ "$code" == 200 ]] || { rojo "$(basename "$f") no descarga desde la web (HTTP $code)"; exit 1; }
 done
 verde "  instaladores completos y descargables"
+
+if (( CORRECCION_PRECIOS )); then
+  paso "Instalando la corrección de listas de precios"
+  respaldo=$(ssh "${O[@]}" "$DEST" "mktemp -d \"\$HOME/.tecnolider-precios-$VERSION.XXXXXXXX\"" | tr -d '\r')
+  [[ "$respaldo" =~ ^/[a-zA-Z0-9_./-]+$ ]] \
+    || { rojo "No se pudo preparar el respaldo remoto de precios"; exit 1; }
+  scp "${O[@]}" "$MOTOR_PRECIOS" "$DEST:$respaldo/motor.php"
+  scp "${O[@]}" "$ENDPOINT_PRECIOS" "$DEST:$respaldo/endpoint.php"
+  ssh "${O[@]}" "$DEST" "bash -s -- '$DEPLOY_BACKEND_RUTA' '$respaldo'" <<'REMOTO'
+set -euo pipefail
+raiz=$1
+respaldo=$2
+motor="$raiz/lib/precios_listas.php"
+endpoint="$raiz/endpoints/listas_precios.php"
+if [[ ! -f "$raiz/api.php" || ! -f "$motor" || ! -f "$endpoint" ]]; then
+  printf 'No se encontró la instalación PHP de Tecno Líder en %s\n' "$raiz" >&2
+  exit 1
+fi
+php -l "$respaldo/motor.php"
+php -l "$respaldo/endpoint.php"
+cp -p -- "$motor" "$respaldo/motor.anterior.php"
+cp -p -- "$endpoint" "$respaldo/endpoint.anterior.php"
+
+nuevo_motor=''
+nuevo_endpoint=''
+trap 'rm -f -- "$nuevo_motor" "$nuevo_endpoint"' EXIT
+nuevo_motor=$(mktemp "$raiz/lib/.listas_precios.XXXXXXXX")
+nuevo_endpoint=$(mktemp "$raiz/endpoints/.listas_precios.XXXXXXXX")
+install -m "$(stat -c %a "$motor")" -- "$respaldo/motor.php" "$nuevo_motor"
+install -m "$(stat -c %a "$endpoint")" -- "$respaldo/endpoint.php" "$nuevo_endpoint"
+mv -f -- "$nuevo_motor" "$motor"
+if ! mv -f -- "$nuevo_endpoint" "$endpoint"; then
+  cp -p -- "$respaldo/motor.anterior.php" "$nuevo_motor"
+  mv -f -- "$nuevo_motor" "$motor"
+  exit 1
+fi
+REMOTO
+  verde "  corrección instalada, respaldo en $respaldo"
+fi
 
 # ── 5. Anunciar la versión ──────────────────────────────────────────
 paso "5/6  Publicando version.json (respaldo del anterior)"

@@ -124,7 +124,7 @@ part 'costos_finanzas_vistas.dart';
 /// IMPORTANTE: subí este número CADA VEZ que compiles una versión
 /// nueva. Debe coincidir con el "version" del version.json del
 /// servidor. Formato: "MAYOR.MENOR.PARCHE".
-const String kAppVersion = "1.0.18";
+const String kAppVersion = "1.0.20";
 
 /// URL del archivo version.json en el servidor.
 /// Se descarga con http.get limpio, SIN cabeceras de autenticación.
@@ -965,7 +965,6 @@ void main() async {
   // Nota: Firebase Cloud Messaging deshabilitado por conflicto entre
   // firebase_messaging y mobile_scanner en iOS. Las notificaciones
   // funcionan vía polling al backend cuando la app está abierta.
-  TasaBCVScheduler.iniciar();
   // Cargar impresora preferida del sistema (USB conectada a PC, red, etc).
   await ImpresoraSistema.cargarPreferida();
   // Cargar impresora Bluetooth térmica preferida (mac + nombre + ancho).
@@ -988,6 +987,7 @@ void main() async {
   await ConfigSistema.cargarCategoriasComision();
   // Cargar configuración general (nombre empresa, garantía, etc.)
   await ConfigSistema.cargarConfigGeneral();
+  TasaBCVScheduler.iniciar();
   // Cargar encabezados de sede (logos, RIF, direcciones por sede).
   await ConfigSistema.cargarEncabezados();
   // Cargar categorías editables de productos (de aquí nacen las
@@ -1179,25 +1179,36 @@ class TasaBCV {
   final DateTime fechaActualizacion;
   final String fuente;
   final bool esActualizacionAutomatica;
+  final bool fechaConfirmada;
 
   TasaBCV({
     required this.valor,
     required this.fechaActualizacion,
     required this.fuente,
     this.esActualizacionAutomatica = true,
+    this.fechaConfirmada = true,
   });
 
   String get valorFormateado => "Bs ${valor.toStringAsFixed(2)}";
   String get fechaFormateada {
+    if (!fechaConfirmada) return 'Fecha sin verificar';
+    if (fuente != 'Manual') {
+      final dia = diaVenezuela(fechaActualizacion);
+      return "${dia.day.toString().padLeft(2, '0')}/"
+          "${dia.month.toString().padLeft(2, '0')}/${dia.year}";
+    }
     final f = fechaActualizacion;
     return "${f.day.toString().padLeft(2,'0')}/${f.month.toString().padLeft(2,'0')}/${f.year} "
            "${f.hour.toString().padLeft(2,'0')}:${f.minute.toString().padLeft(2,'0')}";
   }
   bool get esDeHoy {
-    final now = DateTime.now();
-    return fechaActualizacion.year == now.year &&
-           fechaActualizacion.month == now.month &&
-           fechaActualizacion.day == now.day;
+    return fechaConfirmada && !diaVenezuela(fechaActualizacion)
+        .isBefore(diaVenezuela(DateTime.now()));
+  }
+
+  static DateTime diaVenezuela(DateTime fecha) {
+    final vzla = fecha.toUtc().subtract(const Duration(hours: 4));
+    return DateTime.utc(vzla.year, vzla.month, vzla.day);
   }
 }
 
@@ -1207,83 +1218,73 @@ class TasaBCV {
 class ServicioBCV {
   static const _urlBCV = 'https://www.bcv.org.ve';
   // Múltiples APIs de respaldo en orden de prioridad
-  // Se incluyen MUCHAS fuentes alternativas porque algunas redes
-  // venezolanas bloquean ciertos dominios. Probamos todas en cascada.
+  // Las redes venezolanas pueden bloquear distintos dominios.
   static const _urlDolarApi   = 'https://pydolarve.org/api/v1/dollar?page=bcv';
   static const _urlEsDolar    = 'https://es.dolarapi.com/v1/dolares/oficial';
   static const _urlVeApi      = 'https://ve.dolarapi.com/v1/dolares/oficial';
   static const _urlBCVApi     = 'https://bcv-api.rafnixg.dev/rates/';
-  static const _urlExchange   = 'https://open.er-api.com/v6/latest/USD';
 
   static Future<TasaBCV> obtenerTasa() async {
-    // Acumulamos los errores de cada fuente para mostrarlos en el
-    // mensaje final si TODAS fallan. Así el usuario sabe exactamente
-    // qué pasó en cada una (SSL, timeout, DNS, etc.).
-    final errores = <String>[];
+    final fuentes = {
+      'BCV oficial': _obtenerDesdeBCV,
+      'Backend propio': _obtenerDesdeNuestroBackend,
+      've.dolarapi.com': _obtenerDesdeVeDolarApi,
+      'es.dolarapi.com': _obtenerDesdeEsDolar,
+      'pydolarve.org': _obtenerDesdePyDolar,
+      'bcv-api': _obtenerDesdeBcvApi,
+    };
+    final resultados = await Future.wait(fuentes.entries.map((fuente) async {
+      try {
+        final tasa = await fuente.value().timeout(const Duration(seconds: 8));
+        return (tasa: tasa, error: '');
+      } catch (e) {
+        return (tasa: null, error: '• ${fuente.key}: ${_resumirError(e)}');
+      }
+    }));
+    final tasas = resultados.map((r) => r.tasa).whereType<TasaBCV>();
+    final elegida = masReciente(tasas);
+    if (elegida != null) return elegida;
+    throw Exception('No se pudo consultar el BCV:\n'
+        '${resultados.map((r) => r.error).join("\n")}');
+  }
 
-    // ✨ FUENTE 0 (PRIORITARIA): nuestro propio backend.
-    // Esto resuelve los problemas de Windows desktop con SSL/encoding
-    // del BCV — nuestro servidor PHP hace el scraping y devuelve el
-    // valor ya parseado en JSON limpio. Funciona idéntico en Android,
-    // iOS, Windows, etc. Si nuestro backend está caído, caen las demás.
-    try {
-      final tasa = await _obtenerDesdeNuestroBackend();
-      debugPrint('[BCV] Tasa de nuestro backend: ${tasa.valor}');
-      return tasa;
-    } catch (e) {
-      debugPrint('[BCV] Fallo backend propio: $e');
-      errores.add('• Backend propio: ${_resumirError(e)}');
+  @visibleForTesting
+  static TasaBCV? masReciente(Iterable<TasaBCV> tasas) {
+    TasaBCV? mejor;
+    for (final tasa in tasas) {
+      if (!tasa.valor.isFinite || tasa.valor <= 0) continue;
+      if (mejor == null ||
+          (tasa.fechaConfirmada &&
+              (!mejor.fechaConfirmada ||
+                  TasaBCV.diaVenezuela(tasa.fechaActualizacion)
+                      .isAfter(TasaBCV.diaVenezuela(mejor.fechaActualizacion))))) {
+        mejor = tasa;
+      }
     }
+    return mejor;
+  }
 
-    // Fuente 1: BCV oficial (scraping)
-    try {
-      final tasa = await _obtenerDesdeBCV();
-      debugPrint('[BCV] Tasa del BCV oficial: ${tasa.valor}');
-      return tasa;
-    } catch (e) {
-      debugPrint('[BCV] Fallo BCV scraping: $e');
-      errores.add('• BCV oficial: ${_resumirError(e)}');
+  static DateTime? _fechaFuente(Object? valor) {
+    final texto = valor?.toString().trim() ?? '';
+    final dia = RegExp(r'^(\d{4})-(\d{2})-(\d{2})').firstMatch(texto);
+    if (dia == null || DateTime.tryParse(texto) == null) return null;
+    final fecha = DateTime.utc(
+        int.parse(dia[1]!), int.parse(dia[2]!), int.parse(dia[3]!), 4);
+    if (fecha.day != int.parse(dia[3]!) ||
+        fecha.isAfter(DateTime.now().toUtc().add(const Duration(days: 4)))) {
+      return null;
     }
-    // Fuente 2: pydolarve.org
-    try {
-      final tasa = await _obtenerDesdePyDolar();
-      debugPrint('[BCV] Tasa de pydolarve.org: ${tasa.valor}');
-      return tasa;
-    } catch (e) {
-      debugPrint('[BCV] Fallo pydolarve: $e');
-      errores.add('• pydolarve.org: ${_resumirError(e)}');
-    }
-    // Fuente 3: es.dolarapi.com
-    try {
-      final tasa = await _obtenerDesdeEsDolar();
-      debugPrint('[BCV] Tasa de dolarapi.com: ${tasa.valor}');
-      return tasa;
-    } catch (e) {
-      debugPrint('[BCV] Fallo dolarapi: $e');
-      errores.add('• es.dolarapi.com: ${_resumirError(e)}');
-    }
-    // Fuente 4: ve.dolarapi.com (espejo venezolano)
-    try {
-      final tasa = await _obtenerDesdeVeDolarApi();
-      debugPrint('[BCV] Tasa de ve.dolarapi.com: ${tasa.valor}');
-      return tasa;
-    } catch (e) {
-      debugPrint('[BCV] Fallo ve.dolarapi: $e');
-      errores.add('• ve.dolarapi.com: ${_resumirError(e)}');
-    }
-    // Fuente 5: bcv-api.rafnixg.dev (API alternativa con scraping)
-    try {
-      final tasa = await _obtenerDesdeBcvApi();
-      debugPrint('[BCV] Tasa de bcv-api: ${tasa.valor}');
-      return tasa;
-    } catch (e) {
-      debugPrint('[BCV] Fallo bcv-api: $e');
-      errores.add('• bcv-api.rafnixg.dev: ${_resumirError(e)}');
-    }
-    // Si llegamos acá, las cinco fuentes fallaron. Mostramos el detalle
-    // de cada una para diagnosticar (SSL, timeout, etc.).
-    throw Exception(
-        'Las fuentes fallaron [V6]:\n${errores.join("\n")}');
+    return fecha;
+  }
+
+  static TasaBCV _tasaDeFuente(double valor, String fuente, Object? fecha) {
+    final confirmada = _fechaFuente(fecha);
+    return TasaBCV(
+      valor: valor,
+      fechaActualizacion: confirmada ?? DateTime.now(),
+      fechaConfirmada: confirmada != null,
+      fuente: fuente,
+    );
   }
 
   /// Obtiene la tasa desde NUESTRO PROPIO servidor en Namecheap.
@@ -1310,13 +1311,10 @@ class ServicioBCV {
     if (valor == null || valor < 10 || valor > 500000) {
       throw Exception('Valor inválido del backend: $valor');
     }
-    return TasaBCV(
-      valor: valor,
-      fechaActualizacion: DateTime.now(),
-      fuente: (data is Map ? data['fuente']?.toString() : null)
-          ?? 'Backend',
-      esActualizacionAutomatica: true,
-    );
+    final datos = data as Map;
+    return _tasaDeFuente(valor, datos['fuente']?.toString() ?? 'Backend',
+        datos['fechaValor'] ?? datos['fecha_valor'] ?? datos['fecha_vigencia'] ??
+        datos['fechaActualizacion'] ?? datos['fecha']);
   }
 
   /// Convierte un error técnico (SocketException, HandshakeException,
@@ -1332,7 +1330,7 @@ class ServicioBCV {
     if (s.contains('HandshakeException') || s.contains('CertificateException')) {
       return 'Certificado SSL inválido o no aceptado';
     }
-    if (s.contains('TimeoutException')) return 'Tiempo de espera agotado (>25s)';
+    if (s.contains('TimeoutException')) return 'Tiempo de espera agotado';
     if (s.contains('HTTP 4') || s.contains('HTTP 5')) {
       final m = RegExp(r'HTTP (\d+)').firstMatch(s);
       if (m != null) return 'Servidor respondió HTTP ${m.group(1)}';
@@ -1422,39 +1420,18 @@ class ServicioBCV {
     final html = buffer.toString();
 
     try {
-      // Patrón principal: div id="dolar" → strong con el valor
-      final p1 = RegExp(
-        r'id=.dolar.[^>]*>.*?<strong[^>]*>\s*([\d,.]+)\s*</strong>',
+      final dolar = RegExp(
+        r"""<div\b[^>]*\bid=["']dolar["'][^>]*>.*?<strong[^>]*>\s*([\d,.]+)\s*</strong>""",
         dotAll: true, caseSensitive: false,
-      );
-      // Patrón 2: buscar número venezolano en formato "1.234,56" o "1234,56" cerca de dolar/usd
-      final p2 = RegExp(
-        r'(?:dolar|d[óo]lar|usd|USD)[^0-9\n]{0,60}?([\d]{1,3}(?:[.,]\d{3})*[,.]\d{2})',
-        multiLine: true, caseSensitive: false,
-      );
-      // Patrón 3: cualquier número con coma decimal venezolano (XX,XXXXXX) en tabla
-      final p3 = RegExp(
-        r'<(?:strong|td|span)[^>]*>\s*(\d{2,3},\d{4,8})\s*<\/(?:strong|td|span)>',
-        multiLine: true,
-      );
-
-      for (final patron in [p1, p2, p3]) {
-        for (final match in patron.allMatches(html)) {
-          final raw = match.group(1)!
-              .trim()
-              .replaceAll('.', '')   // quitar punto de miles
-              .replaceAll(',', '.'); // coma decimal → punto
-          final valor = double.tryParse(raw);
-          // Rango válido: 1 BsD = entre 10 y 500,000 por USD
-          if (valor != null && valor >= 10 && valor <= 500000) {
-            return TasaBCV(
-              valor: valor,
-              fechaActualizacion: DateTime.now(),
-              fuente: 'BCV Oficial',
-              esActualizacionAutomatica: true,
-            );
-          }
-        }
+      ).firstMatch(html);
+      final valor = double.tryParse(
+          dolar?[1]?.replaceAll('.', '').replaceAll(',', '.') ?? '');
+      if (valor != null && valor >= 10 && valor <= 500000) {
+        final etiqueta = RegExp(r'<span\b[^>]*\bdate-display-single\b[^>]*>',
+            caseSensitive: false).firstMatch(html)?.group(0) ?? '';
+        final fecha = RegExp(r"""\bcontent=["']([^"']+)""")
+            .firstMatch(etiqueta)?.group(1);
+        return _tasaDeFuente(valor, 'BCV Oficial', fecha);
       }
       throw Exception('No se encontró la tasa en el HTML del BCV');
     } catch (e) {
@@ -1520,12 +1497,7 @@ class ServicioBCV {
       }
     }
     if (valor == null || valor <= 0) throw Exception('Valor inválido: $valor');
-    return TasaBCV(
-      valor: valor,
-      fechaActualizacion: DateTime.now(),
-      fuente: 'pydolarve.org',
-      esActualizacionAutomatica: true,
-    );
+    return _tasaDeFuente(valor, 'pydolarve.org', data['last_update']);
   }
 
   /// dolarapi.com — segunda API de respaldo
@@ -1538,12 +1510,7 @@ class ServicioBCV {
       (data['promedio'] ?? data['tasa'] ?? data['valor'] ?? 0).toString()
     );
     if (valor == null || valor <= 0) throw Exception('Valor inválido: $valor');
-    return TasaBCV(
-      valor: valor,
-      fechaActualizacion: DateTime.now(),
-      fuente: 'dolarapi.com',
-      esActualizacionAutomatica: true,
-    );
+    return _tasaDeFuente(valor, 'dolarapi.com', data['fechaActualizacion']);
   }
 
   /// ve.dolarapi.com — espejo venezolano de dolarapi (a veces accesible
@@ -1556,12 +1523,7 @@ class ServicioBCV {
       (data['promedio'] ?? data['tasa'] ?? data['valor'] ?? 0).toString()
     );
     if (valor == null || valor <= 0) throw Exception('Valor inválido: $valor');
-    return TasaBCV(
-      valor: valor,
-      fechaActualizacion: DateTime.now(),
-      fuente: 've.dolarapi.com',
-      esActualizacionAutomatica: true,
-    );
+    return _tasaDeFuente(valor, 've.dolarapi.com', data['fechaActualizacion']);
   }
 
   /// bcv-api.rafnixg.dev — API hospedada en Vercel/Cloudflare que hace
@@ -1597,12 +1559,7 @@ class ServicioBCV {
       }
     }
     if (valor == null || valor <= 0) throw Exception('Valor inválido en JSON');
-    return TasaBCV(
-      valor: valor,
-      fechaActualizacion: DateTime.now(),
-      fuente: 'bcv-api',
-      esActualizacionAutomatica: true,
-    );
+    return _tasaDeFuente(valor, 'bcv-api', data is Map ? data['fechaActualizacion'] ?? data['date'] : null);
   }
 }
 
@@ -1614,6 +1571,8 @@ class ServicioBCV {
 class TasaBCVScheduler {
   static Timer? _timer;
   static Timer? _timerPeriodico;
+  static Future<TasaBCV?>? _enCurso;
+  static DateTime? _ultimoIntento;
   static TasaBCV? ultimaTasa;
   static bool actualizando = false;
   static String? ultimoError; // ← último error de actualización (para diagnóstico)
@@ -1634,16 +1593,12 @@ class TasaBCVScheduler {
       // PASO 2: Después de cargar lo guardado, intentamos actualizar
       //   automáticamente. Si falla, no pasa nada: queda la tasa
       //   guardada que ya cargamos.
-      _actualizarSiNecesario();
+      actualizarAhora(origenAutomatico: true);
     });
     _programarProximaActualizacion();
     _timerPeriodico?.cancel();
-    _timerPeriodico = Timer.periodic(const Duration(hours: 4), (_) {
-      if (ultimaTasa != null) {
-        final diff = DateTime.now().difference(ultimaTasa!.fechaActualizacion);
-        if (diff.inMinutes < 30) return;
-      }
-      actualizarAhora(origenAutomatico: true);
+    _timerPeriodico = Timer.periodic(const Duration(minutes: 2), (_) {
+      verificarVigencia();
     });
   }
 
@@ -1662,7 +1617,7 @@ class TasaBCVScheduler {
     final ahora = DateTime.now().toUtc();
     // Venezuela es UTC-4
     final ahoraVzla = ahora.subtract(const Duration(hours: 4));
-    var objetivo = DateTime(ahoraVzla.year, ahoraVzla.month, ahoraVzla.day, 21, 0, 0);
+    var objetivo = DateTime.utc(ahoraVzla.year, ahoraVzla.month, ahoraVzla.day, 21);
     // Si ya pasaron las 9 PM hoy, programar para mañana
     if (ahoraVzla.isAfter(objetivo) || ahoraVzla.isAtSameMomentAs(objetivo)) {
       objetivo = objetivo.add(const Duration(days: 1));
@@ -1670,34 +1625,44 @@ class TasaBCVScheduler {
     return objetivo.difference(ahoraVzla);
   }
 
-  static Future<void> _actualizarSiNecesario() async {
-    // Si no hay tasa o la última no es de hoy, actualizar
-    if (ultimaTasa == null || !ultimaTasa!.esDeHoy) {
-      await actualizarAhora(origenAutomatico: true);
+  static void verificarVigencia({bool alVolver = false}) {
+    final intervalo = Duration(minutes: ultimoError != null ||
+        !(ultimaTasa?.fechaConfirmada ?? false) ? 2 : alVolver ? 5 : 30);
+    final intento = _ultimoIntento;
+    if (intento == null || DateTime.now().difference(intento) >= intervalo) {
+      actualizarAhora(origenAutomatico: true);
     }
   }
 
   /// Fuerza una actualización inmediata (también usable desde la UI)
-  static Future<TasaBCV?> actualizarAhora({bool origenAutomatico = false}) async {
-    if (actualizando) return ultimaTasa;
+  static Future<TasaBCV?> actualizarAhora({bool origenAutomatico = false}) =>
+      _enCurso ??= _consultar(origenAutomatico);
+
+  static Future<TasaBCV?> _consultar(bool origenAutomatico) async {
+    _ultimoIntento = DateTime.now();
     actualizando = true;
     _notificar();
     try {
       final tasa = await ServicioBCV.obtenerTasa();
+      final guardada = ultimaTasa;
+      if (guardada != null &&
+          identical(ServicioBCV.masReciente([tasa, guardada]), guardada)) {
+        throw StateError('Las fuentes no confirmaron una tasa más reciente.');
+      }
       ultimaTasa = tasa;
       ultimoError = null;
       ConfigSistema.tasaCambio = tasa.valor;
       await _guardarTasa(tasa); // persistir en disco
       debugPrint('[BCV] ✅ Tasa actualizada: ${tasa.valor} (${tasa.fuente}) — ${origenAutomatico ? "automático" : "manual"}');
-      _notificar();
       return tasa;
     } catch (e) {
       ultimoError = e.toString();
       debugPrint('[BCV] ❌ Error actualizando tasa: $e');
-      _notificar();
       return null;
     } finally {
       actualizando = false;
+      _enCurso = null;
+      _notificar();
     }
   }
 
@@ -1727,14 +1692,15 @@ class TasaBCVScheduler {
       final valor = prefs.getDouble('tasa_bcv_valor');
       final fecha = prefs.getString('tasa_bcv_fecha');
       final fuente = prefs.getString('tasa_bcv_fuente') ?? 'Guardada';
-      if (valor != null && valor > 0) {
+      if (valor != null && valor.isFinite && valor > 0 && ultimaTasa == null) {
+        final fechaGuardada = DateTime.tryParse(fecha ?? '');
         ultimaTasa = TasaBCV(
           valor: valor,
-          fechaActualizacion: fecha != null
-              ? (DateTime.tryParse(fecha) ?? DateTime.now())
-              : DateTime.now(),
+          fechaActualizacion: fechaGuardada ?? DateTime.now(),
+          fechaConfirmada: fechaGuardada != null &&
+              (prefs.getBool('tasa_bcv_fecha_confirmada') ?? fuente == 'Manual'),
           fuente: fuente,
-          esActualizacionAutomatica: false,
+          esActualizacionAutomatica: fuente != 'Manual',
         );
         ConfigSistema.tasaCambio = valor;
         debugPrint('[BCV] Tasa cargada desde disco: $valor');
@@ -1751,6 +1717,7 @@ class TasaBCVScheduler {
       await prefs.setString('tasa_bcv_fecha',
           tasa.fechaActualizacion.toIso8601String());
       await prefs.setString('tasa_bcv_fuente', tasa.fuente);
+      await prefs.setBool('tasa_bcv_fecha_confirmada', tasa.fechaConfirmada);
     } catch (e) {
       debugPrint('[BCV] No se pudo guardar tasa: $e');
     }
@@ -3643,7 +3610,7 @@ class _TasaBCVBadgeState extends State<TasaBCVBadge> {
                 const SizedBox(width: 4),
                 Column(crossAxisAlignment: CrossAxisAlignment.start, mainAxisSize: MainAxisSize.min, children: [
                   Text("BCV: ${tasa.valorFormateado}", style: TextStyle(color: color, fontSize: 12, fontWeight: FontWeight.bold)),
-                  Text(tasa.esDeHoy ? "Hoy" : tasa.fechaFormateada.split(' ').first,
+                  Text(tasa.fechaConfirmada ? tasa.fechaFormateada.split(' ').first : 'Sin verificar',
                     style: TextStyle(color: color.withValues(alpha: 0.7), fontSize: 9)),
                 ]),
               ]),
@@ -3661,13 +3628,9 @@ class _TasaBCVBadgeState extends State<TasaBCVBadge> {
       content: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
         _filaDetalle("Tasa actual", tasa.valorFormateado, grande: true),
         _filaDetalle("Fuente", tasa.fuente),
-        _filaDetalle("Actualizado", tasa.fechaFormateada),
+        _filaDetalle("Fecha de la tasa", tasa.fechaFormateada),
         _filaDetalle("Tipo", tasa.esActualizacionAutomatica ? "Automática" : "Manual"),
         _filaDetalle("Estado", tasa.esDeHoy ? "✅ Al día" : "⚠️ Desactualizada"),
-        _filaDetalle("Próx. actualización", "Hoy a las 9:00 PM (VET)"),
-        const Divider(),
-        const Text("La tasa se actualiza automáticamente cada día a las 9 PM hora Venezuela directamente desde el Banco Central de Venezuela.",
-          style: TextStyle(fontSize: 11, color: Colors.grey)),
       ]),
       actions: [
         TextButton(onPressed: () => Navigator.pop(ctx), child: const Text("Cerrar")),
@@ -6750,12 +6713,24 @@ class ListaPrecio {
   /// servidor (financiadoras y listas Bs dependen de otras listas).
   /// Lista en Bs con lista base: parte del precio del producto en la
   /// lista en divisas (si no está ahí, de la venta, como siempre).
-  double precioPorDefecto(Producto p, [List<ListaPrecio>? listas]) {
+  double precioPorDefecto(Producto p, [List<ListaPrecio>? listas, double? tasa]) {
     final partida = precioEnListaBase(this, p, listas) ??
         (esModoCosto && !esFinanciamiento ? p.precioCosto : p.precioVenta);
     final usd = redondearPrecioLista(
         (partida + montoAdicionalDolares) * (1 + porcentajePara(p) / 100));
-    return esEnBolivares ? redondearPrecioLista(usd * tasaParaPoblar) : usd;
+    return esEnBolivares
+        ? redondearPrecioLista(usd * (tasa ?? tasaParaPoblar))
+        : usd;
+  }
+
+  bool get esListaKrece =>
+      normalizarFinanciadoraAud(financiadora) == 'Krece' ||
+      normalizarFinanciadoraAud(nombre) == 'Krece';
+
+  /// Fija el margen sobre el precio de venta del catálogo.
+  double precioConMargenDeVenta(Producto producto, double porcentaje) {
+    final usd = redondearPrecioLista(producto.precioVenta * (1 + porcentaje / 100));
+    return esEnBolivares ? redondearPrecioLista(usd * tasaEfectiva) : usd;
   }
 
   /// Vuelve TODOS los precios al de partida: columnas sin fórmula al
@@ -8698,10 +8673,11 @@ class MyApp extends StatefulWidget {
   State<MyApp> createState() => _MyAppState();
 }
 
-class _MyAppState extends State<MyApp> {
+class _MyAppState extends State<MyApp> with WidgetsBindingObserver {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     // ── Solicitar permisos DESPUÉS de que el primer frame se haya
     //    renderizado. Es CRÍTICO hacerlo aquí (y no en main() antes
     //    de runApp) porque varios dispositivos Android — especialmente
@@ -8719,6 +8695,19 @@ class _MyAppState extends State<MyApp> {
         debugPrint('[MyApp] Error al solicitar permisos: $e');
       }
     });
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      TasaBCVScheduler.verificarVigencia(alVolver: true);
+    }
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
   }
 
   @override
@@ -28944,6 +28933,70 @@ class _VentanaImeiState extends State<VentanaImei> {
     );
   }
 
+  Future<Producto?> _buscarModeloImei(
+      BuildContext context, List<Producto> modelos) {
+    var consulta = '';
+    return showDialog<Producto>(
+      context: context,
+      builder: (ctx) => StatefulBuilder(builder: (ctx, actualizar) {
+        final palabras = consulta.trim().toLowerCase().split(RegExp(r'\s+'));
+        final resultados = modelos.where((p) {
+          final texto = '${p.nombre} ${p.marca} ${p.modelo} ${p.codigo}'
+              .toLowerCase();
+          return palabras.every(texto.contains);
+        }).toList();
+        return AlertDialog(
+          title: const Text('Buscar equipo'),
+          content: SizedBox(
+            width: 460,
+            height: 400,
+            child: Column(children: [
+              TextField(
+                autofocus: true,
+                decoration: const InputDecoration(
+                  labelText: 'Nombre, marca, modelo o SKU',
+                  prefixIcon: Icon(Icons.search),
+                  border: OutlineInputBorder(),
+                  isDense: true,
+                ),
+                onChanged: (valor) => actualizar(() => consulta = valor),
+                onSubmitted: (_) {
+                  if (resultados.length == 1) {
+                    Navigator.pop(ctx, resultados.single);
+                  }
+                },
+              ),
+              const SizedBox(height: 8),
+              Expanded(
+                child: resultados.isEmpty
+                    ? Center(child: Text(modelos.isEmpty
+                        ? 'No hay equipos disponibles'
+                        : 'No se encontraron equipos'))
+                    : ListView.builder(
+                        itemCount: resultados.length,
+                        itemBuilder: (_, indice) {
+                          final producto = resultados[indice];
+                          return ListTile(
+                            title: Text(producto.nombre),
+                            subtitle: Text('${producto.marca} · ${producto.codigo}'),
+                            onTap: () => Navigator.pop(ctx, producto),
+                          );
+                        },
+                      ),
+              ),
+            ]),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text('Cancelar'),
+            ),
+          ],
+        );
+      }),
+    );
+  }
+
   void _abrirFormularioIngreso(BuildContext parentContext) {
     // Lista de IMEIs a ingresar (permite agregar varios)
     final List<TextEditingController> imeiCtrls = [TextEditingController()];
@@ -29046,19 +29099,21 @@ class _VentanaImeiState extends State<VentanaImei> {
                 ]),
                 const SizedBox(height: 8),
 
-                DropdownButtonFormField<Producto>(
-                  value: pSel,
-                  hint: const Text("O elige el modelo aquí..."),
-                  decoration: const InputDecoration(
-                    isDense: true,
-                    prefixIcon: Icon(Icons.phone_android, size: 18),
-                    border: OutlineInputBorder()),
-                  isExpanded: true,
-                  items: todosModelos.map((p) => DropdownMenuItem(
-                    value: p,
-                    child: Text("${p.nombre} (${p.marca})",
-                      overflow: TextOverflow.ellipsis))).toList(),
-                  onChanged: (v) => setL(() => pSel = v),
+                OutlinedButton(
+                  onPressed: () async {
+                    final elegido = await _buscarModeloImei(ctx, todosModelos);
+                    if (elegido != null && ctx.mounted) {
+                      setL(() => pSel = elegido);
+                    }
+                  },
+                  child: Row(children: [
+                    const Icon(Icons.search, size: 18),
+                    const SizedBox(width: 8),
+                    Expanded(child: Text(
+                      pSel?.nombre ?? 'Buscar equipo',
+                      overflow: TextOverflow.ellipsis,
+                    )),
+                  ]),
                 ),
                 const SizedBox(height: 14),
 
@@ -30165,9 +30220,14 @@ class _FormularioFacturaState extends State<FormularioFactura>
     // Si es una factura NUEVA (no edición), también intentar restaurar
     // un borrador previo si el proceso fue terminado por el sistema
     // (por ejemplo al abrir el scanner en pantalla completa con poca RAM).
-    _refrescarCatalogo().then((_) {
-      if (widget.facturaAEditar == null) _restaurarBorrador();
+    TasaBCVScheduler.addListener(_alCambiarTasaFactura);
+    _cargaInicialFactura = _refrescarCatalogo().then((_) async {
+      if (mounted && widget.facturaAEditar == null) await _restaurarBorrador();
     });
+  }
+
+  void _alCambiarTasaFactura() {
+    if (mounted) setState(() {});
   }
 
   /// Rellena los maps `_tipoVentaEquipo`, `_financiadorEquipo`,
@@ -30295,12 +30355,22 @@ class _FormularioFacturaState extends State<FormularioFactura>
   static bool _esLineaFinanciada(String? tv) =>
       tv == 'Cashea' || tv == 'Weppa' || tv == 'Krece' || tv == 'Financiado';
 
+  late final Future<void> _cargaInicialFactura;
+  List<ListaPrecio> _listasFactura = listasPreciosGlobal;
+
   bool get _esFpb => _tipoVenta == "FPB";
 
   /// Tasa del cuadre: la de la factura que se edita, o la BCV del día.
-  double get _tasaFactura => widget.facturaAEditar != null
-      ? tasaDeFactura(widget.facturaAEditar!)
-      : ConfigSistema.tasaCambio;
+  double get _tasaFactura {
+    final factura = widget.facturaAEditar;
+    if (factura != null) return tasaDeFactura(factura);
+    for (final pago in _pagos) {
+      if (pago.monedaEfectiva == kMonedaBs && (pago.tasaCambio ?? 0) > 0) {
+        return pago.tasaCambio!;
+      }
+    }
+    return ConfigSistema.tasaCambio;
+  }
 
   LineaCuadre _lineaCuadre(Producto p, {required String ref,
       required bool esEquipo, String? tipoVenta, String? lista, double? inicial}) {
@@ -30310,7 +30380,7 @@ class _FormularioFacturaState extends State<FormularioFactura>
     final precios = preciosReferenciaDe(
       codigo: p.codigo,
       precioVenta: p.precioVenta,
-      listas: listasPreciosGlobal,
+      listas: _listasFactura,
       financiadora: fin ? tipoVenta : null,
       nombreLista: lista,
     );
@@ -30534,6 +30604,10 @@ class _FormularioFacturaState extends State<FormularioFactura>
   /// Recarga productos e IMEIs desde la API para tener el stock real
   /// al momento de crear la factura (evita vender stock agotado).
   Future<void> _refrescarCatalogo() async {
+    final consultaListas = _Api.get('listas_precios').catchError((Object e) {
+      debugPrint('[FormularioFactura] Error refrescando listas: $e');
+      return null;
+    });
     try {
       final results = await Future.wait([
         _Api.get('productos'),
@@ -30541,6 +30615,10 @@ class _FormularioFacturaState extends State<FormularioFactura>
       ]);
       final rawP = results[0];
       final rawI = results[1];
+      final prods = ((rawP as List?) ?? [])
+          .map((m) => Producto.fromMap(m))
+          .toList();
+      catalogoGlobal = prods;
       final imeis = ((rawI as List?) ?? [])
           .map((m) => ImeiRegistro.fromMap(m))
           .toList();
@@ -30555,8 +30633,7 @@ class _FormularioFacturaState extends State<FormularioFactura>
       // factura. Si viene vacía (venta sin tienda asignada) no se
       // filtra nada, para no romper instalaciones de un solo local.
       final tiendaVenta = widget.tienda.trim();
-      final prods = ((rawP as List?) ?? []).map((m) {
-        final p = Producto.fromMap(m);
+      for (final p in prods) {
         if (CategoriasProductos.usaIMEI(p.categoria)) {
           p.stockTotal = imeis
               .where((i) =>
@@ -30573,19 +30650,29 @@ class _FormularioFacturaState extends State<FormularioFactura>
               p.tienda != tiendaVenta;
           p.stockTotal = esDeOtraTienda ? 0 : p.stockManual;
         }
-        return p;
-      }).toList();
-      catalogoGlobal  = prods;
+      }
       stockImeiGlobal = imeis;
       if (mounted) setState(() {});
     } catch (e) {
       debugPrint('[FormularioFactura] Error refrescando catálogo: $e');
+    }
+    try {
+      final raw = await consultaListas;
+      if (raw is List) {
+        _listasFactura = raw
+            .map((m) => ListaPrecio.fromMap(m as Map<String, dynamic>))
+            .toList();
+        if (mounted) setState(() {});
+      }
+    } catch (e) {
+      debugPrint('[FormularioFactura] Error refrescando listas: $e');
     }
   }
 
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    TasaBCVScheduler.removeListener(_alCambiarTasaFactura);
     _telCtrl.dispose();
     _correoClienteCtrl.dispose();
     _direccionCtrl.dispose();
@@ -30771,12 +30858,14 @@ class _FormularioFacturaState extends State<FormularioFactura>
     // factura impresa.
     int? numeroCuotasManual,
     double? montoCuotaManual,
+    double? tasaPago,
     // Sólo para el pago de $0 de una venta financiada sin inicial
     // (ver `_registrarPagoSinInicial`).
     bool permitirCero = false,
   }) {
-    final monto = double.tryParse(_montoPago.text.trim());
-    if (monto == null || monto < 0 || (monto == 0 && !permitirCero)) {
+    final monto = double.tryParse(_montoPago.text.trim().replaceAll(',', '.'));
+    if (monto == null || !monto.isFinite || monto < 0 ||
+        (monto == 0 && !permitirCero)) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text("Ingrese un monto de pago válido mayor a 0"),
           backgroundColor: AppColors.statusOrange));
@@ -30886,11 +30975,12 @@ class _FormularioFacturaState extends State<FormularioFactura>
           '_montoCuotaEquipo=$_montoCuotaEquipo');
 
       final monedaPago = monedaDeMetodo(_metodo);
+      final tasa = tasaPago ?? _tasaFactura;
       _pagos.add(PagoFactura(
         metodo: _metodo, monto: monto,
         // Moneda y monto en $ (a BCV) de cada pago (facturación oct-2026).
         moneda: monedaPago,
-        montoUsd: montoUsdDePago(monto, monedaPago, _tasaFactura),
+        montoUsd: montoUsdDePago(monto, monedaPago, tasa),
         tipo: esFinanciado ? "Financiado" : "Contado",
         financiador: financiadorDerivado,
         financiadora: financiadoraDerivada,
@@ -30920,9 +31010,7 @@ class _FormularioFacturaState extends State<FormularioFactura>
         // factura impresa usa SIEMPRE esta tasa, NO la tasa actual.
         // Así si la tasa cambia mañana, la factura sigue mostrando el
         // equivalente correcto que se cobró ese día.
-        tasaCambio: ConfigSistema.tasaCambio > 0
-            ? ConfigSistema.tasaCambio
-            : null,
+        tasaCambio: tasa > 0 ? tasa : null,
         // ── NOMBRE DE LA LISTA APLICADA ──
         // Solo aplica cuando el pago es financiado. Identifica EXACTAMENTE
         // qué lista de precios se usó (normal vs promoción) para que el
@@ -31000,6 +31088,8 @@ class _FormularioFacturaState extends State<FormularioFactura>
   }
 
   Future<void> _guardarFacturaInterno() async {
+    await _cargaInicialFactura;
+    if (!mounted) return;
     // Un vendedor sólo factura en su tienda asignada (el login ya lo
     // fuerza; esto cubre cualquier otro camino a esta pantalla).
     final motivoTienda = widget.facturaAEditar == null
@@ -31048,7 +31138,9 @@ class _FormularioFacturaState extends State<FormularioFactura>
     // marcado como inicial, que lleva la financiadora, las cuotas y la
     // lista: los reportes y la factura impresa los leen del pago.
     bool sinInicialConfirmada = false;
-    if (_pagos.isEmpty && _hayProductoFinanciado()) {
+    final cobro = _cuadre();
+    if (_pagos.isEmpty && _hayProductoFinanciado() &&
+        cobro.objetivoUsd == 0 && cobro.objetivoBs == 0) {
       final ok = await _confirmarVentaSinInicial();
       if (ok != true || !mounted) return;
       _registrarPagoSinInicial();
@@ -31068,7 +31160,11 @@ class _FormularioFacturaState extends State<FormularioFactura>
     // FPB sale con lo que pague el cliente, aunque sea nada: todo queda
     // de deuda (dueño, facturación oct-2026).
     if (_pagos.isEmpty && !_esFpb) {
-      _mostrarValidacion("Agregue al menos un método de pago.");
+      if (cobro.sinInicial.isNotEmpty) {
+        _mostrarValidacion(cobro.problema!);
+      } else {
+        _mostrarDialogoPago();
+      }
       return;
     }
 
@@ -32435,7 +32531,9 @@ class _FormularioFacturaState extends State<FormularioFactura>
     ]);
   }
 
-  void _mostrarDialogoBusqueda() {
+  Future<void> _mostrarDialogoBusqueda() async {
+    await _cargaInicialFactura;
+    if (!mounted) return;
     // Estado del diálogo: producto/equipo detectado + selección F/D por producto
     Producto? prodDetectado;
     ImeiRegistro? imeiDetectado;
@@ -32488,6 +32586,7 @@ class _FormularioFacturaState extends State<FormularioFactura>
       final v = val.trim();
       prodDetectado = null;
       imeiDetectado = null;
+      listaSeleccionada = null;
       if (v.isEmpty) {
         setS(() {});
         return;
@@ -32534,8 +32633,20 @@ class _FormularioFacturaState extends State<FormularioFactura>
           resumen =
               "${prodDetectado!.nombre} (Stock: $stockRestante)";
         }
-        final hayDetectado = imeiDetectado != null || prodDetectado != null;
+        final producto = imeiDetectado?.producto ?? prodDetectado;
+        final hayDetectado = producto != null;
+        final nombresListas = producto == null
+            ? <String>[]
+            : listasFinanciadorasPara(
+                    _listasFactura, tipoVentaSeleccionado, producto.codigo)
+                .map((l) => l.nombre)
+                .toSet()
+                .toList();
+        final listaAplicada = nombresListas.length == 1
+            ? nombresListas.single
+            : nombresListas.contains(listaSeleccionada) ? listaSeleccionada : null;
         final puedeAgregar = hayDetectado &&
+            (nombresListas.length <= 1 || listaAplicada != null) &&
             (imeiDetectado != null ||
                 (stockRestante != null && stockRestante > 0));
 
@@ -32578,7 +32689,7 @@ class _FormularioFacturaState extends State<FormularioFactura>
                               financiadorSeleccionado,
                               numeroCuotasSeleccionado,
                               montoCuotaSeleccionado,
-                              listaSeleccionada,
+                              listaAplicada,
                               inicialSeleccionada);
                           Navigator.pop(c);
                         }
@@ -32696,6 +32807,7 @@ class _FormularioFacturaState extends State<FormularioFactura>
                         // Al cambiar de F/D se resetea el financiador
                         // (la persona) — solo aplica a ventas financiadas.
                         financiadorSeleccionado = null;
+                        listaSeleccionada = null;
                       });
                     },
                   ),
@@ -32742,49 +32854,30 @@ class _FormularioFacturaState extends State<FormularioFactura>
                           setS(() => financiadorSeleccionado = v),
                     ),
                     const SizedBox(height: 10),
-                    // ── Selector de Lista de Precios ──
-                    // Buscar todas las listas de precios cuya financiadora
-                    // coincida con la selección (Cashea/Weppa/Krece). Si
-                    // hay 2+ listas (ej. normal y promoción) el vendedor
-                    // DEBE escoger cuál se aplica para que el reporte
-                    // distinga entre ellas. Si solo hay 1, se auto-selecciona.
-                    Builder(builder: (_) {
-                      final finLow = tipoVentaSeleccionado.toLowerCase();
-                      final listasFin = listasPreciosGlobal.where((lp) {
-                        final lpFin = (lp.financiadora ?? '').toLowerCase().trim();
-                        if (lpFin.isEmpty) return false;
-                        return lpFin.contains(finLow) || finLow.contains(lpFin);
-                      }).toList();
-                      // Auto-seleccionar si solo hay 1 lista disponible.
-                      if (listasFin.length == 1 && listaSeleccionada == null) {
-                        WidgetsBinding.instance.addPostFrameCallback((_) {
-                          setS(() => listaSeleccionada = listasFin.first.nombre);
-                        });
-                      }
-                      if (listasFin.isEmpty) {
-                        return Container(
-                          padding: const EdgeInsets.all(10),
-                          decoration: BoxDecoration(
-                            color: Colors.orange.withValues(alpha: 0.1),
-                            border: Border.all(color: Colors.orange.shade300),
-                            borderRadius: BorderRadius.circular(6),
-                          ),
-                          child: Row(children: [
-                            Icon(Icons.warning_amber, size: 16,
-                                color: Colors.orange.shade800),
-                            const SizedBox(width: 8),
-                            Expanded(child: Text(
-                              "No hay listas de precios para $tipoVentaSeleccionado. "
-                              "Crear una en el módulo de Listas para que el reporte "
-                              "calcule bien.",
-                              style: TextStyle(
-                                  fontSize: 11,
-                                  color: Colors.orange.shade900))),
-                          ]),
-                        );
-                      }
-                      return DropdownButtonFormField<String>(
-                        value: listaSeleccionada,
+                    if (nombresListas.isEmpty)
+                      Container(
+                        padding: const EdgeInsets.all(10),
+                        decoration: BoxDecoration(
+                          color: Colors.orange.withValues(alpha: 0.1),
+                          border: Border.all(color: Colors.orange.shade300),
+                          borderRadius: BorderRadius.circular(6),
+                        ),
+                        child: Row(children: [
+                          Icon(Icons.warning_amber, size: 16,
+                              color: Colors.orange.shade800),
+                          const SizedBox(width: 8),
+                          Expanded(child: Text(
+                            "Este producto no tiene precio en una lista de "
+                            "$tipoVentaSeleccionado.",
+                            style: TextStyle(
+                                fontSize: 11,
+                                color: Colors.orange.shade900))),
+                        ]),
+                      )
+                    else
+                      DropdownButtonFormField<String>(
+                        key: ValueKey((tipoVentaSeleccionado, producto?.codigo)),
+                        initialValue: listaAplicada,
                         isExpanded: true,
                         decoration: const InputDecoration(
                           labelText: "Lista de precios aplicada",
@@ -32792,16 +32885,15 @@ class _FormularioFacturaState extends State<FormularioFactura>
                           isDense: true,
                           prefixIcon: Icon(Icons.list_alt),
                         ),
-                        items: listasFin
-                            .map((lp) => DropdownMenuItem(
-                                value: lp.nombre,
-                                child: Text(lp.nombre,
+                        items: nombresListas
+                            .map((nombre) => DropdownMenuItem(
+                                value: nombre,
+                                child: Text(nombre,
                                     overflow: TextOverflow.ellipsis)))
                             .toList(),
                         onChanged: (v) =>
                             setS(() => listaSeleccionada = v),
-                      );
-                    }),
+                      ),
                     const SizedBox(height: 10),
                     // ── Cuotas del financiamiento ──
                     // El vendedor especifica N° de cuotas y monto de cada
@@ -32880,7 +32972,7 @@ class _FormularioFacturaState extends State<FormularioFactura>
                           financiadorSeleccionado,
                           numeroCuotasSeleccionado,
                           montoCuotaSeleccionado,
-                          listaSeleccionada,
+                          listaAplicada,
                           inicialSeleccionada);
                       Navigator.pop(c);
                     }
@@ -32994,6 +33086,15 @@ class _FormularioFacturaState extends State<FormularioFactura>
   }
 
   void _mostrarDialogoPago() {
+    FocusManager.instance.primaryFocus?.unfocus();
+    final cobro = _cuadre();
+    void proponerMonto() {
+      final saldo = monedaDeMetodo(_metodo) == kMonedaBs
+          ? cobro.faltaBs
+          : cobro.faltaUsd;
+      _montoPago.text = saldo > 0 ? saldo.toStringAsFixed(2) : '';
+    }
+    proponerMonto();
     // ── Estado local del diálogo ───────────────────────────────
     // Banco destino (donde llega el pago — sólo aplica a Pago Móvil).
     // Por defecto sugerimos BDV (porque es el único con conciliación
@@ -33017,7 +33118,7 @@ class _FormularioFacturaState extends State<FormularioFactura>
     // Si el vendedor marca este pago como la INICIAL del cliente.
     // El reporte por financiadora usa este flag para saber qué monto
     // exacto restar como inicial en la fórmula (Base − Inicial) − 3.5%.
-    bool marcarComoInicial = false;
+    bool marcarComoInicial = cobro.inicialTotal > 0 && cobro.contadoDivisa == 0;
 
     // Controllers para cuotas del financiamiento. Solo se usan si el
     // vendedor los llena manualmente (aparecen abajo del monto). Si el
@@ -33033,11 +33134,13 @@ class _FormularioFacturaState extends State<FormularioFactura>
       rutaDialogo ??= ModalRoute.of(c);
       return StatefulBuilder(builder: (context, setS) {
       final esPagoMovil = _esPagoMovil(_metodo);
+      final monedaPago = monedaDeMetodo(_metodo);
 
       // ── Acción: aceptar el pago ──
       void aceptarPago() {
-        final monto = double.tryParse(_montoPago.text.trim());
-        if (monto == null || monto <= 0) {
+        final monto = double.tryParse(
+            _montoPago.text.trim().replaceAll(',', '.'));
+        if (monto == null || !monto.isFinite || monto <= 0) {
           ScaffoldMessenger.of(context).showSnackBar(
             const SnackBar(content: Text("Ingrese un monto válido mayor a 0"),
               backgroundColor: AppColors.statusOrange));
@@ -33074,6 +33177,7 @@ class _FormularioFacturaState extends State<FormularioFactura>
             cedulaFmt = '$letraCedula${ctrlCedulaPagador.text.trim()}';
           }
           _agregarPago(
+            tasaPago           : cobro.tasa,
             bancoDestino       : bancoDestinoSel,
             bancoOrigen        : bancoOrigenSel,
             referenciaPM       : ctrlReferencia.text.trim(),
@@ -33090,6 +33194,7 @@ class _FormularioFacturaState extends State<FormularioFactura>
           );
         } else {
           _agregarPago(
+            tasaPago           : cobro.tasa,
             esInicial          : marcarComoInicial,
             numeroCuotasManual : int.tryParse(ctrlNumeroCuotas.text.trim()),
             montoCuotaManual   : double.tryParse(ctrlMontoCuota.text.trim()),
@@ -33120,9 +33225,9 @@ class _FormularioFacturaState extends State<FormularioFactura>
               items: ConfigSistema.metodossPago
                   .map((e) => DropdownMenuItem(value: e, child: Text(e))).toList(),
               onChanged: (v) => setS(() {
-                _metodo = v!;
-                // Al cambiar de método, reseteamos el resultado de
-                // conciliación (porque puede dejar de aplicar).
+                if (v == null) return;
+                _metodo = v;
+                if (monedaDeMetodo(v) != monedaPago) proponerMonto();
               })),
             const SizedBox(height: 12),
 
@@ -33132,7 +33237,7 @@ class _FormularioFacturaState extends State<FormularioFactura>
               autofocus: !esPagoMovil,
               keyboardType: const TextInputType.numberWithOptions(decimal: true),
               decoration: InputDecoration(
-                labelText: esPagoMovil ? "Monto (Bs)" : "Monto",
+                labelText: monedaPago == kMonedaBs ? "Monto (Bs)" : "Monto (\$)",
                 prefixIcon: const Icon(Icons.payments_outlined),
                 helperText: esPagoMovil
                     ? "El importe se enviará al BDV en bolívares"
@@ -33792,15 +33897,12 @@ class _VentanaConsultaRapidaPreciosState
   Future<void> _cargarDatos() async {
     if (mounted) setState(() => _cargando = true);
     try {
-      // El catálogo va primero: `ListaPrecio.fromMap` resuelve cada
-      // item contra `catalogoGlobal` y descarta los que no encuentra.
-      if (catalogoGlobal.isEmpty) {
-        final rawP = await _Api.get('productos');
-        catalogoGlobal = ((rawP as List?) ?? [])
-            .map((m) => Producto.fromMap(m as Map<String, dynamic>))
-            .toList();
-      }
-      final raw = await _Api.get('listas_precios');
+      // Los ítems de cada lista se vinculan al catálogo recién cargado.
+      final resultados = await Future.wait<dynamic>([
+        _Api.get('listas_precios'),
+        cargarStockParaListas(forzar: true).then((_) => null),
+      ]);
+      final raw = resultados.first;
       if (raw is List) {
         listasPreciosGlobal = raw
             .map((m) => ListaPrecio.fromMap(m as Map<String, dynamic>))
@@ -33814,10 +33916,6 @@ class _VentanaConsultaRapidaPreciosState
       // ids. Es una sola vez por equipo.
       await ConfigSistema.migrarSeleccionConsultaRapidaAIds(
           listasPreciosGlobal);
-      // Stock real (catálogo + IMEIs de todas las tiendas): la consulta
-      // sólo muestra productos con existencia. Se trae fresco cada vez
-      // para no ofrecer lo que ya se vendió o se agotó.
-      await cargarStockParaListas(forzar: true);
       await _leerColumnasElegidas();
     } catch (e) {
       debugPrint('[ConsultaRapida] Error cargando datos: $e');
@@ -34071,14 +34169,20 @@ class _VentanaConsultaRapidaPreciosState
   List<Map<String, dynamic>> _preciosDelProducto(Producto p) {
     final resultados = <Map<String, dynamic>>[];
     for (final lista in listasPreciosGlobal.where(_listaEsVisible)) {
-      // Buscar el item del producto en esta lista
-      final item = lista.items.firstWhere(
-          (it) => it.producto.codigo == p.codigo,
-          orElse: () => ItemListaPrecio(
-              producto: p,
-              stockDisponible: 0,
-              preciosPorColumna: {}));
-      if (item.preciosPorColumna.isEmpty) continue;
+      var item = lista.items
+          .where((it) => it.producto.codigo == p.codigo).firstOrNull;
+      if (item == null && !lista.esModoCosto &&
+          listaLeCorrespondeA(lista, p.categoria, p.marca) &&
+          stockGlobalDeProducto(p) > 0) {
+        item = itemNuevoDeLista(lista, p, stockGlobalDeProducto(p),
+            tasa: lista.tasaEfectiva);
+        for (final col in lista.columnas) {
+          if (col.formula.esManual || !col.formula.auto) continue;
+          final precio = lista.calcularColumna(col, item);
+          if (precio != null) item.preciosPorColumna[col.nombre] = precio;
+        }
+      }
+      if (item == null || item.preciosPorColumna.isEmpty) continue;
       // Sólo la columna elegida para esta lista (o todas, si así se
       // eligió): antes salían todas mezcladas.
       final cols = _columnasAMostrar(lista);
@@ -34943,8 +35047,10 @@ class _VentanaListasPreciosState extends State<VentanaListasPrecios> {
               lista.esEnBolivares = esBs;
               lista.tasaDelDia =
                   double.tryParse(tasaCtrl.text) ?? lista.tasaDelDia;
-              lista.porcentajeAdicional =
-                  double.tryParse(pctAdicionalCtrl.text) ?? 0.0;
+              final pctAnterior = lista.porcentajeAdicional;
+              lista.porcentajeAdicional = double.tryParse(
+                      pctAdicionalCtrl.text.trim().replaceAll(',', '.')) ??
+                  pctAnterior;
               lista.esFinanciamiento = esFinanc;
               if (esFinanc) {
                 lista.financiadora = financiadoraCtrl.text.trim().isEmpty
@@ -35001,7 +35107,10 @@ class _VentanaListasPreciosState extends State<VentanaListasPrecios> {
               // su % y la tasa (los ✎ no se tocan).
               lista.listaBaseId = esBs ? listaBaseId : null;
               lista.vistaBs = esBs ? vistaBs : 'bs';
-              final recalculados = seguirListaBase(lista);
+              final recalculados = lista.esListaKrece && !lista.esModoCosto &&
+                      pctAnterior != lista.porcentajeAdicional
+                  ? lista.recalcularPrecios()
+                  : seguirListaBase(lista);
               Navigator.pop(ctx);
               // Persistir el cambio al backend (multidispositivo)
               await _guardarListaEnBackend(lista, base: base);
@@ -35009,7 +35118,7 @@ class _VentanaListasPreciosState extends State<VentanaListasPrecios> {
                 setState(() {});
                 ScaffoldMessenger.of(context).showSnackBar(SnackBar(
                   content: Text("Lista \"${lista.nombre}\" actualizada"
-                      "${recalculados > 0 ? ' · $recalculados precio(s) recalculados desde «${listaBaseDe(lista)?.nombre ?? ''}»' : ''}"),
+                      "${recalculados > 0 ? ' · $recalculados precio(s) recalculados' : ''}"),
                   backgroundColor: AppColors.statusGreen));
               }
             },
@@ -36341,11 +36450,6 @@ class _DetalleListaPrecioState extends State<DetalleListaPrecio> {
       }
       debugPrint('[ListaPrecio] ✓ Persistida en backend '
           '(id=${widget.lista.id})');
-      // Lista en divisas: las listas en Bs que toman sus precios de ella
-      // se ponen al día (sin esperar: no frena el guardado).
-      if (!widget.lista.esEnBolivares) {
-        unawaited(actualizarListasBsDeBase(widget.lista));
-      }
       _intentosFallidos = 0;
       _ultimaMarcaServidor = '';
       _ultimaEdicionLocal = DateTime.now();
@@ -37576,13 +37680,16 @@ class _DetalleListaPrecioState extends State<DetalleListaPrecio> {
   // Editar precio de TODA una columna de una vez (ajuste por porcentaje o valor fijo)
   void _editarColumnaCompleta(ColumnaPrecio col) {
     if (_bloqueadaPorCosto()) return;
+    final lista = widget.lista;
+    final esKrece = lista.esListaKrece ||
+        normalizarFinanciadoraAud(col.nombre) == 'Krece';
     final porcentajeCtrl = TextEditingController();
     bool esPorcentaje = true;
     showDialog(context: context, builder: (ctx) => StatefulBuilder(
       builder: (ctx, setD) => AlertDialog(
         title: Text("Ajustar columna: ${col.nombre}"),
         content: Column(mainAxisSize: MainAxisSize.min, children: [
-          if (!col.formula.esManual && col.formula.auto)
+          if (!(esKrece && esPorcentaje) && !col.formula.esManual && col.formula.auto)
             Container(
               padding: const EdgeInsets.all(8),
               margin: const EdgeInsets.only(bottom: 8),
@@ -37598,7 +37705,9 @@ class _DetalleListaPrecioState extends State<DetalleListaPrecio> {
                   style: const TextStyle(fontSize: 11)),
             ),
           SwitchListTile(
-            title: Text(esPorcentaje ? "Ajuste por porcentaje (%)" : "Valor fijo a sumar/restar"),
+            title: Text(esPorcentaje
+                ? esKrece ? "Margen sobre el precio de venta" : "Ajuste por porcentaje (%)"
+                : "Valor fijo a sumar/restar"),
             value: esPorcentaje,
             onChanged: (v) => setD(() => esPorcentaje = v),
           ),
@@ -37607,17 +37716,27 @@ class _DetalleListaPrecioState extends State<DetalleListaPrecio> {
             autofocus: true,
             keyboardType: TextInputType.numberWithOptions(decimal: true, signed: true),
             decoration: InputDecoration(
-              labelText: esPorcentaje ? "Porcentaje (ej: 10 para +10%, -5 para -5%)" : "Valor a añadir/restar",
+              labelText: esPorcentaje
+                  ? esKrece ? "Nuevo margen (%)" : "Porcentaje (ej: 10 para +10%, -5 para -5%)"
+                  : "Valor a añadir/restar",
               prefixIcon: Icon(esPorcentaje ? Icons.percent : Icons.attach_money))),
         ]),
         actions: [
           TextButton(onPressed: () => Navigator.pop(ctx), child: const Text("Cancelar")),
           ElevatedButton(
             onPressed: () {
-              final val = double.tryParse(porcentajeCtrl.text);
-              if (val == null) return;
+              final val = double.tryParse(
+                  porcentajeCtrl.text.trim().replaceAll(',', '.'));
+              if (val == null || !val.isFinite || (esKrece && esPorcentaje && val < -100)) return;
               setState(() {
                 for (final item in widget.lista.items) {
+                  if (esKrece && esPorcentaje) {
+                    if (item.fueraDeCatalogo) continue;
+                    item.preciosPorColumna[col.nombre] =
+                        lista.precioConMargenDeVenta(item.producto, val);
+                    item.marcarManual(col.nombre);
+                    continue;
+                  }
                   final actual = item.preciosPorColumna[col.nombre] ?? 0.0;
                   item.preciosPorColumna[col.nombre] = esPorcentaje
                       ? (actual * (1 + val / 100))
@@ -37654,6 +37773,7 @@ class _DetalleListaPrecioState extends State<DetalleListaPrecio> {
     if (_bloqueadaPorCosto()) return;
     final lista = widget.lista;
     final esFinanc = lista.esFinanciamiento;
+    final esKrece = lista.esListaKrece;
 
     // Estado del diálogo
     final seleccionados = <int>{}; // índices de items seleccionados
@@ -37665,7 +37785,7 @@ class _DetalleListaPrecioState extends State<DetalleListaPrecio> {
     //  - 'reemplazar': poner un valor fijo
     //  - 'fijar_pct': fijar el % de la financiadora (inicial/recargo)
     //  - 'fijar_cuotas': cambiar el número de cuotas
-    String tipoOp = 'sumar_pct';
+    String tipoOp = esKrece ? 'fijar_margen' : 'sumar_pct';
     // Campo objetivo cuando es financiadora:
     //  - 'precio_base'
     //  - 'inicial'   (cambia el inicialManual)
@@ -37674,6 +37794,16 @@ class _DetalleListaPrecioState extends State<DetalleListaPrecio> {
     //  - 'recargo_pct'  (cambia el %recargo de TODA la lista)
     //  - 'n_cuotas'     (cambia número de cuotas de TODA la lista)
     String campoFinanc = 'precio_base';
+    void elegirCampo(String campo) {
+      if (esKrece && campo != campoFinanc) {
+        tipoOp = switch (campo) {
+          'precio_base' => 'fijar_margen',
+          'inicial' || 'cuota' => 'sumar_pct',
+          _ => 'reemplazar',
+        };
+      }
+      campoFinanc = campo;
+    }
     final valorCtrl = TextEditingController(text: "0");
 
     await showDialog<void>(
@@ -37749,24 +37879,24 @@ class _DetalleListaPrecioState extends State<DetalleListaPrecio> {
                     Wrap(spacing: 6, runSpacing: 6, children: [
                       _chipCampo(setDlg, campoFinanc, 'precio_base',
                           'Precio base', Icons.attach_money,
-                          (v) => campoFinanc = v),
+                          elegirCampo),
                       _chipCampo(setDlg, campoFinanc, 'inicial',
                           'Inicial por prod.', Icons.payments,
-                          (v) => campoFinanc = v),
+                          elegirCampo),
                       if (lista.tieneCuotas)
                         _chipCampo(setDlg, campoFinanc, 'cuota',
                             'Cuota por prod.', Icons.calendar_month,
-                            (v) => campoFinanc = v),
+                            elegirCampo),
                       _chipCampo(setDlg, campoFinanc, 'inicial_pct',
                           '% inicial (toda la lista)', Icons.percent,
-                          (v) => campoFinanc = v),
+                          elegirCampo),
                       if (lista.tieneCuotas) ...[
                         _chipCampo(setDlg, campoFinanc, 'recargo_pct',
                             '% recargo (toda la lista)', Icons.trending_up,
-                            (v) => campoFinanc = v),
+                            elegirCampo),
                         _chipCampo(setDlg, campoFinanc, 'n_cuotas',
                             'N° cuotas (toda la lista)', Icons.format_list_numbered,
-                            (v) => campoFinanc = v),
+                            elegirCampo),
                       ],
                     ]),
                     const SizedBox(height: 12),
@@ -37782,6 +37912,13 @@ class _DetalleListaPrecioState extends State<DetalleListaPrecio> {
                         campoFinanc == 'n_cuotas')) ...[
                       _chipOp(setDlg, tipoOp, 'reemplazar',
                           'Establecer valor', Icons.swap_horiz,
+                          (v) => tipoOp = v),
+                    ] else if (esKrece && campoFinanc == 'precio_base') ...[
+                      _chipOp(setDlg, tipoOp, 'fijar_margen',
+                          'Establecer margen %', Icons.percent,
+                          (v) => tipoOp = v),
+                      _chipOp(setDlg, tipoOp, 'reemplazar',
+                          'Reemplazar valor', Icons.swap_horiz,
                           (v) => tipoOp = v),
                     ] else ...[
                       _chipOp(setDlg, tipoOp, 'sumar_pct',
@@ -38029,6 +38166,7 @@ class _DetalleListaPrecioState extends State<DetalleListaPrecio> {
 
   /// Label dinámico del campo de valor según el tipo de operación
   String _labelDelValor(String tipoOp, String campo, bool esFinanc) {
+    if (tipoOp == 'fijar_margen') return 'Nuevo margen sobre el precio de venta (%)';
     if (esFinanc && campo == 'n_cuotas') return 'Número de cuotas';
     if (esFinanc && campo == 'inicial_pct') return 'Nuevo % inicial';
     if (esFinanc && campo == 'recargo_pct') return 'Nuevo % recargo';
@@ -38118,7 +38256,7 @@ class _DetalleListaPrecioState extends State<DetalleListaPrecio> {
     // Los campos de TODA la lista siempre fijan el valor, aunque el tipo
     // de operación haya quedado en "Aumentar %" (ese chip no se ve para
     // ellos). Por eso un 0% de inicial se rechazaba.
-    final fijaValor = tipoOp == 'reemplazar' ||
+    final fijaValor = tipoOp == 'reemplazar' || tipoOp == 'fijar_margen' ||
         (esFinanc && (campoFinanc == 'inicial_pct' ||
             campoFinanc == 'recargo_pct' ||
             campoFinanc == 'n_cuotas'));
@@ -38195,6 +38333,13 @@ class _DetalleListaPrecioState extends State<DetalleListaPrecio> {
           // Cambio en precio base (caso general — listas normales y
           // financiadora con campo 'precio_base')
           for (final col in lista.columnas) {
+            if (tipoOp == 'fijar_margen') {
+              if (item.fueraDeCatalogo) continue;
+              item.preciosPorColumna[col.nombre] =
+                  lista.precioConMargenDeVenta(item.producto, valor);
+              item.marcarManual(col.nombre);
+              continue;
+            }
             final actual = item.preciosPorColumna[col.nombre] ?? 0.0;
             double nuevo;
             if (tipoOp == 'sumar_pct') {
@@ -45891,7 +46036,7 @@ class ConfigSistema {
           nombreEmpresa = (raw['cfg_nombre_empresa'] ?? '').toString();
         if (raw.containsKey('cfg_moneda'))
           moneda = (raw['cfg_moneda'] ?? 'USD').toString();
-        if (raw.containsKey('cfg_tasa_cambio'))
+        if (TasaBCVScheduler.ultimaTasa == null && raw.containsKey('cfg_tasa_cambio'))
           tasaCambio = double.tryParse(raw['cfg_tasa_cambio'].toString()) ?? tasaCambio;
         if (raw.containsKey('cfg_dias_garantia'))
           diasGarantia = int.tryParse(raw['cfg_dias_garantia'].toString()) ?? diasGarantia;
@@ -47987,9 +48132,9 @@ class _VentanaConfiguracionState extends State<VentanaConfiguracion>
                 const Text("Actualización automática", style: TextStyle(fontWeight: FontWeight.bold, fontSize: 12, color: AppColors.primaryBlue)),
               ]),
               const SizedBox(height: 4),
-              const Text("La tasa se actualiza automáticamente cada día a las 9:00 PM hora Venezuela (VET, UTC-4) desde el Banco Central de Venezuela.", style: TextStyle(fontSize: 11, color: Colors.grey)),
+              const Text("Se consulta al abrir la app, al volver después de unos minutos y periódicamente mientras está abierta.", style: TextStyle(fontSize: 11, color: Colors.grey)),
               const SizedBox(height: 4),
-              Text("Próxima actualización en: ${TasaBCVScheduler.proximaActualizacion}", style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w600, color: AppColors.royalBlue)),
+              Text("Consulta programada de las 9:00 p. m. (Venezuela) en ${TasaBCVScheduler.proximaActualizacion}", style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w600, color: AppColors.royalBlue)),
             ]),
           ),
           const SizedBox(height: 12),

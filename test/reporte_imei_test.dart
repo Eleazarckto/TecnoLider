@@ -1,9 +1,76 @@
 // Reporte de IMEIs por tienda, marca y modelo (pedido del dueño 19/10/2026):
 // filtros antes de generar + totales por tienda, marca y modelo.
+import 'dart:convert';
+
+import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:http/http.dart' as http;
+import 'package:http/testing.dart';
 import 'package:tecno_lider/main.dart';
 
 void main() {
+  testWidgets('el ingreso de IMEIs permite buscar y elegir un equipo', (t) async {
+    final catalogoAnterior = catalogoGlobal;
+    final tiendasAnteriores = ConfigSistema.tiendas;
+    final imeisAnteriores = stockImeiGlobal;
+    catalogoGlobal = [];
+    addTearDown(() {
+      catalogoGlobal = catalogoAnterior;
+      ConfigSistema.tiendas = tiendasAnteriores;
+      stockImeiGlobal = imeisAnteriores;
+    });
+
+    await http.runWithClient(() async {
+      await t.pumpWidget(const MaterialApp(home: VentanaImei()));
+      await t.pumpAndSettle();
+      await t.tap(find.byTooltip('Registrar IMEI'));
+      await t.pumpAndSettle();
+      await t.tap(find.widgetWithText(OutlinedButton, 'Buscar equipo'));
+      await t.pumpAndSettle();
+
+      final buscador = find.widgetWithText(TextField, 'Nombre, marca, modelo o SKU');
+      await t.enterText(buscador, 'inexistente');
+      await t.pumpAndSettle();
+      expect(find.text('No se encontraron equipos'), findsOneWidget);
+
+      await t.enterText(buscador, '  SAMSUNG  sm-a155 ');
+      await t.pumpAndSettle();
+      expect(find.text('Galaxy A15'), findsOneWidget);
+      expect(find.text('Redmi 13'), findsNothing);
+
+      await t.enterText(buscador, 'rd13');
+      await t.pumpAndSettle();
+      await t.tap(find.text('Redmi 13'));
+      await t.pumpAndSettle();
+      expect(find.widgetWithText(OutlinedButton, 'Redmi 13'), findsOneWidget);
+      expect(find.widgetWithText(TextField, 'IMEI 1'), findsOneWidget);
+    }, () => MockClient((request) async {
+      final datos = switch (request.url.queryParameters['resource']) {
+        'productos' => [
+            {
+              'codigo': 'GA15',
+              'nombre': 'Galaxy A15',
+              'marca': 'Samsung',
+              'modelo': 'SM-A155',
+              'categoria': 'Telefono',
+            },
+            {
+              'codigo': 'RD13',
+              'nombre': 'Redmi 13',
+              'marca': 'Xiaomi',
+              'modelo': 'Redmi 13',
+              'categoria': 'Telefono',
+            },
+          ],
+        'tiendas' => [{'nombre': 'Principal'}],
+        _ => [],
+      };
+      return http.Response(jsonEncode(datos), 200, headers: {
+        'content-type': 'application/json; charset=utf-8',
+      });
+    }));
+  });
+
   test('tienda vacía = «Sin asignar»; modelo vacío = nombre del equipo', () {
     expect(tiendaDeImei('  '), kImeiSinAsignar);
     expect(tiendaDeImei(' Sucursal '), 'Sucursal');

@@ -698,46 +698,6 @@ function plRecalcularLista(PDO $pdo, int $listaId, ?array $listas = null, ?float
     return $inf;
 }
 
-/**
- * Una lista y las que dependen de ella. Si es una Divisas en modo costo,
- * de ella salen sus listas en Bs y las financiadoras: se recalculan todas
- * las listas en modo costo que sean en Bs o de financiamiento. Si no, solo
- * ella. Devuelve los informes por lista.
- */
-function plRecalcularConDependientes(PDO $pdo, int $listaId): array {
-    $listas = plListas($pdo);
-    $bcv = plTasaBcvActual($pdo);
-    $catalogo = plCatalogo($pdo);
-    $lista = null;
-    foreach ($listas as $l) if ((int)$l['id'] === $listaId) $lista = $l;
-    if ($lista === null) return [];
-    $ids = plEsCosto($lista) ? [$listaId] : [];
-    // Listas en Bs en modo costo que eligieron esta lista como base
-    // (aunque la base esté a mano).
-    if (!plEsBs($lista)) {
-        foreach ($listas as $l) {
-            if (plEsCosto($l) && plEsBs($l) && (int)($l['lista_base_id'] ?? 0) === $listaId) {
-                $ids[] = (int)$l['id'];
-            }
-        }
-    }
-    if ($ids === []) return [];
-    if (plEsCosto($lista) && !plEsBs($lista) && !plEsFinanciamiento($lista)) {
-        foreach ($listas as $l) {
-            if ((int)$l['id'] !== $listaId && plEsCosto($l) && (plEsBs($l) || plEsFinanciamiento($l))) {
-                $ids[] = (int)$l['id'];
-            }
-        }
-    }
-    $ids = array_values(array_unique($ids));
-    $informes = [];
-    foreach ($ids as $id) {
-        $informes[] = plRecalcularLista($pdo, $id, $listas, $bcv, $catalogo);
-        $listas = plListas($pdo);   // la siguiente ve lo que se acaba de guardar
-    }
-    return $informes;
-}
-
 /** Todas las listas en modo costo. */
 function plRecalcularTodas(PDO $pdo): array {
     $listas = plListas($pdo, true);
@@ -951,29 +911,13 @@ function plRespaldar(PDO $pdo, array $listaIds, string $motivo, string $usuario 
     return $ids;
 }
 
-/** Ids de las listas que puede mover una lista (ella y, si es Divisas, las Bs/financiadoras en costo). */
-function plIdsAfectados(array $listas, int $listaId, bool $tambienManualesBs = false): array {
-    $lista = null;
-    foreach ($listas as $l) if ((int)$l['id'] === $listaId) $lista = $l;
-    if ($lista === null) return [];
-    $ids = [$listaId];
-    if (!plEsBs($lista) && !plEsFinanciamiento($lista)) {
-        foreach ($listas as $l) {
-            if ((int)$l['id'] !== $listaId && plEsCosto($l) && (plEsBs($l) || plEsFinanciamiento($l))) {
-                $ids[] = (int)$l['id'];
-            }
-        }
-    }
-    return $ids;
-}
-
 /** Campos de configuración del cálculo que se pueden mandar al ensayar o activar. */
 const PL_CAMPOS_CONFIG = ['pct_sobre_costo', 'monto_adicional_dolares', 'tasa_fija', 'tasa_del_dia',
     'tasa_bs', 'redondear_arriba', 'reglas_pct'];
 
 /**
- * Pone una lista en modo costo con `config` y la recalcula (con sus
- * dependientes). Con `$ensayo` todo se deshace al final. Abre su propia
+ * Pone una lista en modo costo con `config` y recalcula esa lista.
+ * Con `$ensayo` todo se deshace al final. Abre su propia
  * transacción. Devuelve ['ok','ensayo','informes','respaldos'].
  */
 function plActivarCosto(PDO $pdo, int $listaId, array $config, bool $ensayo, string $usuario = ''): array {
@@ -991,8 +935,7 @@ function plActivarCosto(PDO $pdo, int $listaId, array $config, bool $ensayo, str
     try {
         $respaldos = [];
         if (!$ensayo) {
-            // Respaldo de la lista y de todas las listas en costo que puede mover.
-            $respaldos = plRespaldar($pdo, plIdsAfectados($listas, $listaId), 'activar_costo', $usuario);
+            $respaldos = plRespaldar($pdo, [$listaId], 'activar_costo', $usuario);
         }
         $campos = ['modo_precios' => 'costo'];
         foreach (plNormalizarCamposNuevos(array_intersect_key($config, array_flip(PL_CAMPOS_CONFIG))) as $k => $v) {
@@ -1001,12 +944,7 @@ function plActivarCosto(PDO $pdo, int $listaId, array $config, bool $ensayo, str
         }
         $campos = array_intersect_key($campos, array_flip(plColumnasTabla($pdo, 'listas_precios')));
         plGuardarFila($pdo, $listaId, $campos);
-        $informes = plRecalcularConDependientes($pdo, $listaId);
-        if (!$ensayo && plInterruptor($pdo, 'precio_venta_desde_lista')) {
-            $listasAhora = plListas($pdo);
-            $cat = plCatalogo($pdo);
-            foreach (array_keys($cat) as $c) plActualizarVentaProducto($pdo, $c, $listasAhora, $cat);
-        }
+        $informes = [plRecalcularLista($pdo, $listaId)];
         if ($ensayo) {
             $pdo->rollBack();
         } else {
@@ -1084,14 +1022,10 @@ function plEnganchePrepararProducto(PDO $pdo, array $body, ?string $codigo = nul
     return $body;
 }
 
-/** Después de un POST/PUT de listas_precios. Nunca lanza. */
+/** Recalcula la lista editada dentro de la transacción del PUT. */
 function plEngancheLista(PDO $pdo, int $listaId): void {
-    try {
-        if (!plInterruptor($pdo, 'precios_auto_activo')) return;
-        plRecalcularConDependientes($pdo, $listaId);
-    } catch (Throwable $e) {
-        error_log("[precios_listas] lista $listaId: " . $e->getMessage());
-    }
+    if (!plInterruptor($pdo, 'precios_auto_activo')) return;
+    plRecalcularLista($pdo, $listaId);
 }
 
 /** Después de cargar una tasa BCV nueva. Nunca lanza. */

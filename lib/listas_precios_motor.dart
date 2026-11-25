@@ -475,8 +475,8 @@ ResultadoPoblado poblarListaDesdeCatalogo(ListaPrecio lista) {
       sinStock++;
       continue;
     }
-    final porDefecto = lista.precioPorDefecto(p);
     if (previo != null) {
+      final porDefecto = lista.precioPorDefecto(p);
       previo.stockDisponible = stock;
       for (final col in lista.columnas) {
         previo.preciosPorColumna.putIfAbsent(col.nombre, () => porDefecto);
@@ -484,11 +484,7 @@ ResultadoPoblado poblarListaDesdeCatalogo(ListaPrecio lista) {
       nuevos.add(previo);
       preservados++;
     } else {
-      nuevos.add(ItemListaPrecio(
-        producto: p,
-        stockDisponible: stock,
-        preciosPorColumna: {for (final c in lista.columnas) c.nombre: porDefecto},
-      ));
+      nuevos.add(itemNuevoDeLista(lista, p, stock));
       agregados++;
     }
   }
@@ -514,6 +510,16 @@ ResultadoPoblado poblarListaDesdeCatalogo(ListaPrecio lista) {
       sinStock: sinStock);
   debugPrint('[poblarListaDesdeCatalogo] ${lista.nombre}: $r');
   return r;
+}
+
+ItemListaPrecio itemNuevoDeLista(ListaPrecio lista, Producto producto,
+    int stock, {double? tasa}) {
+  final precio = lista.precioPorDefecto(producto, null, tasa);
+  return ItemListaPrecio(
+    producto: producto,
+    stockDisponible: stock,
+    preciosPorColumna: {for (final col in lista.columnas) col.nombre: precio},
+  );
 }
 
 /// Las listas guardadas antes de `es_manual` llegan sin marcas. La primera

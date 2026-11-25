@@ -77,22 +77,27 @@ class PreciosReferencia {
   );
 }
 
-/// Busca los precios de referencia de [codigo] en las listas.
-///
-/// Precio de la financiadora, en este orden (el primero que tenga el
-/// producto gana):
-///   1. La lista que el vendedor eligió al facturar ([nombreLista]).
-///   2. Listas marcadas con esa financiadora (campo `financiadora`,
-///      tolerante a "KRECE." / "Krece").
-///   3. Listas cuyo NOMBRE contiene la financiadora ("Cashea",
-///      "CASHEA TELEFONOS").
-///   4. Cualquier lista con una COLUMNA con ese nombre ("CASHEA").
-/// Dentro de una lista se usa la columna que se llame como la
-/// financiadora y, si no hay, la primera (igual que el Reporte por
-/// Financiadora).
-///
-/// El precio BCV sale de una lista llamada "BCV" o, si no, de una
-/// columna "BCV" de cualquier lista.
+/// Listas que ofrecen un precio para el producto con esa financiadora.
+List<ListaPrecio> listasFinanciadorasPara(
+    List<ListaPrecio> listas, String financiadora, String codigo) {
+  final fin = normalizarFinanciadoraAud(financiadora);
+  if (fin == null) return [];
+  final nombre = fin.toLowerCase();
+  final cod = codigo.trim().toLowerCase();
+  return listas.where((lista) {
+    final coincideLista = normalizarFinanciadoraAud(lista.financiadora) == fin ||
+        lista.nombre.toLowerCase().contains(nombre);
+    return lista.items.any((item) =>
+        item.producto.codigo.trim().toLowerCase() == cod &&
+        (coincideLista && item.preciosPorColumna.values.any((v) => v > 0) ||
+            item.preciosPorColumna.entries.any((e) =>
+                e.key.toLowerCase().contains(nombre) && e.value > 0)));
+  }).toList();
+}
+
+/// Busca el precio BCV y el financiado para [codigo].
+/// Para financiar se prefiere [nombreLista], seguido de la etiqueta de
+/// financiadora, el nombre de la lista y el de la columna.
 PreciosReferencia preciosReferenciaDe({
   required String codigo,
   double? precioVenta,
@@ -115,7 +120,9 @@ PreciosReferencia preciosReferenciaDe({
     return null;
   }
 
-  double? primera(ItemListaPrecio it) {
+  double? primera(ListaPrecio l, ItemListaPrecio it) {
+    final base = l.precioBaseDe(it);
+    if (base > 0) return base;
     for (final v in it.preciosPorColumna.values) {
       if (v > 0) return v;
     }
@@ -123,26 +130,33 @@ PreciosReferencia preciosReferenciaDe({
   }
 
   // ── BCV ──
-  // Una lista en Bs con vista BCV (23/10/2026) guarda Bs y muestra $ BCV:
-  // el precio BCV es el que muestra (`aVista`). En las demás, el guardado.
+  // La factura recibe dólares a BCV. Una lista en Bs guarda el
+  // importe con su propia tasa, que puede ser la de otro día.
+  double enDolares(ListaPrecio l, double v) => l.muestraBcv
+      ? l.aVista(v)
+      : l.esEnBolivares ? redondearPrecio(v / l.tasaEfectiva) : v;
+
   double? bcv;
-  for (final l in listas) {
-    if (_normNombreLista(l.nombre) != 'bcv') continue;
-    final it = itemDe(l);
-    if (it != null) {
-      final v = primera(it);
-      bcv = v == null ? null : l.aVista(v);
-      if (bcv != null) break;
-    }
-  }
-  if (bcv == null) {
+  for (final nivel in [0, 1, 2, 3]) {
     for (final l in listas) {
+      final nombre = _normNombreLista(l.nombre);
+      if (nivel == 0 && nombre != 'bcv') continue;
+      if (nivel == 2 && (l.esFinanciamiento ||
+          (nombre != 'decontado' &&
+              !RegExp(r'\bbcv\b', caseSensitive: false).hasMatch(l.nombre)))) {
+        continue;
+      }
+      if (nivel == 3 && (l.esFinanciamiento ||
+          !(l.muestraBcv || (l.esEnBolivares && nombre == 'contado')))) continue;
       final it = itemDe(l);
       if (it == null) continue;
-      final v = columna(it, (c) => _normNombreLista(c) == 'bcv');
-      bcv = v == null ? null : l.aVista(v);
-      if (bcv != null) break;
+      final explicito = columna(it, (c) => _normNombreLista(c) == 'bcv');
+      final v = explicito ?? (nivel == 1 ? null : primera(l, it));
+      if (v == null) continue;
+      bcv = enDolares(l, v);
+      break;
     }
+    if (bcv != null) break;
   }
 
   // ── Financiadora ──
@@ -154,9 +168,9 @@ PreciosReferencia preciosReferenciaDe({
     final f = finNorm.toLowerCase();
     bool colFin(String c) => c.toLowerCase().contains(f);
     void tomar(ListaPrecio l, ItemListaPrecio it, {bool soloColumna = false}) {
-      final v = columna(it, colFin) ?? (soloColumna ? null : primera(it));
+      final v = columna(it, colFin) ?? (soloColumna ? null : primera(l, it));
       if (v == null) return;
-      fin = v;
+      fin = enDolares(l, v);
       listaFin = l.nombre;
       final p = l.pctInicialDe(it);
       pct = p > 0 ? p : null;
@@ -165,7 +179,8 @@ PreciosReferencia preciosReferenciaDe({
     // 1. Lista elegida al facturar.
     final nl = _normNombreLista(nombreLista ?? '');
     if (nl.isNotEmpty) {
-      for (final l in listas) {
+      for (final l in [...listas.where((l) => l.nombre == nombreLista),
+        ...listas.where((l) => l.nombre != nombreLista)]) {
         if (_normNombreLista(l.nombre) != nl) continue;
         final it = itemDe(l);
         if (it != null) { tomar(l, it); if (fin != null) break; }

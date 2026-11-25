@@ -319,10 +319,18 @@ comprobar('POST: la venta la pone la lista (50 + 8 %)', 54.0, $b['precio_venta']
 $b = plEnganchePrepararProducto($pdo, ['precio_venta' => 3.5], 'SIM');
 comprobar('categoría sin lista en costo: se respeta', 3.5, $b['precio_venta']);
 
-// Guardar la Divisas mueve sus dependientes en costo.
+// Guardar actualiza únicamente la lista editada.
+costo($pdo, 59, ['pct_sobre_costo' => 40]);
+$antesBs = fila($pdo, 65);
+$antesFinanciamiento = fila($pdo, 59);
+costo($pdo, 58, ['pct_sobre_costo' => 10]);
+plEngancheLista($pdo, 58);
+comprobar('lista: Divisas aplica su nuevo porcentaje', 132.0, precio($pdo, 58, 'RED13'));
+comprobar('lista: guardar Divisas deja intacta la lista Bs', $antesBs, fila($pdo, 65));
+comprobar('lista: guardar Divisas deja intacto el financiamiento', $antesFinanciamiento, fila($pdo, 59));
+costo($pdo, 58, ['pct_sobre_costo' => 8]);
 $pdo->exec('UPDATE listas_precios SET tasa_bs = 1000 WHERE id = 58');
 plEngancheLista($pdo, 58);
-comprobar('lista: Equipos Bs con la tasa manual nueva: 129,60 × 1000', 129600.0, precio($pdo, 65, 'RED13'));
 // Tasa BCV nueva.
 $cambiadas = plAplicarTasaBcv($pdo, 900);
 comprobar('tasa BCV: la lista Bs con tasa manual no cambia de precio', 129600.0, precio($pdo, 65, 'RED13'));
@@ -422,9 +430,15 @@ comprobar('una clave nueva por ítem se conserva', 'x', $cuerpo['items'][0]['cla
 
 // ════ 8. Ensayo, activación y vuelta atrás ════
 $pdo = base();
+costo($pdo, 65);
+costo($pdo, 59);
+plPonerInterruptor($pdo, 'precio_venta_desde_lista', true);
+$antesBs = fila($pdo, 65);
+$antesFinanciamiento = fila($pdo, 59);
 $antes = foto($pdo);
 $res = plActivarCosto($pdo, 58, ['pct_sobre_costo' => 8], true);
 comprobar('ensayo: informa el cambio', 1, $res['informes'][0]['precios']);
+comprobar('ensayo: solo informa sobre la lista editada', [58], array_column($res['informes'], 'lista_id'));
 comprobar('ensayo: no guarda nada', $antes, foto($pdo));
 comprobar('ensayo: sigue en manual', 'manual', fila($pdo, 58)['modo_precios']);
 comprobar('ensayo: no enciende nada', false, plInterruptor($pdo, 'precios_auto_activo'));
@@ -434,7 +448,9 @@ comprobar('activar: precio 108', 108.0, precio($pdo, 58, 'RED13'));
 comprobar('activar: guarda la configuración', 900.0, (float)fila($pdo, 58)['tasa_bs']);
 comprobar('activar: enciende los enganches', true, plInterruptor($pdo, 'precios_auto_activo'));
 comprobar('activar: un respaldo', 1, count($res['respaldos']));
-comprobar('activar: las demás listas (manuales) no se tocan', 125000.0, precio($pdo, 65, 'RED13'));
+comprobar('activar: la lista Bs en costo queda intacta', $antesBs, fila($pdo, 65));
+comprobar('activar: la financiada en costo queda intacta', $antesFinanciamiento, fila($pdo, 59));
+comprobar('activar: conserva el precio de venta del inventario', 125.0, venta($pdo, 'RED13'));
 comprobar('revertir', true, plRevertir($pdo, 58));
 comprobar('revertir: el precio de antes', 77.0, precio($pdo, 58, 'RED13'));
 comprobar('revertir: la marca de manual de antes', 1, manual($pdo, 58, 'RED13'));
@@ -495,15 +511,32 @@ comprobar('base en costo: (108 + 10 %) × BCV', plRedondear2(118.8 * BCV), $v['p
 $sinPct = $porId[65]; $sinPct['pct_sobre_costo'] = 0;
 comprobar('con 0 % en la lista Bs da lo de antes (108 × BCV)', plRedondear2(108 * BCV),
     plValores($sinPct, $listas, 100, BCV, $red)['precio']);
-// Una lista Bs en costo cuya base está A MANO se recalcula al guardar la base.
+// La lista Bs sigue usando el precio de su base cuando se recalcula ella.
 $pdo = base();
 $pdo->exec('UPDATE listas_precios SET lista_base_id = 58 WHERE id = 65');
 costo($pdo, 65, ['pct_sobre_costo' => 10]);
-$inf = plRecalcularConDependientes($pdo, 58);
-comprobar('guardar la base a mano recalcula su lista Bs en costo', [65], array_column($inf, 'lista_id'));
-comprobar('y su precio = (77 + 10 %) × BCV', plRedondear2(84.7 * BCV), precio($pdo, 65, 'RED13'));
+plPonerInterruptor($pdo, 'precios_auto_activo', true);
+$antesBs = fila($pdo, 65);
+plEngancheLista($pdo, 58);
+comprobar('guardar la base a mano conserva su lista Bs', $antesBs, fila($pdo, 65));
+plEngancheLista($pdo, 65);
+comprobar('guardar Bs usa la base: (77 + 10 %) × BCV', plRedondear2(84.7 * BCV), precio($pdo, 65, 'RED13'));
 comprobar('la base a mano no se toca', 77.0, precio($pdo, 58, 'RED13'));
-comprobar('una base manual sin listas Bs que la elijan: nada', [], plRecalcularConDependientes($pdo, 66));
+
+// Cambiar el porcentaje de Krece conserva las otras listas, incluso una
+// lista Bs en costo que tenga Krece como base.
+$pdo = base();
+$pdo->exec("UPDATE listas_precios SET nombre = 'Krece', financiadora = 'Krece' WHERE id = 59");
+costo($pdo, 58, ['pct_sobre_costo' => 8]);
+costo($pdo, 59, ['pct_sobre_costo' => 55]);
+costo($pdo, 65, ['lista_base_id' => 59]);
+plPonerInterruptor($pdo, 'precios_auto_activo', true);
+$otrasFilas = 'SELECT * FROM listas_precios WHERE id <> 59 ORDER BY id';
+$antes = $pdo->query($otrasFilas)->fetchAll(PDO::FETCH_ASSOC);
+plEngancheLista($pdo, 59);
+comprobar('guardar Krece aplica su nuevo porcentaje', 167.4, precio($pdo, 59, 'RED13'));
+comprobar('guardar Krece conserva todas las otras listas', $antes,
+    $pdo->query($otrasFilas)->fetchAll(PDO::FETCH_ASSOC));
 // PUT de la app: el campo se normaliza; la app vieja (sin el campo) no lo borra.
 comprobar('lista_base_id se guarda como entero', ['lista_base_id' => 58],
     plNormalizarCamposNuevos(['lista_base_id' => '58']));

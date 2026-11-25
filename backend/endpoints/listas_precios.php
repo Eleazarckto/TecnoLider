@@ -14,8 +14,8 @@
 //     (1.0.17) que no manda `es_manual` ni los campos nuevos no los borra.
 //   · POST ?accion=precios_costo → ensayo / activar / desactivar el cálculo
 //     desde el costo de UNA lista (rol Dueño, Administrador o Gerente).
-//   · Enganche dormido tras POST/PUT: si `precios_auto_activo` = 1 y la
-//     lista está en modo costo, se recalcula ella y sus dependientes.
+//   · En un PUT con `precios_auto_activo` = 1 se recalcula la lista
+//     editada si está en modo costo.
 // Las formas de respuesta de siempre no cambian.
 require_once __DIR__ . '/../lib/precios_listas.php';
 
@@ -109,7 +109,7 @@ if ($metodo === 'GET') {
 //    "usuario_correo": "...", "config": { pct_sobre_costo, monto_adicional_dolares,
 //    tasa_fija, tasa_del_dia, tasa_bs, redondear_arriba, reglas_pct } }
 //  El ensayo hace todo dentro de una transacción y la deshace: responde
-//  cuántos precios cambiarían en cada lista. Activar guarda antes un
+//  cuántos precios cambiarían en la lista elegida. Activar guarda antes un
 //  respaldo en `listas_precios_respaldos`.
 if ($metodo === 'POST' && get_param('accion') === 'precios_costo') {
     $body = json_body();
@@ -165,6 +165,7 @@ if ($metodo === 'PUT') {
         $pdo->beginTransaction();
         $body = _normalizar_lista(plFusionarCuerpoPut($pdo, $id, $body));
         $rows = actualizar('listas_precios', $id, $body, $columnasPermitidas);
+        plEngancheLista($pdo, (int)$id);
         // La marca del sondeo, aunque la columna se haya creado sin ON UPDATE.
         if (plTieneColumna($pdo, 'listas_precios', 'actualizado_en')) {
             $pdo->prepare('UPDATE listas_precios SET actualizado_en = CURRENT_TIMESTAMP WHERE id = ?')
@@ -175,8 +176,6 @@ if ($metodo === 'PUT') {
         if ($pdo->inTransaction()) $pdo->rollBack();
         json_error('Error al actualizar lista: ' . $e->getMessage(), 500);
     }
-    // Dormido salvo precios_auto_activo = 1 y lista en modo costo.
-    plEngancheLista($pdo, (int)$id);
     json_response(['ok' => true, 'rows' => $rows]);
 }
 

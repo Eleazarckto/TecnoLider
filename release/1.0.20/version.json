@@ -1,0 +1,18 @@
+{
+  "android": {
+    "version": "1.0.20",
+    "url": "https://sistemasceccato.com/tecnolider/updates/tecnolider-1.0.20.apk",
+    "obligatoria": false,
+    "notas": "Al guardar un porcentaje se actualiza solo la lista de precios editada. Al registrar IMEIs puedes buscar equipos por nombre, marca, modelo o SKU.",
+    "sha256": "ef9938d92c3efa29da89d1e1cdf57358ef0c59998943588388a2604d928dec6c",
+    "tamano": 106260682
+  },
+  "windows": {
+    "version": "1.0.20",
+    "url": "https://sistemasceccato.com/tecnolider/updates/tecnolider-windows-1.0.20.zip",
+    "obligatoria": false,
+    "notas": "Al guardar un porcentaje se actualiza solo la lista de precios editada. Al registrar IMEIs puedes buscar equipos por nombre, marca, modelo o SKU.",
+    "sha256": "2e0b6d1e95d0cd055e93168dbeece1f3a0d3a80e45f02d5f4e46e7d0b551a11b",
+    "tamano": 18471287
+  }
+}
